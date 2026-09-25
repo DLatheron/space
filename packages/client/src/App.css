@@ -1,0 +1,102 @@
+:root {
+    color-scheme: dark;
+    font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+    line-height: 1.45;
+    background: #0b1020;
+    color: #e8eefc;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+}
+
+code {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 0.9em;
+}
+
+.app {
+    max-width: 42rem;
+    margin: 0 auto;
+    padding: 2rem 1.25rem 3rem;
+    display: grid;
+    gap: 1.5rem;
+}
+
+.app__header h1 {
+    margin: 0 0 0.35rem;
+    font-size: 2rem;
+    letter-spacing: 0.04em;
+}
+
+.app__status {
+    margin: 0;
+    color: #9ab3d4;
+}
+
+.app__actions,
+.main-menu,
+.main-menu__join {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    align-items: end;
+}
+
+button {
+    appearance: none;
+    border: 1px solid #3a4d73;
+    background: #16233f;
+    color: inherit;
+    padding: 0.55rem 0.9rem;
+    border-radius: 0.35rem;
+    cursor: pointer;
+}
+
+button:hover {
+    background: #1d2d50;
+}
+
+label {
+    display: grid;
+    gap: 0.35rem;
+    font-size: 0.85rem;
+    color: #9ab3d4;
+}
+
+input {
+    min-width: 10rem;
+    padding: 0.5rem 0.65rem;
+    border-radius: 0.35rem;
+    border: 1px solid #3a4d73;
+    background: #0f1730;
+    color: inherit;
+}
+
+.main-menu__hint {
+    width: 100%;
+    margin: 0;
+    color: #7f93b5;
+    font-size: 0.9rem;
+}
+
+.app__log {
+    border-top: 1px solid #243355;
+    padding-top: 1rem;
+}
+
+.app__log h2 {
+    margin: 0 0 0.5rem;
+    font-size: 1rem;
+}
+
+.app__log ul {
+    margin: 0;
+    padding-left: 1.1rem;
+    color: #b7c7e4;
+    font-size: 0.9rem;
+}

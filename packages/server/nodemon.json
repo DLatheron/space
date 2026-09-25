@@ -1,0 +1,6 @@
+{
+    "watch": ["src", "../misc/dist", "../shared-data/dist"],
+    "ext": "ts,js,json",
+    "exec": "node --import tsx src/server.ts",
+    "delay": 300
+}

@@ -1,0 +1,25 @@
+{
+    "name": "@space/server",
+    "version": "0.0.0",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "build": "tsc -b",
+        "dev": "nodemon",
+        "start": "node dist/server.js",
+        "clean": "rm -rf dist tsconfig.tsbuildinfo"
+    },
+    "dependencies": {
+        "@space/misc": "workspace:*",
+        "@space/shared-data": "workspace:*",
+        "express": "^5.1.0",
+        "ws": "^8.20.1",
+        "zod": "^4.4.3"
+    },
+    "devDependencies": {
+        "@types/express": "^5.0.2",
+        "@types/ws": "^8.18.1",
+        "nodemon": "^3.1.10",
+        "tsx": "^4.19.4"
+    }
+}

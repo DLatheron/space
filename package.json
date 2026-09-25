@@ -1,0 +1,43 @@
+{
+    "name": "space",
+    "private": true,
+    "type": "module",
+    "engines": {
+        "node": ">=24"
+    },
+    "scripts": {
+        "build": "pnpm -r run build",
+        "dev": "concurrently -k -n shared,misc,maths,server,client -c yellow,blue,green,red,magenta \"pnpm dev:shared\" \"pnpm dev:misc\" \"pnpm dev:maths\" \"pnpm dev:server\" \"pnpm dev:client\"",
+        "dev:shared": "pnpm --filter @space/shared-data dev",
+        "dev:misc": "pnpm --filter @space/misc dev",
+        "dev:maths": "pnpm --filter @space/maths dev",
+        "dev:server": "pnpm --filter @space/server dev",
+        "dev:client": "pnpm --filter @space/client dev",
+        "test": "vitest run",
+        "test:watch": "vitest",
+        "lint": "eslint .",
+        "lint:fix": "eslint . --fix",
+        "format": "prettier --write .",
+        "format:check": "prettier --check ."
+    },
+    "pnpm": {
+        "onlyBuiltDependencies": ["esbuild"]
+    },
+    "devDependencies": {
+        "@eslint/js": "^9.28.0",
+        "@types/node": "^24.0.0",
+        "concurrently": "^9.1.2",
+        "eslint": "^9.28.0",
+        "eslint-config-prettier": "^10.1.5",
+        "eslint-plugin-react-hooks": "^5.2.0",
+        "eslint-plugin-react-refresh": "^0.4.20",
+        "globals": "^16.2.0",
+        "prettier": "^3.5.3",
+        "typescript": "^5.8.3",
+        "typescript-eslint": "^8.33.1",
+        "vitest": "^3.2.4"
+    },
+    "dependencies": {
+        "zod": "^4.4.3"
+    }
+}
