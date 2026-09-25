@@ -10,6 +10,7 @@
         "clean": "rm -rf dist tsconfig.tsbuildinfo"
     },
     "dependencies": {
+        "@space/maths": "workspace:*",
         "@space/misc": "workspace:*",
         "@space/shared-data": "workspace:*",
         "react": "^19.1.0",

@@ -1,5 +1,11 @@
 import { z } from "zod";
-import { ClientSummary, GameId } from "./PrimitiveTypes.js";
+import {
+    ClientSummary,
+    GameId,
+    HexKey,
+    SideId,
+    TileView
+} from "./PrimitiveTypes.js";
 
 export const ServerToClientMessage = z.discriminatedUnion("type", [
     z.object({
@@ -21,6 +27,27 @@ export const ServerToClientMessage = z.discriminatedUnion("type", [
     z.object({
         type: z.literal("server:error"),
         payload: z.object({ message: z.string() })
+    }),
+    z.object({
+        type: z.literal("server:map:init"),
+        payload: z.object({
+            width: z.number().int().positive(),
+            height: z.number().int().positive(),
+            /** Center-to-vertex size; point-to-point = 2 * hexSize. */
+            hexSize: z.number().positive(),
+            sideId: SideId,
+            tiles: z.array(TileView),
+            visible: z.array(HexKey)
+        })
+    }),
+    z.object({
+        type: z.literal("server:tiles:update"),
+        payload: z.object({
+            tiles: z.array(TileView),
+            visible: z.array(HexKey),
+            /** Entity ids that should be scrubbed from any remembered tile. */
+            forgetEntityIds: z.array(z.string()).optional()
+        })
     })
 ]);
 export type ServerToClientMessage = z.infer<typeof ServerToClientMessage>;

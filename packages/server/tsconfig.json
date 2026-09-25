@@ -4,7 +4,11 @@
         "rootDir": "src",
         "outDir": "dist"
     },
-    "references": [{ "path": "../misc" }, { "path": "../shared-data" }],
+    "references": [
+        { "path": "../maths" },
+        { "path": "../misc" },
+        { "path": "../shared-data" }
+    ],
     "include": ["src"],
     "exclude": ["src/**/*.test.ts"]
 }

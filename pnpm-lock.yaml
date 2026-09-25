@@ -51,6 +51,9 @@ importers:
 
   packages/client:
     dependencies:
+      '@space/maths':
+        specifier: workspace:*
+        version: link:../maths
       '@space/misc':
         specifier: workspace:*
         version: link:../misc
@@ -96,6 +99,9 @@ importers:
 
   packages/server:
     dependencies:
+      '@space/maths':
+        specifier: workspace:*
+        version: link:../maths
       '@space/misc':
         specifier: workspace:*
         version: link:../misc

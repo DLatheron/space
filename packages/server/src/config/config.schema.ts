@@ -6,6 +6,11 @@ const Config = z
     .object({
         port: z.int().min(1024).max(65534).optional().default(3000),
         highlanderGameMode: z.boolean().optional().default(true),
+        mapWidth: z.int().positive().optional().default(50),
+        mapHeight: z.int().positive().optional().default(50),
+        hexPointToPoint: z.number().positive().optional().default(100),
+        visionRange: z.int().nonnegative().optional().default(6),
+        mapSeed: z.int().optional(),
         logLevels: z
             .object({
                 gameManager: LogLevel.optional(),

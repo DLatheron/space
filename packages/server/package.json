@@ -7,9 +7,11 @@
         "build": "tsc -b",
         "dev": "nodemon",
         "start": "node dist/server.js",
-        "clean": "rm -rf dist tsconfig.tsbuildinfo"
+        "clean": "rm -rf dist tsconfig.tsbuildinfo",
+        "generate:clouds": "node scripts/generate-clouds.mjs"
     },
     "dependencies": {
+        "@space/maths": "workspace:*",
         "@space/misc": "workspace:*",
         "@space/shared-data": "workspace:*",
         "express": "^5.1.0",

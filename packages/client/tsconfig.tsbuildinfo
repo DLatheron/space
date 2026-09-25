@@ -1,1 +1,1 @@
-{"root":["./src/app.tsx","./src/gamesocket.ts","./src/main.tsx","./src/hooks/index.ts","./src/hooks/useclientid.ts","./src/hooks/useservermessagemanager.ts","./src/hooks/useserversocket.ts","./src/pages/mainmenu.tsx"],"version":"5.9.3"}
+{"root":["./src/app.tsx","./src/gamesocket.ts","./src/main.tsx","./src/components/canvasloop.ts","./src/components/hexmapview.tsx","./src/hooks/index.ts","./src/hooks/useclientid.ts","./src/hooks/useservermessagemanager.ts","./src/hooks/useserversocket.ts","./src/pages/mainmenu.tsx","./src/world/hexworld.ts"],"version":"5.9.3"}

@@ -2,15 +2,19 @@ import {
     ClientId,
     ClientToServerMessage,
     GameId,
-    ServerToClientMessage
+    ServerToClientMessage,
+    SideId
 } from "@space/shared-data";
 import { CastToArray, Logger, MessageManager } from "@space/misc";
 import { Client } from "./Client.js";
 import { ClientManager } from "./ClientManager.js";
 import { gameManager } from "./GameManager.js";
 import { config } from "../config/config.schema.js";
+import { generateSpaceMap, type SpaceMap } from "./map/generateSpaceMap.js";
+import { Side } from "./Side.js";
 
 const GAME_ID_CHARSET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+const DEFAULT_SIDE_IDS: SideId[] = ["alpha", "beta"];
 
 function randomSegment(length: number): string {
     let result = "";
@@ -35,8 +39,7 @@ export type ClientMessageManager = MessageManager<
 >;
 
 /**
- * Minimal authoritative game session placeholder.
- * Owns clients and routes typed JSON messages; game logic comes later.
+ * Authoritative game session: hex map, sides, shared per-side visibility.
  */
 export class Game {
     readonly logger: Logger;
@@ -45,7 +48,10 @@ export class Game {
     private readonly _ownerId: ClientId;
     private readonly _clientManager: ClientManager;
     private readonly _messageManager: ClientMessageManager;
+    private readonly _sides = new Map<SideId, Side>();
+    private readonly _map: SpaceMap;
     private _isDestroying = false;
+    private _nextSideIndex = 0;
 
     constructor(ownerId: ClientId) {
         const gameId = generateGameId();
@@ -56,15 +62,40 @@ export class Game {
         this._clientManager = new ClientManager();
         this._messageManager = new MessageManager({ game: this });
 
+        for (const sideId of DEFAULT_SIDE_IDS) {
+            this._sides.set(sideId, new Side(sideId));
+        }
+
+        const seed = config.mapSeed ?? Math.floor(Math.random() * 1_000_000_000);
+        this._map = generateSpaceMap({
+            width: config.mapWidth,
+            height: config.mapHeight,
+            hexSize: config.hexPointToPoint / 2,
+            seed,
+            sideIds: DEFAULT_SIDE_IDS
+        });
+
+        for (const side of this._sides.values()) {
+            side.recomputeVisibility(this._map, config.visionRange);
+        }
+
         this._registerMessageHandlers();
-        this.logger.info("Created game", this._id, "owned by", ownerId);
+        this.logger.info(
+            "Created game",
+            this._id,
+            "owned by",
+            ownerId,
+            "map",
+            `${this._map.width}x${this._map.height}`,
+            "seed",
+            seed
+        );
     }
 
     get gameId(): GameId {
         return this._id;
     }
 
-    /** Alias used by create handler collision check. */
     get id(): GameId {
         return this._id;
     }
@@ -81,6 +112,10 @@ export class Game {
         return this._clientManager.clients.length;
     }
 
+    get map(): SpaceMap {
+        return this._map;
+    }
+
     private _registerMessageHandlers() {
         this._messageManager.registerHandler("client:ping", (_context, payload, from) => {
             from.sendMessage({ type: "server:pong", payload: { nonce: payload.nonce } });
@@ -88,6 +123,30 @@ export class Game {
 
         this._messageManager.registerHandler("client:rename", (_context, payload, from) => {
             from.name = payload.name;
+        });
+    }
+
+    private _assignSide(client: Client): Side {
+        const sideIds = Array.from(this._sides.keys());
+        const sideId = sideIds[this._nextSideIndex % sideIds.length];
+        this._nextSideIndex += 1;
+        const side = this._sides.get(sideId)!;
+        client.sideId = side.id;
+        side.addClient(client.id);
+        return side;
+    }
+
+    private _sendMapInit(client: Client, side: Side) {
+        client.sendMessage({
+            type: "server:map:init",
+            payload: {
+                width: this._map.width,
+                height: this._map.height,
+                hexSize: this._map.hexSize,
+                sideId: side.id,
+                tiles: side.buildTileViews(this._map),
+                visible: side.visibleKeys()
+            }
         });
     }
 
@@ -105,6 +164,11 @@ export class Game {
     }
 
     removeClient(clientId: ClientId): boolean {
+        const client = this._clientManager.findClient(clientId);
+        if (client?.sideId) {
+            this._sides.get(client.sideId)?.removeClient(clientId);
+        }
+
         const removed = this._clientManager.removeClient(clientId);
 
         if (removed && this.numClients === 0 && !this._isDestroying) {
@@ -128,6 +192,12 @@ export class Game {
             type: "server:hello",
             payload: { gameId: this.gameId }
         });
+
+        const side = client.sideId
+            ? (this._sides.get(client.sideId) ?? this._assignSide(client))
+            : this._assignSide(client);
+
+        this._sendMapInit(client, side);
 
         this.broadcastMessage(
             {
@@ -162,6 +232,15 @@ export class Game {
             if (!excludes.includes(client.id)) {
                 client.sendMessage(message);
             }
+        }
+    }
+
+    /** Send a tiles/visibility update to every client on a side. */
+    broadcastToSide(sideId: SideId, message: ServerToClientMessage) {
+        const side = this._sides.get(sideId);
+        if (!side) return;
+        for (const clientId of side.clientIds) {
+            this.findClient(clientId)?.sendMessage(message);
         }
     }
 

@@ -1,4 +1,4 @@
-import type { ClientId, ServerToClientMessage } from "@space/shared-data";
+import type { ClientId, ServerToClientMessage, SideId } from "@space/shared-data";
 import { WebSocket } from "ws";
 import type { Game } from "./Game.js";
 
@@ -9,12 +9,14 @@ export class Client {
     private readonly _game: Game;
     private readonly _id: ClientId;
     private _name: string;
+    private _sideId: SideId | null;
     private _socket: WebSocket | null;
 
     constructor({ id, name }: { id: ClientId; name: string }, game: Game) {
         this._game = game;
         this._id = id;
         this._name = name;
+        this._sideId = null;
         this._socket = null;
     }
 
@@ -28,6 +30,14 @@ export class Client {
 
     set name(value: string) {
         this._name = value;
+    }
+
+    get sideId(): SideId | null {
+        return this._sideId;
+    }
+
+    set sideId(value: SideId | null) {
+        this._sideId = value;
     }
 
     get socket(): WebSocket | null {
