@@ -82,7 +82,7 @@ export class Side {
     }
 
     /**
-     * Recompute visibility from this side's ships, refresh memory of visible
+     * Recompute visibility from this side's ships and planets, refresh memory of visible
      * hexes and scrub stale sightings of entities whose position is now known.
      */
     recomputeVisibility(entities: EntityManager, visionRange: number): VisibilityDiff {
@@ -93,8 +93,9 @@ export class Side {
         if (this.fullVisibility) {
             forEachTile(map, (tile) => nextVisible.add(tileKey(tile)));
         } else {
-            for (const ship of ownShips) {
-                for (const hex of axialRange(ship, visionRange)) {
+            const ownPlanets = entities.ofKind("planet").filter((p) => p.sideId === this.id);
+            for (const source of [...ownShips, ...ownPlanets]) {
+                for (const hex of axialRange(source, visionRange)) {
                     if (findTileByAxial(map, hex.q, hex.r)) {
                         nextVisible.add(axialKey(hex.q, hex.r));
                     }

@@ -15,6 +15,8 @@ const Config = z
         revealMap: z.boolean().optional().default(false),
         /** Every hex is visible to every side at all times (implies explored). */
         fullVisibility: z.boolean().optional().default(false),
+        /** Structures and ships complete as soon as they are ordered (cost is still paid). */
+        instantBuild: z.boolean().optional().default(false),
         logLevels: z
             .object({
                 gameManager: LogLevel.optional(),

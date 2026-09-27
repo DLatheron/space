@@ -7,6 +7,9 @@ import {
     type Axial
 } from "@space/maths";
 import {
+    HOME_PLANET_LEVEL,
+    PLANET_LEVEL_MAX,
+    PLANET_LEVEL_MIN,
     SHIP_TYPES,
     type EntityId,
     type ShipType,
@@ -205,7 +208,7 @@ function populateSystem(ctx: GenContext, system: StarSystem): EntityOf<"planet">
         const tile = pickEmptyFrom(ctx, ring(system.center, randInt(rng, 2, 4)));
         if (!tile) continue;
         planets.push(
-            entities.add({
+            entities.add<EntityOf<"planet">>({
                 id: newId("planet"),
                 kind: "planet",
                 name: `${system.name} ${romanNumeral(i + 1)}`,
@@ -213,8 +216,7 @@ function populateSystem(ctx: GenContext, system: StarSystem): EntityOf<"planet">
                 r: tile.r,
                 sideId: null,
                 systemId,
-                food: randInt(rng, 0, 5),
-                industry: randInt(rng, 0, 5),
+                level: randInt(rng, PLANET_LEVEL_MIN, PLANET_LEVEL_MAX),
                 scale: 0.45 + rng() * 0.35
             })
         );
@@ -394,17 +396,17 @@ function placeStartingFleets(
     systems: StarSystem[],
     planetsBySystem: Map<SystemId, EntityOf<"planet">[]>
 ): void {
-    const { rng, entities, newId } = ctx;
+    const { entities, newId } = ctx;
 
     for (const system of systems) {
         const sideId = system.homeSideId;
         if (!sideId) continue;
 
-        let home = planetsBySystem.get(system.id)?.[0];
+        let home: EntityOf<"planet"> | undefined = planetsBySystem.get(system.id)?.[0];
         if (!home) {
             const tile = pickEmptyFrom(ctx, ring(system.center, 2));
             if (!tile) continue;
-            home = entities.add({
+            home = entities.add<EntityOf<"planet">>({
                 id: newId("planet"),
                 kind: "planet",
                 name: `${system.name} I`,
@@ -412,17 +414,16 @@ function placeStartingFleets(
                 r: tile.r,
                 sideId: null,
                 systemId: system.id,
+                level: HOME_PLANET_LEVEL,
                 scale: 0.6
             });
         }
         home.sideId = sideId;
         home.name = `${sideId.charAt(0).toUpperCase()}${sideId.slice(1)} Prime`;
-        home.food = Math.max(home.food ?? 0, 3);
-        home.industry = Math.max(home.industry ?? 0, 3);
+        home.level = HOME_PLANET_LEVEL;
 
-        const shipCount = randInt(rng, 1, 2);
-        for (let i = 0; i < shipCount; i++) {
-            const shipType = STARTING_SHIP_TYPES[i % STARTING_SHIP_TYPES.length];
+        for (let i = 0; i < STARTING_SHIP_TYPES.length; i++) {
+            const shipType = STARTING_SHIP_TYPES[i];
             const template = SHIP_TYPES[shipType];
             const tile = pickEmptyFrom(ctx, ring(home, 1)) ?? pickEmptyFrom(ctx, ring(home, 2));
             if (!tile) break;

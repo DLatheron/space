@@ -2,6 +2,7 @@ import {
     AxialCoord,
     BattleId,
     BattleInfo,
+    BuildItem,
     ClientId,
     ClientToServerMessage,
     EntityId,
@@ -17,6 +18,7 @@ import { gameManager } from "./GameManager.js";
 import { axialKey } from "@space/maths";
 import { config } from "../config/config.schema.js";
 import { BattleManager } from "./Battle.js";
+import { EconomyManager } from "./EconomyManager.js";
 import type { EntityManager } from "./EntityManager.js";
 import { generateSpaceMap, type SpaceMap, type StarSystem } from "./map/generateSpaceMap.js";
 import { Side, type VisibilityDiff } from "./Side.js";
@@ -63,6 +65,7 @@ export class Game {
     private readonly _systems: StarSystem[];
     private readonly _turns: TurnManager;
     private readonly _battles: BattleManager;
+    private readonly _economy: EconomyManager;
     private _isDestroying = false;
     private _nextSideIndex = 0;
 
@@ -90,7 +93,10 @@ export class Game {
         this._map = galaxy.map;
         this._entities = galaxy.entities;
         this._systems = galaxy.systems;
-        this._turns = new TurnManager(this._sides.keys(), this._entities);
+        this._economy = new EconomyManager(this._entities, this._sides.keys(), {
+            instantBuild: config.instantBuild
+        });
+        this._turns = new TurnManager(this._sides.keys(), this._entities, this._economy);
         this._battles = new BattleManager(this._entities);
 
         for (const side of this._sides.values()) {
@@ -153,6 +159,10 @@ export class Game {
         return this._battles;
     }
 
+    get economy(): EconomyManager {
+        return this._economy;
+    }
+
     private _registerMessageHandlers() {
         this._messageManager.registerHandler("client:ping", (_context, payload, from) => {
             from.sendMessage({ type: "server:pong", payload: { nonce: payload.nonce } });
@@ -173,6 +183,21 @@ export class Game {
         this._messageManager.registerHandler("client:battle:resolve", (_context, payload, from) => {
             this._handleBattleResolve(from, payload.battleId, payload.winnerSideId);
         });
+
+        this._messageManager.registerHandler("client:planet:build", (_context, payload, from) => {
+            this._handlePlanetBuild(from, payload.planetId, payload.item);
+        });
+
+        this._messageManager.registerHandler("client:planet:cancel", (_context, payload, from) => {
+            this._handlePlanetCancel(from, payload.planetId, payload.index);
+        });
+
+        this._messageManager.registerHandler(
+            "client:planet:colonise",
+            (_context, payload, from) => {
+                this._handlePlanetColonise(from, payload.planetId, payload.shipId);
+            }
+        );
     }
 
     private _sendError(client: Client, message: string) {
@@ -268,6 +293,9 @@ export class Game {
         }
 
         this._refreshVisibility([axialKey(q, r)], result.destroyedShipIds);
+        if (result.destroyedShipIds.length > 0) {
+            this._sendEconomyState(result.loserSideId);
+        }
     }
 
     private _handleTurnEnd(client: Client) {
@@ -276,13 +304,72 @@ export class Game {
             return;
         }
 
-        const { advanced, state } = this._turns.endTurn(client.sideId);
+        const { advanced, state, economy } = this._turns.endTurn(client.sideId);
         this.logger.info("Side", client.sideId, "ended turn", state);
 
         if (advanced) {
-            this._sendShipRefresh();
+            if (economy && economy.completed.length > 0) {
+                this.logger.info("Builds completed", economy.completed);
+            }
+            // Ship hexes (spawns included) are resent so clients see restored MP.
+            const shipHexes = this._entities.ofKind("ship").map((ship) => axialKey(ship.q, ship.r));
+            this._refreshVisibility(shipHexes);
+            for (const sideId of this._sides.keys()) this._sendEconomyState(sideId);
         }
         this._broadcastTurnState();
+    }
+
+    private _handlePlanetBuild(client: Client, planetId: EntityId, item: BuildItem) {
+        const result = this._economy.build(client.sideId, planetId, item);
+        if (!result.ok) {
+            this.logger.warn("Rejected build from", client.id, result.error);
+            this._sendError(client, result.error);
+            return;
+        }
+        this.logger.info(
+            "Side",
+            client.sideId,
+            result.completed ? "built" : "queued",
+            item,
+            "on",
+            planetId
+        );
+        if (result.spawnedShip) {
+            this._refreshVisibility([axialKey(result.spawnedShip.q, result.spawnedShip.r)]);
+        }
+        this._sendEconomyState(client.sideId!);
+    }
+
+    private _handlePlanetCancel(client: Client, planetId: EntityId, index: number) {
+        const result = this._economy.cancel(client.sideId, planetId, index);
+        if (!result.ok) {
+            this.logger.warn("Rejected cancel from", client.id, result.error);
+            this._sendError(client, result.error);
+            return;
+        }
+        this.logger.info("Side", client.sideId, "cancelled entry", index, "on", planetId);
+        this._sendEconomyState(client.sideId!);
+    }
+
+    private _handlePlanetColonise(client: Client, planetId: EntityId, shipId: EntityId) {
+        const result = this._economy.colonise(client.sideId, planetId, shipId);
+        if (!result.ok) {
+            this.logger.warn("Rejected colonise from", client.id, result.error);
+            this._sendError(client, result.error);
+            return;
+        }
+        const { planet, consumedShipId } = result;
+        this.logger.info("Side", client.sideId, "colonised", planet.id, "using", consumedShipId);
+        this._refreshVisibility([axialKey(planet.q, planet.r)], [consumedShipId]);
+        this._sendEconomyState(client.sideId!);
+    }
+
+    private _sendEconomyState(sideId: SideId) {
+        if (!this._sides.has(sideId)) return;
+        this.broadcastToSide(sideId, {
+            type: "server:economy:state",
+            payload: this._economy.stateFor(sideId)
+        });
     }
 
     /**
@@ -303,17 +390,6 @@ export class Game {
         const payload = side.buildTilesUpdate(this._entities, diff, touched);
         if (payload) {
             this.broadcastToSide(side.id, { type: "server:tiles:update", payload });
-        }
-    }
-
-    /** After MP restore, resend every visible hex holding a ship so clients see new MP. */
-    private _sendShipRefresh() {
-        const shipHexes = new Set(
-            this._entities.ofKind("ship").map((ship) => axialKey(ship.q, ship.r))
-        );
-        const noChange: VisibilityDiff = { revealed: [], hidden: [], forgetEntityIds: [] };
-        for (const side of this._sides.values()) {
-            this._sendTilesUpdate(side, noChange, shipHexes);
         }
     }
 
@@ -349,7 +425,8 @@ export class Game {
                 tiles: side.buildTileViews(this._entities),
                 visible: side.visibleKeys(),
                 turn: this._turns.state(),
-                battles: this._battles.involving(side.id)
+                battles: this._battles.involving(side.id),
+                economy: this._economy.stateFor(side.id)
             }
         });
     }

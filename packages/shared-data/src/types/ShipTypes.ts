@@ -1,3 +1,4 @@
+import type { Resources, StructureType } from "./Economy.js";
 import type { ShipType } from "./PrimitiveTypes.js";
 
 export type ShipTypeDefinition = {
@@ -11,6 +12,12 @@ export type ShipTypeDefinition = {
     rotationSpeed: number;
     /** Travel speed while animating a move, in hexes per second (independent of zoom / hex size). */
     moveSpeed: number;
+    cost: Resources;
+    buildTurns: number;
+    /** Structures that must be built on the planet building this ship. */
+    requires: StructureType[];
+    /** Can be consumed to claim an unowned planet on its hex. */
+    canColonise?: boolean;
 };
 
 /**
@@ -25,7 +32,10 @@ export const SHIP_TYPES: Record<ShipType, ShipTypeDefinition> = {
         hp: 6,
         scale: 0.45,
         rotationSpeed: 360,
-        moveSpeed: 2
+        moveSpeed: 2,
+        cost: { food: 50, gold: 100, resources: 100 },
+        buildTurns: 2,
+        requires: ["shipyard"]
     },
     // 180° turn 0.6s + 1 hex 0.67s → ≤ 1.27s (≈ 0.87s for a 60° turn)
     frigate: {
@@ -34,6 +44,22 @@ export const SHIP_TYPES: Record<ShipType, ShipTypeDefinition> = {
         hp: 12,
         scale: 0.6,
         rotationSpeed: 300,
-        moveSpeed: 1.5
+        moveSpeed: 1.5,
+        cost: { food: 100, gold: 200, resources: 300 },
+        buildTurns: 3,
+        requires: ["advanced_shipyard"]
+    },
+    // 180° turn 0.75s + 1 hex 0.8s → ≤ 1.55s
+    colony_ship: {
+        name: "Colony Ship",
+        maxMovementPoints: 2,
+        hp: 4,
+        scale: 0.55,
+        rotationSpeed: 240,
+        moveSpeed: 1.25,
+        cost: { food: 300, gold: 200, resources: 200 },
+        buildTurns: 3,
+        requires: ["shipyard"],
+        canColonise: true
     }
 };

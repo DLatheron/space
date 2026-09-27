@@ -1,0 +1,102 @@
+/* Spans the space left of the turn HUD so it never overlaps it; content is centred. */
+.resource-bar {
+    position: absolute;
+    top: 0.75rem;
+    left: 0.75rem;
+    right: 14.5rem;
+    display: flex;
+    justify-content: center;
+    pointer-events: none;
+    /* Above the planet page (3) so the stockpile stays visible while building; below battle dialogs. */
+    z-index: 4;
+}
+
+.resource-bar__inner {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0.35rem 1.1rem;
+    padding: 0.45rem 0.9rem;
+    border: 1px solid #2c3d63;
+    border-radius: 0.4rem;
+    background: rgba(11, 16, 32, 0.82);
+    font-size: 0.85rem;
+    pointer-events: auto;
+}
+
+.resource-bar__item {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    white-space: nowrap;
+}
+
+.resource-bar__label {
+    color: #9ab3d4;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.resource-bar__item--food .resource-bar__label {
+    color: #8fdc7a;
+}
+
+.resource-bar__item--gold .resource-bar__label {
+    color: #ffd166;
+}
+
+.resource-bar__item--resources .resource-bar__label {
+    color: #9fb8ff;
+}
+
+.resource-bar__value {
+    position: relative;
+    display: inline-block;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+.resource-bar__item--capped .resource-bar__ships {
+    color: #ff9f6b;
+}
+
+.resource-bar__delta {
+    position: absolute;
+    left: 50%;
+    top: 100%;
+    padding: 0.05rem 0.35rem;
+    border-radius: 0.3rem;
+    background: rgba(11, 16, 32, 0.85);
+    font-size: 0.75rem;
+    font-weight: 700;
+    white-space: nowrap;
+    pointer-events: none;
+    animation: resource-bar-delta 1.6s ease-out forwards;
+}
+
+.resource-bar__delta--up {
+    color: #5cffb0;
+}
+
+.resource-bar__delta--down {
+    color: #ff6b8a;
+}
+
+@keyframes resource-bar-delta {
+    0% {
+        opacity: 0;
+        transform: translate(-50%, -0.3rem);
+    }
+    15% {
+        opacity: 1;
+        transform: translate(-50%, 0.2rem);
+    }
+    70% {
+        opacity: 1;
+    }
+    100% {
+        opacity: 0;
+        transform: translate(-50%, 1rem);
+    }
+}

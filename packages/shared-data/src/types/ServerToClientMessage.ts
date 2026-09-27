@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { EconomyState } from "./Economy.js";
 import {
     AxialCoord,
     BattleId,
@@ -46,8 +47,14 @@ export const ServerToClientMessage = z.discriminatedUnion("type", [
             visible: z.array(HexKey),
             turn: TurnState,
             /** Pending battles involving the receiving side. */
-            battles: z.array(BattleInfo)
+            battles: z.array(BattleInfo),
+            economy: EconomyState
         })
+    }),
+    z.object({
+        /** Sent only to the owning side. */
+        type: z.literal("server:economy:state"),
+        payload: EconomyState
     }),
     z.object({
         type: z.literal("server:turn:state"),

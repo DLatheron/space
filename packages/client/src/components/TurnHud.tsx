@@ -1,3 +1,4 @@
+import type { EntityId } from "@space/shared-data";
 import { useHexWorldVersion } from "../hooks/index.js";
 import { HexWorld } from "../world/HexWorld.js";
 import "./TurnHud.css";
@@ -5,14 +6,16 @@ import "./TurnHud.css";
 type TurnHudProps = {
     world: HexWorld;
     onEndTurn: () => void;
+    onColonise: (planetId: EntityId, shipId: EntityId) => void;
 };
 
-export function TurnHud({ world, onEndTurn }: TurnHudProps) {
+export function TurnHud({ world, onEndTurn, onColonise }: TurnHudProps) {
     useHexWorldVersion(world);
 
     const turn = world.turn;
     const ownReady = world.ownSideReady;
     const ship = world.selectedShip;
+    const colonisable = world.colonisablePlanet;
     const sides = Object.entries(turn?.sideReady ?? {}).sort(([a], [b]) => a.localeCompare(b));
 
     return (
@@ -42,6 +45,15 @@ export function TurnHud({ world, onEndTurn }: TurnHudProps) {
                     <span className="turn-hud__muted">No ship selected</span>
                 )}
             </div>
+            {colonisable && (
+                <button
+                    type="button"
+                    className="turn-hud__colonise"
+                    onClick={() => onColonise(colonisable.planet.id, colonisable.ship.id)}
+                >
+                    Colonise {colonisable.planet.name ?? "planet"}
+                </button>
+            )}
             <button type="button" onClick={onEndTurn} disabled={ownReady || !turn}>
                 {ownReady ? "Waiting…" : "End turn"}
             </button>

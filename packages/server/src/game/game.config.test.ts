@@ -1,7 +1,8 @@
 import { axialRange } from "@space/maths";
-import type { ServerToClientMessage } from "@space/shared-data";
+import { STARTING_STOCKPILE, type ServerToClientMessage } from "@space/shared-data";
 import type { Client } from "./Client.js";
 import { Game } from "./Game.js";
+import type { EntityOf } from "./map/types.js";
 import { validateShipMove } from "./moveShip.js";
 
 const mockConfig = vi.hoisted(() => ({
@@ -90,6 +91,94 @@ describe("Game with fullVisibility", () => {
             expect(toTile?.fog).toBe("visible");
             expect(toTile?.entities.some((e) => e.id === ship.id)).toBe(true);
             expect(update.payload.visible).toHaveLength(totalHexes);
+        }
+        game.destroyGame();
+    });
+});
+
+describe("Game economy messages", () => {
+    it("includes economy in map:init and sends tiles, economy then turn state on advance", async () => {
+        const { game, alpha, beta } = createGame({ revealMap: false, fullVisibility: false });
+        expect(alpha.last("server:map:init")!.payload.economy).toMatchObject({
+            stockpile: STARTING_STOCKPILE,
+            shipCount: 2,
+            shipCap: 3
+        });
+
+        const mark = alpha.messages.length;
+        game.queueMessage({ type: "client:turn:end", payload: {} }, alpha.client);
+        game.queueMessage({ type: "client:turn:end", payload: {} }, beta.client);
+        await vi.waitFor(() => expect(alpha.last("server:turn:state")?.payload.turn).toBe(2));
+
+        const types = alpha.messages.slice(mark).map((m) => m.type);
+        const tiles = types.lastIndexOf("server:tiles:update");
+        const economy = types.indexOf("server:economy:state");
+        expect(tiles).toBeGreaterThanOrEqual(0);
+        expect(economy).toBeGreaterThan(tiles);
+        expect(types.lastIndexOf("server:turn:state")).toBeGreaterThan(economy);
+        expect(alpha.last("server:economy:state")!.payload.stockpile.food).toBeGreaterThan(
+            STARTING_STOCKPILE.food
+        );
+        game.destroyGame();
+    });
+
+    it("replies to builds with economy state or an error", async () => {
+        const { game, alpha } = createGame({ revealMap: false, fullVisibility: false });
+        const home = game.entities.ofKind("planet").find((p) => p.sideId === "alpha")!;
+
+        game.queueMessage(
+            {
+                type: "client:planet:build",
+                payload: { planetId: home.id, item: { kind: "ship", shipType: "scout" } }
+            },
+            alpha.client
+        );
+        await vi.waitFor(() => expect(alpha.last("server:error")).toBeDefined());
+        expect(alpha.last("server:error")!.payload.message).toBe("Requires Shipyard");
+
+        game.queueMessage(
+            {
+                type: "client:planet:build",
+                payload: { planetId: home.id, item: { kind: "structure", structureType: "farm" } }
+            },
+            alpha.client
+        );
+        await vi.waitFor(() => expect(alpha.last("server:economy:state")).toBeDefined());
+        expect(alpha.last("server:economy:state")!.payload.planets[0].queue).toHaveLength(1);
+        game.destroyGame();
+    });
+
+    it("colonises and shows the new owner to every side that sees the hex", async () => {
+        const { game, alpha, beta } = createGame({ revealMap: false, fullVisibility: true });
+        const planet = game.entities.ofKind("planet").find((p) => p.sideId === null)!;
+        const colony = game.entities.add<EntityOf<"ship">>({
+            id: "test-colony",
+            kind: "ship",
+            shipType: "colony_ship",
+            sideId: "alpha",
+            q: planet.q,
+            r: planet.r,
+            facing: 0,
+            movementPoints: 2,
+            maxMovementPoints: 2
+        });
+
+        game.queueMessage(
+            { type: "client:planet:colonise", payload: { planetId: planet.id, shipId: colony.id } },
+            alpha.client
+        );
+        await vi.waitFor(() => expect(alpha.last("server:economy:state")).toBeDefined());
+
+        expect(alpha.last("server:economy:state")!.payload.planets).toHaveLength(2);
+        expect(beta.last("server:economy:state")).toBeUndefined();
+        for (const observer of [alpha, beta]) {
+            const tile = observer
+                .last("server:tiles:update")!
+                .payload.tiles.find((t) => t.q === planet.q && t.r === planet.r)!;
+            expect(tile.entities.find((e) => e.id === planet.id)).toMatchObject({
+                sideId: "alpha"
+            });
+            expect(tile.entities.some((e) => e.id === colony.id)).toBe(false);
         }
         game.destroyGame();
     });

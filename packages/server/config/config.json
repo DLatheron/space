@@ -7,5 +7,6 @@
     "visionRange": 6,
     "mapSeed": 42,
     "revealMap": true,
-    "fullVisibility": true
+    "fullVisibility": true,
+    "instantBuild": true
 }

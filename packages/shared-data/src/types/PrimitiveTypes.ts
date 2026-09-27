@@ -54,8 +54,11 @@ const EntityBase = z.object({
 
 const HazardLevel = z.number().min(0);
 
+export const PLANET_LEVEL_MIN = 1;
+export const PLANET_LEVEL_MAX = 20;
+
 /** Ship class; stats and animation speeds live in `SHIP_TYPES`. */
-export const ShipType = z.enum(["scout", "frigate"]);
+export const ShipType = z.enum(["scout", "frigate", "colony_ship"]);
 export type ShipType = z.infer<typeof ShipType>;
 
 /** Pointy-top direction index 0–5: 0 = east, counter-clockwise on screen (see `axialNeighbor`). */
@@ -78,8 +81,8 @@ export const PlanetEntity = EntityBase.extend({
     kind: z.literal("planet"),
     sideId: SideId.nullable(),
     systemId: SystemId,
-    food: z.number().optional(),
-    industry: z.number().optional()
+    /** Fixed for the game; also the number of structure slots. */
+    level: z.number().int().min(PLANET_LEVEL_MIN).max(PLANET_LEVEL_MAX)
 });
 export type PlanetEntity = z.infer<typeof PlanetEntity>;
 

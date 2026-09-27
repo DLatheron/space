@@ -43,6 +43,12 @@
     color: #7f93b5;
 }
 
+.turn-hud__colonise {
+    border-color: #5cffb0;
+    color: #5cffb0;
+    font-weight: 600;
+}
+
 .turn-hud button:disabled {
     opacity: 0.6;
     cursor: default;

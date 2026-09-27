@@ -3,12 +3,16 @@
     inset: 0;
     display: grid;
     place-items: center;
+    /* Leaves room for the resource bar, which stays visible above this overlay. */
+    padding: 3.6rem 0.75rem 0.75rem;
     background: rgba(4, 8, 18, 0.72);
     z-index: 3;
 }
 
 .planet-page__panel {
-    min-width: min(28rem, 90%);
+    width: min(44rem, 100%);
+    max-height: 100%;
+    overflow-y: auto;
     padding: 1rem 1.25rem;
     border: 1px solid #2c3d63;
     border-radius: 0.5rem;
@@ -23,8 +27,21 @@
 }
 
 .planet-page__header h2 {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 0.6rem;
     margin: 0;
     font-size: 1.3rem;
+}
+
+.planet-page__level {
+    padding: 0.1rem 0.5rem;
+    border: 1px solid #3a4d73;
+    border-radius: 999px;
+    color: #9fd0ff;
+    font-size: 0.8rem;
+    font-weight: 600;
 }
 
 .planet-page__facts {
@@ -42,8 +59,170 @@
     margin: 0;
 }
 
+.planet-page__side {
+    font-weight: 600;
+}
+
+.planet-page__side--alpha {
+    color: #5cffb0;
+}
+
+.planet-page__side--beta {
+    color: #ff6b8a;
+}
+
 .planet-page__muted {
     margin: 0.4rem 0 0;
     color: #7f93b5;
     font-size: 0.9rem;
+}
+
+.planet-page__section {
+    margin-top: 1rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid #243355;
+}
+
+.planet-page__section h3 {
+    margin: 0 0 0.5rem;
+    font-size: 1rem;
+}
+
+.planet-page__section h3 .planet-page__muted {
+    font-weight: 400;
+    font-size: 0.85rem;
+}
+
+.planet-page__slots,
+.planet-page__progress {
+    height: 0.4rem;
+    border-radius: 999px;
+    background: #1a2644;
+    overflow: hidden;
+}
+
+.planet-page__slots-fill,
+.planet-page__progress-fill {
+    height: 100%;
+    background: #4a8fd4;
+    transition: width 0.4s ease-out;
+}
+
+.planet-page__progress-fill {
+    background: #5cffb0;
+}
+
+.planet-page__structures {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin: 0.6rem 0 0;
+    padding: 0;
+    list-style: none;
+}
+
+.planet-page__structures li {
+    padding: 0.15rem 0.55rem;
+    border: 1px solid #2c3d63;
+    border-radius: 0.3rem;
+    background: #16233f;
+    font-size: 0.9rem;
+}
+
+.planet-page__queue,
+.planet-page__options {
+    display: grid;
+    gap: 0.4rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.planet-page__queue-entry,
+.planet-page__option {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.45rem 0.6rem;
+    border: 1px solid #22314f;
+    border-radius: 0.35rem;
+    background: #121c38;
+}
+
+.planet-page__queue-main,
+.planet-page__option-main {
+    display: grid;
+    gap: 0.25rem;
+    flex: 1;
+    min-width: 0;
+}
+
+.planet-page__option-main .planet-page__muted {
+    margin: 0;
+    font-size: 0.8rem;
+}
+
+.planet-page__option-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.25rem 0.75rem;
+    font-size: 0.8rem;
+}
+
+.planet-page__cost {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.planet-page__cost-item--food {
+    color: #8fdc7a;
+}
+
+.planet-page__cost-item--gold {
+    color: #ffd166;
+}
+
+.planet-page__cost-item--resources {
+    color: #9fb8ff;
+}
+
+.planet-page__cost-item--short {
+    color: #ff6b8a;
+    text-decoration: underline dotted;
+}
+
+.planet-page__turns {
+    color: #b7c7e4;
+}
+
+.planet-page__reason {
+    color: #ff9f6b;
+    font-size: 0.8rem;
+}
+
+.planet-page__queue-entry button,
+.planet-page__option button {
+    flex: none;
+    padding: 0.35rem 0.75rem;
+}
+
+.planet-page__panel button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.planet-page__colonise {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+}
+
+.planet-page__primary {
+    border-color: #5cffb0;
+    font-weight: 600;
 }

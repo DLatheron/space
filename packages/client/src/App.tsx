@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Outlet, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import {
+    buildItemName,
     ClientQueryParams,
     GameId,
     parseURLSearchParams,
-    ServerToClientMessage
+    ServerToClientMessage,
+    type BuildItem,
+    type EntityId
 } from "@space/shared-data";
 import { GameSocket } from "./GameSocket.js";
 import { Server, useClientId, useServerMessageManager, useServerSocket } from "./hooks/index.js";
@@ -12,6 +15,7 @@ import { MainMenu } from "./pages/MainMenu.js";
 import type { GameOutletContext } from "./pages/PlanetPage.js";
 import { HexMapView } from "./components/HexMapView.js";
 import { BattleDialog } from "./components/BattleDialog.js";
+import { ResourceBar } from "./components/ResourceBar.js";
 import { TurnHud } from "./components/TurnHud.js";
 import { HexWorld, type HexClickAction } from "./world/HexWorld.js";
 import "./App.css";
@@ -28,7 +32,6 @@ export function App() {
     const [mapReady, setMapReady] = useState(false);
 
     const world = useMemo(() => new HexWorld(), []);
-    const outletContext = useMemo<GameOutletContext>(() => ({ world }), [world]);
     const navigate = useNavigate();
     const location = useLocation();
 
@@ -61,6 +64,13 @@ export function App() {
                 setMapReady(true);
                 appendLog(
                     `map init — ${payload.width}×${payload.height}, side ${payload.sideId}, ${payload.visible.length} visible, turn ${payload.turn.turn}`
+                );
+            }),
+            messageManager.registerHandler("server:economy:state", (_ctx, payload) => {
+                world.applyEconomyState(payload);
+                const { food, gold, resources } = payload.stockpile;
+                appendLog(
+                    `economy — food ${food}, gold ${gold}, resources ${resources}, ships ${payload.shipCount}/${payload.shipCap}`
                 );
             }),
             messageManager.registerHandler("server:tiles:update", (_ctx, payload) => {
@@ -181,6 +191,35 @@ export function App() {
         [sendMessage, appendLog]
     );
 
+    const sendBuild = useCallback(
+        (planetId: EntityId, item: BuildItem) => {
+            sendMessage({ type: "client:planet:build", payload: { planetId, item } });
+            appendLog(`build — ${buildItemName(item)} on ${planetId}`);
+        },
+        [sendMessage, appendLog]
+    );
+
+    const sendCancel = useCallback(
+        (planetId: EntityId, index: number) => {
+            sendMessage({ type: "client:planet:cancel", payload: { planetId, index } });
+            appendLog(`cancel — queue #${index} on ${planetId}`);
+        },
+        [sendMessage, appendLog]
+    );
+
+    const sendColonise = useCallback(
+        (planetId: EntityId, shipId: EntityId) => {
+            sendMessage({ type: "client:planet:colonise", payload: { planetId, shipId } });
+            appendLog(`colonise — ${planetId} with ${shipId}`);
+        },
+        [sendMessage, appendLog]
+    );
+
+    const outletContext = useMemo<GameOutletContext>(
+        () => ({ world, sendBuild, sendCancel, sendColonise }),
+        [world, sendBuild, sendCancel, sendColonise]
+    );
+
     const onMapAction = useCallback(
         (action: HexClickAction) => {
             switch (action.type) {
@@ -248,7 +287,8 @@ export function App() {
             {connected && mapReady && (
                 <div className="app__game">
                     <HexMapView world={world} onAction={onMapAction} />
-                    <TurnHud world={world} onEndTurn={endTurn} />
+                    <ResourceBar world={world} />
+                    <TurnHud world={world} onEndTurn={endTurn} onColonise={sendColonise} />
                     <BattleDialog world={world} onResolve={resolveBattle} />
                     <Outlet context={outletContext} />
                 </div>

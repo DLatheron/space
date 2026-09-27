@@ -14,14 +14,18 @@ import {
 import {
     hexHasObstacle,
     MOVE_COST_PER_HEX,
+    PLANET_LEVEL_MAX,
     SHIP_TYPES,
     type AxialCoord,
     type BattleId,
     type BattleInfo,
+    type BuildContext,
+    type EconomyState,
     type EntityId,
     type EntityOfKind,
     type EntitySummary,
     type HexKey,
+    type PlanetEconomy,
     type SideId,
     type TileView,
     type TurnState
@@ -118,6 +122,8 @@ export class HexWorld {
     sideId: SideId | null = null;
     turn: TurnState | null = null;
     selectedShipId: EntityId | null = null;
+    /** Our side's private economy; `null` until the first map init. */
+    economy: EconomyState | null = null;
 
     private readonly _tiles = new Map<HexKey, ClientTile>();
     private readonly _visible = new Set<HexKey>();
@@ -164,12 +170,14 @@ export class HexWorld {
         visible: HexKey[];
         turn: TurnState;
         battles: BattleInfo[];
+        economy: EconomyState;
     }) {
         this.width = payload.width;
         this.height = payload.height;
         this.hexSize = payload.hexSize;
         this.sideId = payload.sideId;
         this.turn = payload.turn;
+        this.economy = payload.economy;
         this.selectedShipId = null;
         this._tiles.clear();
         this._visible.clear();
@@ -332,6 +340,46 @@ export class HexWorld {
             this.sideId = payload.yourSideId;
         }
         this._notify();
+    }
+
+    applyEconomyState(economy: EconomyState) {
+        this.economy = economy;
+        this._notify();
+    }
+
+    /** Private economy for one of our planets, if we own it. */
+    planetEconomy(planetId: EntityId): PlanetEconomy | undefined {
+        return this.economy?.planets.find((p) => p.planetId === planetId);
+    }
+
+    /** Inputs for `canBuild`; `shipCount` already includes queued ships. */
+    get buildContext(): BuildContext | null {
+        if (!this.economy) return null;
+        const { stockpile, shipCount, shipCap } = this.economy;
+        return { stockpile, shipCount, shipCap };
+    }
+
+    /** Our ships on `hex` that can colonise. */
+    colonyShipsAt(q: number, r: number): ShipEntity[] {
+        const entities = this._tiles.get(hexKey(q, r))?.entities ?? [];
+        return entities.filter(
+            (e): e is ShipEntity =>
+                e.kind === "ship" &&
+                e.sideId === this.sideId &&
+                !!SHIP_TYPES[e.shipType].canColonise
+        );
+    }
+
+    /** Unowned planet the selected colony ship is sitting on, if it could colonise it. */
+    get colonisablePlanet(): { ship: ShipEntity; planet: PlanetEntity } | undefined {
+        const ship = this.selectedShip;
+        if (!ship || ship.sideId !== this.sideId || !SHIP_TYPES[ship.shipType].canColonise) {
+            return undefined;
+        }
+        const planet = this._tiles
+            .get(hexKey(ship.q, ship.r))
+            ?.entities.find((e): e is PlanetEntity => e.kind === "planet" && e.sideId === null);
+        return planet ? { ship, planet } : undefined;
     }
 
     /** Optimistically mark our side ready until the server confirms via `server:turn:state`. */
@@ -743,19 +791,33 @@ function drawEntityPlaceholder(
             break;
         }
         case "planet": {
+            const r = scale * (0.8 + (entity.level / PLANET_LEVEL_MAX) * 0.5);
             ctx.fillStyle = fullColour ? "#4a8fd4" : "#3a6fa8";
             ctx.beginPath();
-            ctx.arc(center.x, center.y, scale, 0, Math.PI * 2);
+            ctx.arc(center.x, center.y, r, 0, Math.PI * 2);
             ctx.fill();
             ctx.strokeStyle = sideColour(entity.sideId, "#9fd0ff");
             ctx.lineWidth = entity.sideId ? lineWidth * 1.8 : lineWidth;
             ctx.beginPath();
-            ctx.ellipse(center.x, center.y, scale * 1.35, scale * 0.35, -0.4, 0, Math.PI * 2);
+            ctx.ellipse(center.x, center.y, r * 1.35, r * 0.35, -0.4, 0, Math.PI * 2);
             ctx.stroke();
             if (entity.sideId) {
                 ctx.beginPath();
-                ctx.arc(center.x, center.y, scale, 0, Math.PI * 2);
+                ctx.arc(center.x, center.y, r, 0, Math.PI * 2);
                 ctx.stroke();
+            }
+            if (hexSize >= 28) {
+                const fontSize = Math.round(Math.min(16, hexSize * 0.22));
+                ctx.font = `600 ${fontSize}px "IBM Plex Sans", "Segoe UI", sans-serif`;
+                ctx.textAlign = "center";
+                ctx.textBaseline = "top";
+                ctx.lineWidth = Math.max(2, fontSize * 0.25);
+                ctx.strokeStyle = "rgba(4, 8, 18, 0.85)";
+                ctx.fillStyle = "#e8eefc";
+                const label = `L${entity.level}`;
+                const y = center.y + hexSize * 0.62;
+                ctx.strokeText(label, center.x, y);
+                ctx.fillText(label, center.x, y);
             }
             break;
         }
@@ -870,10 +932,14 @@ function drawEntityPlaceholder(
             break;
         }
         case "ship": {
-            // Arrowhead hull, nose along +x before rotation.
             ctx.translate(center.x, center.y);
             ctx.rotate(heading ?? axialDirectionAngle(entity.facing));
             ctx.fillStyle = sideColour(entity.sideId, "#d0d0d0");
+            if (SHIP_TYPES[entity.shipType].canColonise) {
+                drawColonyPod(ctx, scale, hexSize);
+                break;
+            }
+            // Arrowhead hull, nose along +x before rotation.
             ctx.beginPath();
             ctx.moveTo(scale, 0);
             ctx.lineTo(-scale * 0.7, scale * 0.7);
@@ -897,4 +963,33 @@ function drawEntityPlaceholder(
     }
 
     ctx.restore();
+}
+
+/** Capsule hull with a habitat ring; nose along +x (context already rotated). */
+function drawColonyPod(ctx: DrawCtx, scale: number, hexSize: number) {
+    const halfLen = scale * 0.75;
+    const radius = scale * 0.42;
+    const body = halfLen - radius;
+    ctx.beginPath();
+    ctx.arc(body, 0, radius, -Math.PI / 2, Math.PI / 2);
+    ctx.arc(-body, 0, radius, Math.PI / 2, (Math.PI * 3) / 2);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = "#ffffffaa";
+    ctx.lineWidth = Math.max(1, hexSize * 0.03);
+    ctx.stroke();
+
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = Math.max(1, hexSize * 0.035);
+    ctx.beginPath();
+    ctx.ellipse(-scale * 0.1, 0, scale * 0.2, scale * 0.72, 0, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath();
+    ctx.moveTo(halfLen + scale * 0.28, 0);
+    ctx.lineTo(halfLen + scale * 0.04, scale * 0.16);
+    ctx.lineTo(halfLen + scale * 0.04, -scale * 0.16);
+    ctx.closePath();
+    ctx.fill();
 }
