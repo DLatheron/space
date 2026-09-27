@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Outlet, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import {
     ClientQueryParams,
     GameId,
@@ -9,8 +9,10 @@ import {
 import { GameSocket } from "./GameSocket.js";
 import { Server, useClientId, useServerMessageManager, useServerSocket } from "./hooks/index.js";
 import { MainMenu } from "./pages/MainMenu.js";
+import type { GameOutletContext } from "./pages/PlanetPage.js";
 import { HexMapView } from "./components/HexMapView.js";
-import { HexWorld } from "./world/HexWorld.js";
+import { TurnHud } from "./components/TurnHud.js";
+import { HexWorld, type HexClickAction } from "./world/HexWorld.js";
 import "./App.css";
 
 export function App() {
@@ -25,6 +27,9 @@ export function App() {
     const [mapReady, setMapReady] = useState(false);
 
     const world = useMemo(() => new HexWorld(), []);
+    const outletContext = useMemo<GameOutletContext>(() => ({ world }), [world]);
+    const navigate = useNavigate();
+    const location = useLocation();
 
     const appendLog = useCallback((line: string) => {
         setLog((prev) => [...prev.slice(-49), line]);
@@ -54,12 +59,28 @@ export function App() {
                 setSideId(payload.sideId);
                 setMapReady(true);
                 appendLog(
-                    `map init — ${payload.width}×${payload.height}, side ${payload.sideId}, ${payload.visible.length} visible`
+                    `map init — ${payload.width}×${payload.height}, side ${payload.sideId}, ${payload.visible.length} visible, turn ${payload.turn.turn}`
                 );
             }),
             messageManager.registerHandler("server:tiles:update", (_ctx, payload) => {
                 world.applyTilesUpdate(payload);
-                appendLog(`tiles update — ${payload.tiles.length} tiles, ${payload.visible.length} visible`);
+                appendLog(
+                    `tiles update — ${payload.tiles.length} tiles, ${payload.visible.length} visible`
+                );
+            }),
+            messageManager.registerHandler("server:turn:state", (_ctx, payload) => {
+                world.applyTurnState(payload);
+                setSideId(payload.yourSideId);
+                const ready = Object.entries(payload.sideReady)
+                    .map(([side, isReady]) => `${side}:${isReady ? "ready" : "…"}`)
+                    .join(" ");
+                appendLog(`turn state — turn ${payload.turn} ${ready}`);
+            }),
+            messageManager.registerHandler("server:ship:moved", (_ctx, payload) => {
+                world.applyShipMoved(payload);
+                appendLog(
+                    `ship moved — ${payload.shipId} ${payload.from.q},${payload.from.r} → ${payload.to.q},${payload.to.r} (MP ${payload.movementPoints})`
+                );
             })
         ];
 
@@ -133,6 +154,43 @@ export function App() {
         appendLog(`ping — nonce ${nonce}`);
     }, [sendMessage, appendLog]);
 
+    const endTurn = useCallback(() => {
+        sendMessage({ type: "client:turn:end", payload: {} });
+        world.markOwnSideReady();
+        appendLog("end turn");
+    }, [sendMessage, world, appendLog]);
+
+    const onMapAction = useCallback(
+        (action: HexClickAction) => {
+            switch (action.type) {
+                case "move":
+                    sendMessage({
+                        type: "client:ship:move",
+                        payload: { shipId: action.shipId, to: action.to }
+                    });
+                    appendLog(`move — ${action.shipId} → ${action.to.q},${action.to.r}`);
+                    break;
+                case "open-planet":
+                    navigate({
+                        pathname: `/planet/${encodeURIComponent(action.planetId)}`,
+                        search: location.search
+                    });
+                    break;
+                case "select":
+                case "deselect":
+                case "none":
+                    break;
+            }
+        },
+        [sendMessage, appendLog, navigate, location.search]
+    );
+
+    useEffect(() => {
+        if (!connected && location.pathname !== "/") {
+            navigate({ pathname: "/", search: location.search }, { replace: true });
+        }
+    }, [connected, location.pathname, location.search, navigate]);
+
     return (
         <div className="app">
             <header className="app__header">
@@ -166,7 +224,13 @@ export function App() {
                 />
             )}
 
-            {connected && mapReady && <HexMapView world={world} />}
+            {connected && mapReady && (
+                <div className="app__game">
+                    <HexMapView world={world} onAction={onMapAction} />
+                    <TurnHud world={world} onEndTurn={endTurn} />
+                    <Outlet context={outletContext} />
+                </div>
+            )}
 
             <section className="app__log">
                 <h2>Message log</h2>

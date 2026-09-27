@@ -1,10 +1,14 @@
 import { z } from "zod";
 import {
+    AxialCoord,
     ClientSummary,
+    EntityId,
     GameId,
+    HexDirection,
     HexKey,
     SideId,
-    TileView
+    TileView,
+    TurnState
 } from "./PrimitiveTypes.js";
 
 export const ServerToClientMessage = z.discriminatedUnion("type", [
@@ -37,7 +41,22 @@ export const ServerToClientMessage = z.discriminatedUnion("type", [
             hexSize: z.number().positive(),
             sideId: SideId,
             tiles: z.array(TileView),
-            visible: z.array(HexKey)
+            visible: z.array(HexKey),
+            turn: TurnState
+        })
+    }),
+    z.object({
+        type: z.literal("server:turn:state"),
+        payload: TurnState.extend({ yourSideId: SideId })
+    }),
+    z.object({
+        type: z.literal("server:ship:moved"),
+        payload: z.object({
+            shipId: EntityId,
+            from: AxialCoord,
+            to: AxialCoord,
+            facing: HexDirection,
+            movementPoints: z.number().int().min(0)
         })
     }),
     z.object({

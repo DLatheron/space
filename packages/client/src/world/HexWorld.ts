@@ -1,11 +1,28 @@
 import {
+    axialDirectionAngle,
+    axialDistance,
+    axialLine,
+    axialRange,
+    axialToOffset,
     axialToPixel,
     hexCorners,
     hexHorizSpacing,
     hexVertSpacing,
+    type Axial,
     type Pixel
 } from "@space/maths";
-import type { EntitySummary, HexKey, TileView } from "@space/shared-data";
+import {
+    SHIP_TYPES,
+    type AxialCoord,
+    type EntityId,
+    type EntityOfKind,
+    type EntitySummary,
+    type HexKey,
+    type SideId,
+    type TileView,
+    type TurnState
+} from "@space/shared-data";
+import { ShipMotion, type ShipPose } from "./ShipMotion.js";
 
 export type Camera = {
     x: number;
@@ -22,6 +39,57 @@ type ClientTile = {
 
 type DrawCtx = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
 
+type ShipSighting = { q: number; r: number; facing: number; seen: boolean };
+
+type DeferredShip = { entity: ShipEntity; pose: ShipPose; fullColour: boolean };
+
+export type ShipEntity = EntityOfKind<"ship">;
+export type PlanetEntity = EntityOfKind<"planet">;
+
+export type HexClickAction =
+    | { type: "none" }
+    | { type: "select"; shipId: EntityId }
+    | { type: "deselect" }
+    | { type: "open-planet"; planetId: EntityId }
+    | { type: "move"; shipId: EntityId; to: AxialCoord };
+
+const SIDE_COLOURS: Record<string, string> = {
+    alpha: "#5cffb0",
+    beta: "#ff6b8a"
+};
+
+function sideColour(sideId: SideId | null | undefined, fallback: string): string {
+    if (!sideId) return fallback;
+    return SIDE_COLOURS[sideId] ?? "#ffd166";
+}
+
+function hexKey(q: number, r: number): HexKey {
+    return `${q},${r}`;
+}
+
+/** Pointy-top pixel → fractional axial, rounded to the containing hex. */
+export function pixelToAxial(p: Pixel, size: number): Axial {
+    const fq = ((Math.sqrt(3) / 3) * p.x - (1 / 3) * p.y) / size;
+    const fr = ((2 / 3) * p.y) / size;
+    return axialRound(fq, fr);
+}
+
+function axialRound(fq: number, fr: number): Axial {
+    const fs = -fq - fr;
+    let q = Math.round(fq);
+    let r = Math.round(fr);
+    const s = Math.round(fs);
+    const dq = Math.abs(q - fq);
+    const dr = Math.abs(r - fr);
+    const ds = Math.abs(s - fs);
+    if (dq > dr && dq > ds) {
+        q = -r - s;
+    } else if (dr > ds) {
+        r = -q - s;
+    }
+    return { q: q + 0, r: r + 0 };
+}
+
 /**
  * Client-side hex map FOW over parallax.
  * Unexplored = parallax only; explored/visible hexes drawn translucent on top.
@@ -30,10 +98,18 @@ export class HexWorld {
     width = 0;
     height = 0;
     hexSize = 50;
-    sideId: string | null = null;
+    sideId: SideId | null = null;
+    turn: TurnState | null = null;
+    selectedShipId: EntityId | null = null;
 
     private readonly _tiles = new Map<HexKey, ClientTile>();
     private readonly _visible = new Set<HexKey>();
+    private readonly _listeners = new Set<() => void>();
+    private _version = 0;
+    /** Draw-only animations; logical positions in `_tiles` update immediately. */
+    private readonly _motions = new Map<EntityId, ShipMotion>();
+    /** Animated poses for the frame being rendered. */
+    private readonly _framePoses = new Map<EntityId, ShipPose>();
 
     camera: Camera = { x: 0, y: 0, zoom: 0.35 };
 
@@ -41,26 +117,47 @@ export class HexWorld {
         return this.width > 0 && this.height > 0;
     }
 
+    subscribe = (listener: () => void): (() => void) => {
+        this._listeners.add(listener);
+        return () => {
+            this._listeners.delete(listener);
+        };
+    };
+
+    /** Bumped on every state change React cares about (selection, MP, turn, tiles). */
+    getVersion = (): number => this._version;
+
+    private _notify() {
+        this._version++;
+        for (const listener of this._listeners) {
+            listener();
+        }
+    }
+
     applyMapInit(payload: {
         width: number;
         height: number;
         hexSize: number;
-        sideId: string;
+        sideId: SideId;
         tiles: TileView[];
         visible: HexKey[];
+        turn: TurnState;
     }) {
         this.width = payload.width;
         this.height = payload.height;
         this.hexSize = payload.hexSize;
         this.sideId = payload.sideId;
+        this.turn = payload.turn;
+        this.selectedShipId = null;
         this._tiles.clear();
         this._visible.clear();
+        this._motions.clear();
 
         for (const key of payload.visible) {
             this._visible.add(key);
         }
         for (const tile of payload.tiles) {
-            this._tiles.set(`${tile.q},${tile.r}`, {
+            this._tiles.set(hexKey(tile.q, tile.r), {
                 q: tile.q,
                 r: tile.r,
                 fog: tile.fog,
@@ -69,6 +166,7 @@ export class HexWorld {
         }
 
         this._centerCameraOnContent();
+        this._notify();
     }
 
     applyTilesUpdate(payload: {
@@ -76,6 +174,7 @@ export class HexWorld {
         visible: HexKey[];
         forgetEntityIds?: string[];
     }) {
+        const before = this._snapshotShips();
         this._visible.clear();
         for (const key of payload.visible) {
             this._visible.add(key);
@@ -89,8 +188,14 @@ export class HexWorld {
         }
 
         for (const tile of payload.tiles) {
-            const key = `${tile.q},${tile.r}` as HexKey;
-            this._tiles.set(key, {
+            // A ship arriving in this view may still linger in a remembered tile elsewhere.
+            const incomingShipIds = new Set(
+                tile.entities.filter((e) => e.kind === "ship").map((e) => e.id)
+            );
+            if (incomingShipIds.size) {
+                this._removeEntities(incomingShipIds, hexKey(tile.q, tile.r));
+            }
+            this._tiles.set(hexKey(tile.q, tile.r), {
                 q: tile.q,
                 r: tile.r,
                 fog: tile.fog,
@@ -101,15 +206,227 @@ export class HexWorld {
         for (const [key, tile] of this._tiles) {
             tile.fog = this._visible.has(key) ? "visible" : "explored";
         }
+
+        this._animateMovedShips(before);
+        this._validateSelection();
+        this._notify();
+    }
+
+    applyShipMoved(payload: {
+        shipId: EntityId;
+        from: AxialCoord;
+        to: AxialCoord;
+        facing: number;
+        movementPoints: number;
+    }) {
+        const ship = this.findEntity(payload.shipId, "ship");
+        if (!ship) return;
+        const before = this._snapshotShips();
+
+        const moved: ShipEntity = {
+            ...ship,
+            q: payload.to.q,
+            r: payload.to.r,
+            facing: payload.facing,
+            movementPoints: payload.movementPoints
+        };
+        this._removeEntities(new Set([ship.id]));
+
+        const key = hexKey(payload.to.q, payload.to.r);
+        let dest = this._tiles.get(key);
+        if (!dest) {
+            dest = { q: payload.to.q, r: payload.to.r, fog: "visible", entities: [] };
+            this._tiles.set(key, dest);
+        }
+        dest.entities = [...dest.entities, moved];
+
+        this._animateMovedShips(before);
+        this._validateSelection();
+        this._notify();
+    }
+
+    applyTurnState(payload: TurnState & { yourSideId?: SideId }) {
+        this.turn = { turn: payload.turn, sideReady: payload.sideReady };
+        if (payload.yourSideId) {
+            this.sideId = payload.yourSideId;
+        }
+        this._notify();
+    }
+
+    /** Optimistically mark our side ready until the server confirms via `server:turn:state`. */
+    markOwnSideReady() {
+        if (!this.turn || !this.sideId) return;
+        this.turn = {
+            ...this.turn,
+            sideReady: { ...this.turn.sideReady, [this.sideId]: true }
+        };
+        this._notify();
+    }
+
+    get ownSideReady(): boolean {
+        return !!(this.sideId && this.turn?.sideReady[this.sideId]);
+    }
+
+    get selectedShip(): ShipEntity | undefined {
+        return this.selectedShipId ? this.findEntity(this.selectedShipId, "ship") : undefined;
+    }
+
+    selectShip(shipId: EntityId | null) {
+        if (this.selectedShipId === shipId) return;
+        this.selectedShipId = shipId;
+        this._notify();
+    }
+
+    findEntity<K extends EntitySummary["kind"]>(
+        id: EntityId,
+        kind: K
+    ): EntityOfKind<K> | undefined {
+        for (const tile of this._tiles.values()) {
+            for (const entity of tile.entities) {
+                if (entity.id === id && entity.kind === kind) {
+                    return entity as EntityOfKind<K>;
+                }
+            }
+        }
+        return undefined;
+    }
+
+    isOnMap(q: number, r: number): boolean {
+        const { col, row } = axialToOffset(q, r);
+        return col >= 0 && row >= 0 && col < this.width && row < this.height;
+    }
+
+    /** Hexes the selected ship can reach this turn (excluding its own hex). */
+    reachableHexes(): Axial[] {
+        const ship = this.selectedShip;
+        if (!ship || ship.movementPoints <= 0) return [];
+        return axialRange(ship, ship.movementPoints).filter(
+            (h) => (h.q !== ship.q || h.r !== ship.r) && this.isOnMap(h.q, h.r)
+        );
+    }
+
+    pickHex(screen: Pixel, canvas: HTMLCanvasElement): Axial | null {
+        if (!this.ready) return null;
+        const hex = pixelToAxial(this.screenToWorld(screen, canvas), this.hexSize);
+        return this.isOnMap(hex.q, hex.r) ? hex : null;
+    }
+
+    /** Decide what a click (not drag) at `screen` should do; selection changes are applied here. */
+    handleClick(screen: Pixel, canvas: HTMLCanvasElement): HexClickAction {
+        const hex = this.pickHex(screen, canvas);
+        if (!hex) {
+            return this._deselect();
+        }
+
+        const tile = this._tiles.get(hexKey(hex.q, hex.r));
+        const entities = tile?.entities ?? [];
+
+        const ownShips = entities.filter(
+            (e): e is ShipEntity => e.kind === "ship" && e.sideId === this.sideId
+        );
+        if (ownShips.length) {
+            // Cycle through stacked ships; clicking the only selected ship deselects it.
+            const index = ownShips.findIndex((s) => s.id === this.selectedShipId);
+            if (index >= 0 && ownShips.length === 1) {
+                return this._deselect();
+            }
+            const next = ownShips[(index + 1) % ownShips.length];
+            this.selectShip(next.id);
+            return { type: "select", shipId: next.id };
+        }
+
+        const ship = this.selectedShip;
+        if (ship) {
+            const distance = axialDistance(ship, hex);
+            if (distance > 0 && distance <= ship.movementPoints) {
+                return { type: "move", shipId: ship.id, to: { q: hex.q, r: hex.r } };
+            }
+        }
+
+        const planet = entities.find((e): e is PlanetEntity => e.kind === "planet");
+        if (planet) {
+            return { type: "open-planet", planetId: planet.id };
+        }
+
+        return this._deselect();
+    }
+
+    private _deselect(): HexClickAction {
+        if (!this.selectedShipId) return { type: "none" };
+        this.selectShip(null);
+        return { type: "deselect" };
+    }
+
+    private _removeEntities(ids: Set<EntityId>, exceptKey?: HexKey) {
+        for (const [key, tile] of this._tiles) {
+            if (key === exceptKey) continue;
+            if (tile.entities.some((e) => ids.has(e.id))) {
+                tile.entities = tile.entities.filter((e) => !ids.has(e.id));
+            }
+        }
+    }
+
+    /** Where every known ship currently is, and whether that hex is visible to us. */
+    private _snapshotShips(): Map<EntityId, ShipSighting> {
+        const sightings = new Map<EntityId, ShipSighting>();
+        for (const [key, tile] of this._tiles) {
+            for (const entity of tile.entities) {
+                if (entity.kind !== "ship") continue;
+                sightings.set(entity.id, {
+                    q: tile.q,
+                    r: tile.r,
+                    facing: entity.facing,
+                    seen: this._visible.has(key)
+                });
+            }
+        }
+        return sightings;
+    }
+
+    /**
+     * Animate ships now in a visible hex that were last seen in a different visible
+     * hex. Ships emerging from fog or from stale memory just appear.
+     */
+    private _animateMovedShips(before: Map<EntityId, ShipSighting>) {
+        const now = performance.now();
+        for (const [key, tile] of this._tiles) {
+            if (!this._visible.has(key)) continue;
+            for (const entity of tile.entities) {
+                if (entity.kind !== "ship") continue;
+                const prev = before.get(entity.id);
+                if (!prev?.seen || (prev.q === tile.q && prev.r === tile.r)) continue;
+
+                let motion = this._motions.get(entity.id);
+                if (!motion || motion.isDone(now)) {
+                    motion = new ShipMotion(
+                        ShipMotion.poseAtHex(prev, prev.facing, this.hexSize),
+                        now
+                    );
+                    this._motions.set(entity.id, motion);
+                }
+                motion.enqueue(
+                    axialLine(prev, tile),
+                    this.hexSize,
+                    SHIP_TYPES[entity.shipType],
+                    now
+                );
+            }
+        }
+    }
+
+    private _validateSelection() {
+        if (!this.selectedShipId) return;
+        const ship = this.findEntity(this.selectedShipId, "ship");
+        if (!ship || ship.sideId !== this.sideId) {
+            this.selectedShipId = null;
+        }
     }
 
     private _centerCameraOnContent() {
         // Prefer centering on a visible ship of our side, else map center.
         for (const tile of this._tiles.values()) {
             if (tile.fog !== "visible") continue;
-            const ship = tile.entities.find(
-                (e) => e.kind === "ship" && e.sideId === this.sideId
-            );
+            const ship = tile.entities.find((e) => e.kind === "ship" && e.sideId === this.sideId);
             if (ship) {
                 const p = axialToPixel(tile.q, tile.r, this.hexSize);
                 this.camera.x = p.x;
@@ -151,42 +468,55 @@ export class HexWorld {
         this.camera.y += before.y - after.y;
     }
 
-    render(
-        canvas: HTMLCanvasElement,
-        context: CanvasRenderingContext2D,
-        _offscreenCanvases: OffscreenCanvas[],
-        _offscreenContexts: OffscreenCanvasRenderingContext2D[]
-    ) {
+    render(canvas: HTMLCanvasElement, context: CanvasRenderingContext2D) {
         context.setTransform(1, 0, 0, 1, 0, 0);
         // Parallax is already on `context`. Draw translucent FOW hexes directly
         // so stars/clouds show through (offscreen stencil was forcing opaque coverage).
 
         if (!this.ready) return;
 
+        const now = performance.now();
+        this._framePoses.clear();
+        for (const [id, motion] of this._motions) {
+            if (motion.isDone(now)) {
+                this._motions.delete(id);
+            } else {
+                this._framePoses.set(id, motion.poseAt(now));
+            }
+        }
+        const deferred: DeferredShip[] = [];
+
         // Explored-but-not-visible first (more faded)
-        for (const tile of this._tiles.values()) {
-            const key = `${tile.q},${tile.r}` as HexKey;
+        for (const [key, tile] of this._tiles) {
             if (this._visible.has(key)) continue;
-            this._drawTileContents(context, canvas, tile, /*fullColour*/ false);
+            this._drawTileContents(context, canvas, tile, /*fullColour*/ false, deferred);
         }
 
         // Visible on top
-        for (const tile of this._tiles.values()) {
-            const key = `${tile.q},${tile.r}` as HexKey;
+        for (const [key, tile] of this._tiles) {
             if (!this._visible.has(key)) continue;
-            this._drawTileContents(context, canvas, tile, /*fullColour*/ true);
+            this._drawTileContents(context, canvas, tile, /*fullColour*/ true, deferred);
         }
+
+        // Animating ships last so they pass over neighbouring hexes.
+        const size = this.hexSize * this.camera.zoom;
+        const drawn = new Set<EntityId>();
+        for (const { entity, pose, fullColour } of deferred) {
+            const center = this.worldToScreen(pose, canvas);
+            drawEntityPlaceholder(context, center, size, entity, fullColour, pose.heading);
+            drawn.add(entity.id);
+        }
+        for (const id of this._framePoses.keys()) {
+            if (!drawn.has(id)) {
+                this._motions.delete(id);
+                this._framePoses.delete(id);
+            }
+        }
+
+        this._drawSelection(context, canvas);
     }
 
-    private _drawTileContents(
-        ctx: DrawCtx,
-        canvas: HTMLCanvasElement,
-        tile: ClientTile,
-        fullColour: boolean
-    ) {
-        const center = this.worldToScreen(axialToPixel(tile.q, tile.r, this.hexSize), canvas);
-        const size = this.hexSize * this.camera.zoom;
-
+    private _hexPath(ctx: DrawCtx, center: Pixel, size: number) {
         const corners = hexCorners(center, size);
         ctx.beginPath();
         ctx.moveTo(corners[0].x, corners[0].y);
@@ -194,6 +524,19 @@ export class HexWorld {
             ctx.lineTo(corners[i].x, corners[i].y);
         }
         ctx.closePath();
+    }
+
+    private _drawTileContents(
+        ctx: DrawCtx,
+        canvas: HTMLCanvasElement,
+        tile: ClientTile,
+        fullColour: boolean,
+        deferred: DeferredShip[]
+    ) {
+        const center = this.worldToScreen(axialToPixel(tile.q, tile.r, this.hexSize), canvas);
+        const size = this.hexSize * this.camera.zoom;
+
+        this._hexPath(ctx, center, size);
         // Keep fills clearly translucent so parallax reads through the cell.
         ctx.fillStyle = fullColour ? "rgba(20, 40, 80, 0.28)" : "rgba(12, 22, 44, 0.18)";
         ctx.fill();
@@ -202,8 +545,42 @@ export class HexWorld {
         ctx.stroke();
 
         for (const entity of tile.entities) {
+            const pose = entity.kind === "ship" ? this._framePoses.get(entity.id) : undefined;
+            if (entity.kind === "ship" && pose) {
+                deferred.push({ entity, pose, fullColour });
+                continue;
+            }
             drawEntityPlaceholder(ctx, center, size, entity, fullColour);
         }
+    }
+
+    private _drawSelection(ctx: DrawCtx, canvas: HTMLCanvasElement) {
+        const ship = this.selectedShip;
+        if (!ship) return;
+        const size = this.hexSize * this.camera.zoom;
+
+        ctx.save();
+        ctx.fillStyle = "rgba(92, 255, 176, 0.1)";
+        ctx.strokeStyle = "rgba(92, 255, 176, 0.45)";
+        ctx.lineWidth = Math.max(0.75, 1.5 * this.camera.zoom);
+        for (const hex of this.reachableHexes()) {
+            const center = this.worldToScreen(axialToPixel(hex.q, hex.r, this.hexSize), canvas);
+            this._hexPath(ctx, center, size * 0.92);
+            ctx.fill();
+            ctx.stroke();
+        }
+
+        const center = this.worldToScreen(
+            this._framePoses.get(ship.id) ?? axialToPixel(ship.q, ship.r, this.hexSize),
+            canvas
+        );
+        const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 250);
+        ctx.strokeStyle = `rgba(255, 255, 255, ${0.6 + 0.4 * pulse})`;
+        ctx.lineWidth = Math.max(1.5, size * 0.06);
+        ctx.beginPath();
+        ctx.arc(center.x, center.y, size * 0.8, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
     }
 }
 
@@ -212,10 +589,13 @@ function drawEntityPlaceholder(
     center: Pixel,
     hexSize: number,
     entity: EntitySummary,
-    fullColour: boolean
+    fullColour: boolean,
+    /** Ship heading override (radians); defaults to the entity's facing. */
+    heading?: number
 ) {
     const scale = (entity.scale ?? 0.5) * hexSize;
     const alpha = fullColour ? 1 : 0.55;
+    const lineWidth = Math.max(1, hexSize * 0.04);
     ctx.save();
     ctx.globalAlpha = alpha;
 
@@ -243,28 +623,44 @@ function drawEntityPlaceholder(
             ctx.beginPath();
             ctx.arc(center.x, center.y, scale, 0, Math.PI * 2);
             ctx.fill();
-            ctx.strokeStyle = "#9fd0ff";
-            ctx.lineWidth = Math.max(1, hexSize * 0.04);
+            ctx.strokeStyle = sideColour(entity.sideId, "#9fd0ff");
+            ctx.lineWidth = entity.sideId ? lineWidth * 1.8 : lineWidth;
             ctx.beginPath();
-            ctx.ellipse(
-                center.x,
-                center.y,
-                scale * 1.35,
-                scale * 0.35,
-                -0.4,
-                0,
-                Math.PI * 2
-            );
+            ctx.ellipse(center.x, center.y, scale * 1.35, scale * 0.35, -0.4, 0, Math.PI * 2);
             ctx.stroke();
+            if (entity.sideId) {
+                ctx.beginPath();
+                ctx.arc(center.x, center.y, scale, 0, Math.PI * 2);
+                ctx.stroke();
+            }
             break;
         }
-        case "asteroid": {
+        case "moon": {
+            const r = scale * 0.55;
+            ctx.fillStyle = fullColour ? "#b8b8c0" : "#808088";
+            ctx.beginPath();
+            ctx.arc(center.x, center.y, r, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = "rgba(0, 0, 0, 0.25)";
+            ctx.beginPath();
+            ctx.arc(center.x + r * 0.3, center.y - r * 0.2, r * 0.25, 0, Math.PI * 2);
+            ctx.fill();
+            if (entity.sideId) {
+                ctx.strokeStyle = sideColour(entity.sideId, "#ffffff");
+                ctx.lineWidth = lineWidth;
+                ctx.beginPath();
+                ctx.arc(center.x, center.y, r * 1.2, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+            break;
+        }
+        case "large_asteroid": {
             ctx.fillStyle = fullColour ? "#8a7f72" : "#5c554c";
             ctx.beginPath();
-            const bumps = 5;
+            const bumps = 9;
             for (let i = 0; i < bumps; i++) {
                 const a = (i / bumps) * Math.PI * 2;
-                const r = scale * (0.7 + ((i * 37) % 10) / 30);
+                const r = scale * (0.55 + ((i * 37) % 11) / 22);
                 const x = center.x + Math.cos(a) * r;
                 const y = center.y + Math.sin(a) * r;
                 if (i === 0) ctx.moveTo(x, y);
@@ -272,25 +668,107 @@ function drawEntityPlaceholder(
             }
             ctx.closePath();
             ctx.fill();
+            ctx.strokeStyle = entity.sideId ? sideColour(entity.sideId, "#3d3831") : "#3d3831";
+            ctx.lineWidth = lineWidth;
+            ctx.stroke();
+            break;
+        }
+        case "asteroid_belt": {
+            ctx.fillStyle = fullColour ? "#a09482" : "#6b6356";
+            const dots = 18;
+            const spread = hexSize * 0.75;
+            for (let i = 0; i < dots; i++) {
+                const a = ((i * 137.5) % 360) * (Math.PI / 180);
+                const d = spread * Math.sqrt(((i * 53) % 17) / 17 + 0.05);
+                const x = center.x + Math.cos(a) * d;
+                const y = center.y + Math.sin(a) * d * 0.8;
+                const r = Math.max(0.75, hexSize * (0.03 + ((i * 29) % 5) * 0.008));
+                ctx.beginPath();
+                ctx.arc(x, y, r, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            break;
+        }
+        case "wormhole": {
+            const r = scale * 0.9;
+            const g = ctx.createRadialGradient(center.x, center.y, 0, center.x, center.y, r);
+            g.addColorStop(0, "rgba(10, 0, 30, 0.9)");
+            g.addColorStop(0.6, "rgba(120, 60, 220, 0.6)");
+            g.addColorStop(1, "rgba(180, 120, 255, 0)");
+            ctx.fillStyle = g;
+            ctx.beginPath();
+            ctx.arc(center.x, center.y, r, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = "#c9a0ff";
+            ctx.lineWidth = lineWidth;
+            for (let arm = 0; arm < 3; arm++) {
+                ctx.beginPath();
+                const start = (arm / 3) * Math.PI * 2;
+                ctx.arc(center.x, center.y, r * (0.45 + arm * 0.18), start, start + Math.PI * 1.1);
+                ctx.stroke();
+            }
+            break;
+        }
+        case "black_hole": {
+            const r = scale * 0.55;
+            ctx.strokeStyle = "rgba(255, 170, 80, 0.85)";
+            ctx.lineWidth = Math.max(1.5, r * 0.35);
+            ctx.beginPath();
+            ctx.ellipse(center.x, center.y, r * 1.8, r * 0.6, -0.3, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.fillStyle = "#000000";
+            ctx.beginPath();
+            ctx.arc(center.x, center.y, r, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = "rgba(255, 220, 160, 0.6)";
+            ctx.lineWidth = lineWidth * 0.75;
+            ctx.stroke();
+            break;
+        }
+        case "hyperspace_tunnel": {
+            const r = scale * 0.75;
+            ctx.strokeStyle = entity.active
+                ? sideColour(entity.sideId, "#7fe8ff")
+                : "rgba(127, 232, 255, 0.55)";
+            ctx.lineWidth = lineWidth * 1.2;
+            ctx.setLineDash([Math.max(2, r * 0.3), Math.max(2, r * 0.2)]);
+            ctx.beginPath();
+            ctx.arc(center.x, center.y, r, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.beginPath();
+            ctx.moveTo(center.x - r * 0.5, center.y);
+            ctx.lineTo(center.x + r * 0.5, center.y);
+            ctx.moveTo(center.x + r * 0.2, center.y - r * 0.3);
+            ctx.lineTo(center.x + r * 0.5, center.y);
+            ctx.lineTo(center.x + r * 0.2, center.y + r * 0.3);
+            ctx.stroke();
             break;
         }
         case "ship": {
-            ctx.fillStyle = entity.sideId
-                ? entity.sideId === "alpha"
-                    ? "#5cffb0"
-                    : "#ff6b8a"
-                : "#d0d0d0";
+            // Arrowhead hull, nose along +x before rotation.
+            ctx.translate(center.x, center.y);
+            ctx.rotate(heading ?? axialDirectionAngle(entity.facing));
+            ctx.fillStyle = sideColour(entity.sideId, "#d0d0d0");
             ctx.beginPath();
-            ctx.moveTo(center.x, center.y - scale);
-            ctx.lineTo(center.x + scale * 0.7, center.y + scale * 0.7);
-            ctx.lineTo(center.x, center.y + scale * 0.25);
-            ctx.lineTo(center.x - scale * 0.7, center.y + scale * 0.7);
+            ctx.moveTo(scale, 0);
+            ctx.lineTo(-scale * 0.7, scale * 0.7);
+            ctx.lineTo(-scale * 0.25, 0);
+            ctx.lineTo(-scale * 0.7, -scale * 0.7);
             ctx.closePath();
             ctx.fill();
             ctx.strokeStyle = "#ffffffaa";
             ctx.lineWidth = Math.max(1, hexSize * 0.03);
             ctx.stroke();
+            ctx.fillStyle = "#ffffff";
+            ctx.beginPath();
+            ctx.arc(scale * 0.45, 0, Math.max(1, scale * 0.12), 0, Math.PI * 2);
+            ctx.fill();
             break;
+        }
+        default: {
+            const unknown: never = entity;
+            void unknown;
         }
     }
 

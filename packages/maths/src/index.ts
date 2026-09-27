@@ -96,6 +96,73 @@ export function axialNeighbor(hex: Axial, directionIndex: number): Axial {
     return { q: hex.q + d.q, r: hex.r + d.r };
 }
 
+/** Fractional cube coords → nearest hex. */
+export function cubeRound(x: number, y: number, z: number): Axial {
+    let rx = Math.round(x);
+    let ry = Math.round(y);
+    let rz = Math.round(z);
+    const dx = Math.abs(rx - x);
+    const dy = Math.abs(ry - y);
+    const dz = Math.abs(rz - z);
+    if (dx > dy && dx > dz) {
+        rx = -ry - rz;
+    } else if (dy > dz) {
+        ry = -rx - rz;
+    } else {
+        rz = -rx - ry;
+    }
+    return { q: rx + 0, r: rz + 0 };
+}
+
+/**
+ * Hexes on the straight line from `a` to `b`, both ends included; each step is
+ * to a neighbouring hex. A tiny nudge keeps ties on hex edges deterministic.
+ */
+export function axialLine(a: Axial, b: Axial): Axial[] {
+    const n = axialDistance(a, b);
+    const ca = axialToCube(a);
+    const cb = axialToCube(b);
+    const eps = 1e-6;
+    const results: Axial[] = [];
+    for (let i = 0; i <= n; i++) {
+        const t = n === 0 ? 0 : i / n;
+        results.push(
+            cubeRound(
+                ca.x + eps + (cb.x - ca.x) * t,
+                ca.y + eps + (cb.y - ca.y) * t,
+                ca.z - 2 * eps + (cb.z - ca.z) * t
+            )
+        );
+    }
+    return results;
+}
+
+/**
+ * Screen-space angle (radians, y down, 0 = east) of pointy-top direction index
+ * `i` as used by `axialNeighbor`.
+ */
+export function axialDirectionAngle(directionIndex: number): number {
+    return -((((directionIndex % 6) + 6) % 6) * Math.PI) / 3;
+}
+
+/** Direction index (0–5) whose angle is closest to the bearing from `from` to `to`. */
+export function axialDirectionTowards(from: Axial, to: Axial): number {
+    const a = axialToPixel(from.q, from.r, 1);
+    const b = axialToPixel(to.q, to.r, 1);
+    const angle = Math.atan2(b.y - a.y, b.x - a.x);
+    const index = Math.round(-angle / (Math.PI / 3));
+    return ((index % 6) + 6) % 6;
+}
+
+/** Signed smallest rotation (radians, in (-π, π]) taking angle `from` to angle `to`. */
+export function shortestAngleDelta(from: number, to: number): number {
+    const tau = Math.PI * 2;
+    let delta = (to - from) % tau;
+    if (delta <= -Math.PI) delta += tau;
+    if (delta > Math.PI) delta -= tau;
+    return delta;
+}
+
 /** All axial hexes within `range` of `center` (inclusive). */
 export function axialRange(center: Axial, range: number): Axial[] {
     const results: Axial[] = [];

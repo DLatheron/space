@@ -11,6 +11,10 @@ const Config = z
         hexPointToPoint: z.number().positive().optional().default(100),
         visionRange: z.int().nonnegative().optional().default(6),
         mapSeed: z.int().optional(),
+        /** Every hex starts explored for every side, remembering its initial contents. */
+        revealMap: z.boolean().optional().default(false),
+        /** Every hex is visible to every side at all times (implies explored). */
+        fullVisibility: z.boolean().optional().default(false),
         logLevels: z
             .object({
                 gameManager: LogLevel.optional(),

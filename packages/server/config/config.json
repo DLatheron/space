@@ -5,5 +5,7 @@
     "mapHeight": 50,
     "hexPointToPoint": 100,
     "visionRange": 6,
-    "mapSeed": 42
+    "mapSeed": 42,
+    "revealMap": true,
+    "fullVisibility": true
 }

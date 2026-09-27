@@ -1,7 +1,10 @@
 import {
+    AxialCoord,
     ClientId,
     ClientToServerMessage,
+    EntityId,
     GameId,
+    HexKey,
     ServerToClientMessage,
     SideId
 } from "@space/shared-data";
@@ -9,9 +12,13 @@ import { CastToArray, Logger, MessageManager } from "@space/misc";
 import { Client } from "./Client.js";
 import { ClientManager } from "./ClientManager.js";
 import { gameManager } from "./GameManager.js";
+import { axialKey } from "@space/maths";
 import { config } from "../config/config.schema.js";
-import { generateSpaceMap, type SpaceMap } from "./map/generateSpaceMap.js";
-import { Side } from "./Side.js";
+import type { EntityManager } from "./EntityManager.js";
+import { generateSpaceMap, type SpaceMap, type StarSystem } from "./map/generateSpaceMap.js";
+import { moveShip } from "./moveShip.js";
+import { Side, type VisibilityDiff } from "./Side.js";
+import { TurnManager } from "./TurnManager.js";
 
 const GAME_ID_CHARSET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 const DEFAULT_SIDE_IDS: SideId[] = ["alpha", "beta"];
@@ -50,6 +57,9 @@ export class Game {
     private readonly _messageManager: ClientMessageManager;
     private readonly _sides = new Map<SideId, Side>();
     private readonly _map: SpaceMap;
+    private readonly _entities: EntityManager;
+    private readonly _systems: StarSystem[];
+    private readonly _turns: TurnManager;
     private _isDestroying = false;
     private _nextSideIndex = 0;
 
@@ -63,20 +73,27 @@ export class Game {
         this._messageManager = new MessageManager({ game: this });
 
         for (const sideId of DEFAULT_SIDE_IDS) {
-            this._sides.set(sideId, new Side(sideId));
+            this._sides.set(sideId, new Side(sideId, { fullVisibility: config.fullVisibility }));
         }
 
         const seed = config.mapSeed ?? Math.floor(Math.random() * 1_000_000_000);
-        this._map = generateSpaceMap({
+        const galaxy = generateSpaceMap({
             width: config.mapWidth,
             height: config.mapHeight,
             hexSize: config.hexPointToPoint / 2,
             seed,
             sideIds: DEFAULT_SIDE_IDS
         });
+        this._map = galaxy.map;
+        this._entities = galaxy.entities;
+        this._systems = galaxy.systems;
+        this._turns = new TurnManager(this._sides.keys(), this._entities);
 
         for (const side of this._sides.values()) {
-            side.recomputeVisibility(this._map, config.visionRange);
+            side.recomputeVisibility(this._entities, config.visionRange);
+            if (config.revealMap) {
+                side.exploreAll(this._entities);
+            }
         }
 
         this._registerMessageHandlers();
@@ -88,7 +105,11 @@ export class Game {
             "map",
             `${this._map.width}x${this._map.height}`,
             "seed",
-            seed
+            seed,
+            "systems",
+            this._systems.length,
+            "entities",
+            this._entities.size
         );
     }
 
@@ -116,6 +137,14 @@ export class Game {
         return this._map;
     }
 
+    get entities(): EntityManager {
+        return this._entities;
+    }
+
+    get turns(): TurnManager {
+        return this._turns;
+    }
+
     private _registerMessageHandlers() {
         this._messageManager.registerHandler("client:ping", (_context, payload, from) => {
             from.sendMessage({ type: "server:pong", payload: { nonce: payload.nonce } });
@@ -124,6 +153,98 @@ export class Game {
         this._messageManager.registerHandler("client:rename", (_context, payload, from) => {
             from.name = payload.name;
         });
+
+        this._messageManager.registerHandler("client:ship:move", (_context, payload, from) => {
+            this._handleShipMove(from, payload.shipId, payload.to);
+        });
+
+        this._messageManager.registerHandler("client:turn:end", (_context, _payload, from) => {
+            this._handleTurnEnd(from);
+        });
+    }
+
+    private _sendError(client: Client, message: string) {
+        client.sendMessage({ type: "server:error", payload: { message } });
+    }
+
+    private _handleShipMove(client: Client, shipId: EntityId, to: AxialCoord) {
+        const result = moveShip(this._entities, client.sideId, shipId, to);
+        if (!result.ok) {
+            this.logger.warn("Rejected move from", client.id, result.error);
+            this._sendError(client, result.error);
+            return;
+        }
+
+        const { ship, from, cost } = result;
+        this.logger.info("Ship", ship.id, "moved", from, "->", result.to, "cost", cost);
+
+        this._refreshVisibility([axialKey(from.q, from.r), axialKey(result.to.q, result.to.r)]);
+
+        this.broadcastToSide(ship.sideId, {
+            type: "server:ship:moved",
+            payload: {
+                shipId: ship.id,
+                from,
+                to: result.to,
+                facing: ship.facing,
+                movementPoints: ship.movementPoints
+            }
+        });
+    }
+
+    private _handleTurnEnd(client: Client) {
+        if (!client.sideId || !this._sides.has(client.sideId)) {
+            this._sendError(client, "You are not assigned to a side");
+            return;
+        }
+
+        const { advanced, state } = this._turns.endTurn(client.sideId);
+        this.logger.info("Side", client.sideId, "ended turn", state);
+
+        if (advanced) {
+            this._sendShipRefresh();
+        }
+        this._broadcastTurnState();
+    }
+
+    /**
+     * Recompute FOW for every side and send each side its `server:tiles:update`
+     * diff. `touched` hexes had their contents change and are resent if visible.
+     */
+    private _refreshVisibility(touched: HexKey[]) {
+        for (const side of this._sides.values()) {
+            const diff = side.recomputeVisibility(this._entities, config.visionRange);
+            this._sendTilesUpdate(side, diff, touched);
+        }
+    }
+
+    private _sendTilesUpdate(side: Side, diff: VisibilityDiff, touched: Iterable<HexKey>) {
+        const payload = side.buildTilesUpdate(this._entities, diff, touched);
+        if (payload) {
+            this.broadcastToSide(side.id, { type: "server:tiles:update", payload });
+        }
+    }
+
+    /** After MP restore, resend every visible hex holding a ship so clients see new MP. */
+    private _sendShipRefresh() {
+        const shipHexes = new Set(
+            this._entities.ofKind("ship").map((ship) => axialKey(ship.q, ship.r))
+        );
+        const noChange: VisibilityDiff = { revealed: [], hidden: [], forgetEntityIds: [] };
+        for (const side of this._sides.values()) {
+            this._sendTilesUpdate(side, noChange, shipHexes);
+        }
+    }
+
+    private _broadcastTurnState() {
+        const state = this._turns.state();
+        for (const client of this._clientManager.clients) {
+            if (!client.sideId) continue;
+            client.sendMessage({
+                type: "server:turn:state",
+                payload: { ...state, yourSideId: client.sideId }
+            });
+        }
     }
 
     private _assignSide(client: Client): Side {
@@ -144,8 +265,9 @@ export class Game {
                 height: this._map.height,
                 hexSize: this._map.hexSize,
                 sideId: side.id,
-                tiles: side.buildTileViews(this._map),
-                visible: side.visibleKeys()
+                tiles: side.buildTileViews(this._entities),
+                visible: side.visibleKeys(),
+                turn: this._turns.state()
             }
         });
     }

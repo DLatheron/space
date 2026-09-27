@@ -91,6 +91,10 @@ input {
     font-size: 0.9rem;
 }
 
+.app__game {
+    position: relative;
+}
+
 .app__log {
     border-top: 1px solid #243355;
     padding-top: 1rem;

@@ -1,0 +1,49 @@
+.turn-hud {
+    position: absolute;
+    top: 0.75rem;
+    right: 0.75rem;
+    min-width: 12rem;
+    display: grid;
+    gap: 0.4rem;
+    padding: 0.65rem 0.8rem;
+    border: 1px solid #2c3d63;
+    border-radius: 0.4rem;
+    background: rgba(11, 16, 32, 0.82);
+    font-size: 0.85rem;
+    z-index: 2;
+}
+
+.turn-hud__row {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.75rem;
+}
+
+.turn-hud__sides {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    color: #b7c7e4;
+}
+
+.turn-hud__side {
+    font-weight: 600;
+    text-transform: capitalize;
+}
+
+.turn-hud__side--alpha {
+    color: #5cffb0;
+}
+
+.turn-hud__side--beta {
+    color: #ff6b8a;
+}
+
+.turn-hud__muted {
+    color: #7f93b5;
+}
+
+.turn-hud button:disabled {
+    opacity: 0.6;
+    cursor: default;
+}

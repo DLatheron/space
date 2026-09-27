@@ -1,24 +1,19 @@
-import type { EntityId, EntityKind, EntitySummary, SideId } from "@space/shared-data";
+import type { EntityId, EntityKind, EntityOfKind, EntitySummary } from "@space/shared-data";
 
-export type MapEntity = EntitySummary & {
-    id: EntityId;
-    kind: EntityKind;
-};
+/** Server-side ground-truth entity. Same shape as the wire summary for now. */
+export type Entity = EntitySummary;
+export type EntityOf<K extends EntityKind> = EntityOfKind<K>;
 
 export type MapTile = {
     col: number;
     row: number;
     q: number;
     r: number;
-    entities: MapEntity[];
+    /** Stack of entity ids on this hex; ground truth lives in the EntityManager. */
+    entityIds: EntityId[];
 };
 
-export function entityToSummary(entity: MapEntity): EntitySummary {
-    return {
-        id: entity.id,
-        kind: entity.kind,
-        name: entity.name,
-        sideId: entity.sideId as SideId | undefined,
-        scale: entity.scale
-    };
+/** Snapshot an entity for the wire / side memory (detached from the live object). */
+export function entityToSummary(entity: Entity): EntitySummary {
+    return { ...entity };
 }
