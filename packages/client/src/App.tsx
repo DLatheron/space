@@ -16,7 +16,7 @@ import type { GameOutletContext } from "./pages/PlanetPage.js";
 import { HexMapView } from "./components/HexMapView.js";
 import { BattleDialog } from "./components/BattleDialog.js";
 import { ResourceBar } from "./components/ResourceBar.js";
-import { TurnHud } from "./components/TurnHud.js";
+import { InfoPane } from "./components/InfoPane.js";
 import { HexWorld, type HexClickAction } from "./world/HexWorld.js";
 import "./App.css";
 
@@ -236,6 +236,9 @@ export function App() {
                         search: location.search
                     });
                     break;
+                case "inspect":
+                    appendLog(`inspect — ${action.entityId}`);
+                    break;
                 case "select":
                 case "deselect":
                 case "none":
@@ -251,30 +254,24 @@ export function App() {
         }
     }, [connected, location.pathname, location.search, navigate]);
 
+    const inGame = connected && mapReady;
+
     return (
-        <div className="app">
-            <header className="app__header">
-                <div>
-                    <h1>Space</h1>
-                    <p className="app__status">
-                        {connected
-                            ? `Connected to ${gameId ?? "…"}${sideId ? ` · side ${sideId}` : ""}`
-                            : mode
-                              ? `Connecting (${mode})…`
-                              : "Not connected"}
-                    </p>
-                </div>
-                {connected && (
-                    <div className="app__actions">
-                        <button type="button" onClick={ping}>
-                            Ping
-                        </button>
-                        <button type="button" onClick={leaveGame}>
-                            Leave
-                        </button>
+        <div className={`app${inGame ? " app--game" : ""}`}>
+            {!inGame && (
+                <header className="app__header">
+                    <div>
+                        <h1>Space</h1>
+                        <p className="app__status">
+                            {connected
+                                ? `Connected to ${gameId ?? "…"}${sideId ? ` · side ${sideId}` : ""}`
+                                : mode
+                                  ? `Connecting (${mode})…`
+                                  : "Not connected"}
+                        </p>
                     </div>
-                )}
-            </header>
+                </header>
+            )}
 
             {!connected && (
                 <MainMenu
@@ -284,24 +281,42 @@ export function App() {
                 />
             )}
 
-            {connected && mapReady && (
+            {inGame && (
                 <div className="app__game">
-                    <HexMapView world={world} onAction={onMapAction} />
-                    <ResourceBar world={world} />
-                    <TurnHud world={world} onEndTurn={endTurn} onColonise={sendColonise} />
-                    <BattleDialog world={world} onResolve={resolveBattle} />
-                    <Outlet context={outletContext} />
+                    <div className="app__map-stage">
+                        <HexMapView world={world} onAction={onMapAction} />
+                        <ResourceBar world={world} />
+                        <div className="app__map-chrome">
+                            <p className="app__status app__status--overlay">
+                                {gameId ?? "…"}
+                                {sideId ? ` · ${sideId}` : ""}
+                            </p>
+                            <div className="app__actions">
+                                <button type="button" onClick={ping}>
+                                    Ping
+                                </button>
+                                <button type="button" onClick={leaveGame}>
+                                    Leave
+                                </button>
+                            </div>
+                        </div>
+                        <BattleDialog world={world} onResolve={resolveBattle} />
+                        <Outlet context={outletContext} />
+                    </div>
+                    <InfoPane world={world} onEndTurn={endTurn} onColonise={sendColonise} />
                 </div>
             )}
 
-            <section className="app__log">
-                <h2>Message log</h2>
-                <ul>
-                    {log.map((line, index) => (
-                        <li key={`${index}-${line}`}>{line}</li>
-                    ))}
-                </ul>
-            </section>
+            {!inGame && (
+                <section className="app__log">
+                    <h2>Message log</h2>
+                    <ul>
+                        {log.map((line, index) => (
+                            <li key={`${index}-${line}`}>{line}</li>
+                        ))}
+                    </ul>
+                </section>
+            )}
         </div>
     );
 }

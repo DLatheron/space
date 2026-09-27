@@ -49,6 +49,11 @@ export function HexMapView({ world, onAction }: HexMapViewProps) {
 
         resize();
         window.addEventListener("resize", resize);
+        const observer =
+            typeof ResizeObserver !== "undefined" ? new ResizeObserver(resize) : null;
+        if (canvas.parentElement && observer) {
+            observer.observe(canvas.parentElement);
+        }
 
         const stop = CanvasLoop(canvasRef, ({ canvas, context }) => {
             context.setTransform(1, 0, 0, 1, 0, 0);
@@ -60,12 +65,28 @@ export function HexMapView({ world, onAction }: HexMapViewProps) {
         return () => {
             stop();
             window.removeEventListener("resize", resize);
+            observer?.disconnect();
         };
     }, [world]);
 
     useEffect(() => {
         const canvas = canvasRef.current;
         if (!canvas) return;
+
+        const screenFromEvent = (e: PointerEvent) => {
+            const rect = canvas.getBoundingClientRect();
+            const dpr = window.devicePixelRatio || 1;
+            return {
+                x: (e.clientX - rect.left) * dpr,
+                y: (e.clientY - rect.top) * dpr
+            };
+        };
+
+        const updateHover = (e: PointerEvent) => {
+            if (dragging.current) return;
+            const hex = world.pickHex(screenFromEvent(e), canvas);
+            world.setHoveredHex(hex);
+        };
 
         const onPointerDown = (e: PointerEvent) => {
             if (e.button !== 0) return;
@@ -76,7 +97,10 @@ export function HexMapView({ world, onAction }: HexMapViewProps) {
             canvas.setPointerCapture(e.pointerId);
         };
         const onPointerMove = (e: PointerEvent) => {
-            if (!pointerDown.current || !last.current || !start.current) return;
+            if (!pointerDown.current || !last.current || !start.current) {
+                updateHover(e);
+                return;
+            }
             if (!dragging.current) {
                 const travelled = Math.hypot(
                     e.clientX - start.current.x,
@@ -107,21 +131,23 @@ export function HexMapView({ world, onAction }: HexMapViewProps) {
             return wasClick;
         };
         const onPointerUp = (e: PointerEvent) => {
-            if (!endPointer(e)) return;
-            const rect = canvas.getBoundingClientRect();
-            const dpr = window.devicePixelRatio || 1;
-            const screen = {
-                x: (e.clientX - rect.left) * dpr,
-                y: (e.clientY - rect.top) * dpr
-            };
-            const action = world.handleClick(screen, canvas);
+            if (!endPointer(e)) {
+                updateHover(e);
+                return;
+            }
+            const action = world.handleClick(screenFromEvent(e), canvas);
             onActionRef.current?.(action);
+            updateHover(e);
         };
         const onPointerCancel = (e: PointerEvent) => {
             endPointer(e);
         };
+        const onPointerLeave = () => {
+            if (pointerDown.current) return;
+            world.setHoveredHex(null);
+        };
         const onKeyDown = (e: KeyboardEvent) => {
-            if (e.key === "Escape" && world.selectedShipId) {
+            if (e.key === "Escape" && (world.selectedShipId || world.inspectedEntityId)) {
                 world.selectShip(null);
                 onActionRef.current?.({ type: "deselect" });
             }
@@ -143,6 +169,7 @@ export function HexMapView({ world, onAction }: HexMapViewProps) {
         canvas.addEventListener("pointermove", onPointerMove);
         canvas.addEventListener("pointerup", onPointerUp);
         canvas.addEventListener("pointercancel", onPointerCancel);
+        canvas.addEventListener("pointerleave", onPointerLeave);
         canvas.addEventListener("wheel", onWheel, { passive: false });
         window.addEventListener("keydown", onKeyDown);
 
@@ -151,6 +178,7 @@ export function HexMapView({ world, onAction }: HexMapViewProps) {
             canvas.removeEventListener("pointermove", onPointerMove);
             canvas.removeEventListener("pointerup", onPointerUp);
             canvas.removeEventListener("pointercancel", onPointerCancel);
+            canvas.removeEventListener("pointerleave", onPointerLeave);
             canvas.removeEventListener("wheel", onWheel);
             window.removeEventListener("keydown", onKeyDown);
         };
@@ -160,8 +188,7 @@ export function HexMapView({ world, onAction }: HexMapViewProps) {
         <div className="hex-map-view">
             <canvas ref={canvasRef} className="hex-map-view__canvas" />
             <div className="hex-map-view__hint">
-                Drag to pan · Scroll to zoom · Click ship to select · Click hex to move · Esc to
-                deselect
+                Drag to pan · Scroll to zoom · Click to select / inspect · Esc to clear
             </div>
         </div>
     );

@@ -1,9 +1,9 @@
-/* Spans the space left of the turn HUD so it never overlaps it; content is centred. */
+/* Centred over the map stage; the permanent info pane sits to the right. */
 .resource-bar {
     position: absolute;
     top: 0.75rem;
     left: 0.75rem;
-    right: 14.5rem;
+    right: 0.75rem;
     display: flex;
     justify-content: center;
     pointer-events: none;

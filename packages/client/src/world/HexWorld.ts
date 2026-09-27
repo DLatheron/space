@@ -70,9 +70,42 @@ export type PlanetEntity = EntityOfKind<"planet">;
 export type HexClickAction =
     | { type: "none" }
     | { type: "select"; shipId: EntityId }
+    | { type: "inspect"; entityId: EntityId }
     | { type: "deselect" }
     | { type: "open-planet"; planetId: EntityId }
     | { type: "move"; shipId: EntityId; to: AxialCoord };
+
+/** What the right-hand info pane should display. */
+export type MapFocus =
+    | {
+          mode: "selection" | "hover";
+          hex: Axial;
+          fog: "explored" | "visible" | "unexplored";
+          entities: EntitySummary[];
+          /** Primary entity for the pane header; null for an empty known hex. */
+          entity: EntitySummary | null;
+      }
+    | { mode: "none" };
+
+/** Prefer interactive / distinctive entities when several share a hex. */
+const ENTITY_FOCUS_PRIORITY: Record<EntitySummary["kind"], number> = {
+    ship: 0,
+    planet: 1,
+    moon: 2,
+    sun: 3,
+    large_asteroid: 4,
+    asteroid_belt: 5,
+    wormhole: 6,
+    black_hole: 7,
+    hyperspace_tunnel: 8
+};
+
+export function primaryEntity(entities: EntitySummary[]): EntitySummary | null {
+    if (!entities.length) return null;
+    return [...entities].sort(
+        (a, b) => ENTITY_FOCUS_PRIORITY[a.kind] - ENTITY_FOCUS_PRIORITY[b.kind]
+    )[0];
+}
 
 const SIDE_COLOURS: Record<string, string> = {
     alpha: "#5cffb0",
@@ -122,6 +155,10 @@ export class HexWorld {
     sideId: SideId | null = null;
     turn: TurnState | null = null;
     selectedShipId: EntityId | null = null;
+    /** Non-ship (or enemy) entity kept in the info pane until cleared. */
+    inspectedEntityId: EntityId | null = null;
+    /** Hex currently under the pointer, or `null` when the cursor left the map. */
+    hoveredHex: Axial | null = null;
     /** Our side's private economy; `null` until the first map init. */
     economy: EconomyState | null = null;
 
@@ -179,6 +216,8 @@ export class HexWorld {
         this.turn = payload.turn;
         this.economy = payload.economy;
         this.selectedShipId = null;
+        this.inspectedEntityId = null;
+        this.hoveredHex = null;
         this._tiles.clear();
         this._visible.clear();
         this._motions.clear();
@@ -286,6 +325,7 @@ export class HexWorld {
         this._battles.set(battle.battleId, battle);
         if (battle.attackerSideId === this.sideId) {
             this.selectedShipId = null;
+            this.inspectedEntityId = null;
         }
         this._notify();
     }
@@ -401,23 +441,104 @@ export class HexWorld {
     }
 
     selectShip(shipId: EntityId | null) {
+        if (shipId === null) {
+            if (!this.selectedShipId && !this.inspectedEntityId) return;
+            this.selectedShipId = null;
+            this.inspectedEntityId = null;
+            this._notify();
+            return;
+        }
         if (this.selectedShipId === shipId) return;
         this.selectedShipId = shipId;
+        this.inspectedEntityId = null;
         this._notify();
+    }
+
+    inspectEntity(entityId: EntityId | null) {
+        if (entityId === null) {
+            if (!this.inspectedEntityId) return;
+            this.inspectedEntityId = null;
+            this._notify();
+            return;
+        }
+        if (this.inspectedEntityId === entityId) return;
+        this.inspectedEntityId = entityId;
+        this.selectedShipId = null;
+        this._notify();
+    }
+
+    setHoveredHex(hex: Axial | null) {
+        if (hex === null) {
+            if (this.hoveredHex === null) return;
+            this.hoveredHex = null;
+            this._notify();
+            return;
+        }
+        if (this.hoveredHex?.q === hex.q && this.hoveredHex?.r === hex.r) return;
+        this.hoveredHex = hex;
+        this._notify();
+    }
+
+    /**
+     * Selection wins over hover. Own ships use `selectedShipId`; other map entities
+     * use `inspectedEntityId`. With neither, the pane follows the cursor.
+     */
+    get mapFocus(): MapFocus {
+        if (this.selectedShipId) {
+            const ship = this.findEntity(this.selectedShipId, "ship");
+            if (ship) return this._focusAt(ship.q, ship.r, ship, "selection");
+        }
+        if (this.inspectedEntityId) {
+            const entity = this.findEntityById(this.inspectedEntityId);
+            if (entity) return this._focusAt(entity.q, entity.r, entity, "selection");
+        }
+        if (this.hoveredHex) {
+            return this._focusAt(this.hoveredHex.q, this.hoveredHex.r, null, "hover");
+        }
+        return { mode: "none" };
+    }
+
+    private _focusAt(
+        q: number,
+        r: number,
+        preferred: EntitySummary | null,
+        mode: "selection" | "hover"
+    ): MapFocus {
+        const tile = this._tiles.get(hexKey(q, r));
+        if (!tile) {
+            return {
+                mode,
+                hex: { q, r },
+                fog: "unexplored",
+                entities: preferred ? [preferred] : [],
+                entity: preferred
+            };
+        }
+        const entities = tile.entities;
+        return {
+            mode,
+            hex: { q, r },
+            fog: tile.fog,
+            entities,
+            entity: preferred ?? primaryEntity(entities)
+        };
+    }
+
+    findEntityById(id: EntityId): EntitySummary | undefined {
+        for (const tile of this._tiles.values()) {
+            for (const entity of tile.entities) {
+                if (entity.id === id) return entity;
+            }
+        }
+        return undefined;
     }
 
     findEntity<K extends EntitySummary["kind"]>(
         id: EntityId,
         kind: K
     ): EntityOfKind<K> | undefined {
-        for (const tile of this._tiles.values()) {
-            for (const entity of tile.entities) {
-                if (entity.id === id && entity.kind === kind) {
-                    return entity as EntityOfKind<K>;
-                }
-            }
-        }
-        return undefined;
+        const entity = this.findEntityById(id);
+        return entity?.kind === kind ? (entity as EntityOfKind<K>) : undefined;
     }
 
     isOnMap(q: number, r: number): boolean {
@@ -492,15 +613,24 @@ export class HexWorld {
         }
 
         if (planet) {
+            this.inspectEntity(planet.id);
             return { type: "open-planet", planetId: planet.id };
+        }
+
+        const inspectable = primaryEntity(entities);
+        if (inspectable) {
+            this.inspectEntity(inspectable.id);
+            return { type: "inspect", entityId: inspectable.id };
         }
 
         return this._deselect();
     }
 
     private _deselect(): HexClickAction {
-        if (!this.selectedShipId) return { type: "none" };
-        this.selectShip(null);
+        if (!this.selectedShipId && !this.inspectedEntityId) return { type: "none" };
+        this.selectedShipId = null;
+        this.inspectedEntityId = null;
+        this._notify();
         return { type: "deselect" };
     }
 
@@ -566,10 +696,14 @@ export class HexWorld {
     }
 
     private _validateSelection() {
-        if (!this.selectedShipId) return;
-        const ship = this.findEntity(this.selectedShipId, "ship");
-        if (!ship || ship.sideId !== this.sideId) {
-            this.selectedShipId = null;
+        if (this.selectedShipId) {
+            const ship = this.findEntity(this.selectedShipId, "ship");
+            if (!ship || ship.sideId !== this.sideId) {
+                this.selectedShipId = null;
+            }
+        }
+        if (this.inspectedEntityId && !this.findEntityById(this.inspectedEntityId)) {
+            this.inspectedEntityId = null;
         }
     }
 
