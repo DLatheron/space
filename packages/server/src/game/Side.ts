@@ -1,11 +1,13 @@
 import { axialKey, axialRange, parseAxialKey } from "@space/maths";
-import type {
-    ClientId,
-    EntityId,
-    EntitySummary,
-    HexKey,
-    SideId,
-    TileView
+import {
+    hexHasObstacle,
+    type AxialCoord,
+    type ClientId,
+    type EntityId,
+    type EntitySummary,
+    type HexKey,
+    type SideId,
+    type TileView
 } from "@space/shared-data";
 import type { EntityManager } from "./EntityManager.js";
 import { findTileByAxial, forEachTile, tileKey } from "./map/SpaceMap.js";
@@ -134,6 +136,24 @@ export class Side {
         return { revealed, hidden, forgetEntityIds: [...forgotten] };
     }
 
+    /** Scrub `ids` from remembered hexes; returns the ids that were remembered. */
+    forgetEntities(ids: Iterable<EntityId>): EntityId[] {
+        const forget = new Set(ids);
+        const forgotten = new Set<EntityId>();
+        for (const [key, remembered] of this._memory) {
+            if (!remembered.some((summary) => forget.has(summary.id))) continue;
+            this._memory.set(
+                key,
+                remembered.filter((summary) => {
+                    if (!forget.has(summary.id)) return true;
+                    forgotten.add(summary.id);
+                    return false;
+                })
+            );
+        }
+        return [...forgotten];
+    }
+
     /** Current view of an explored hex, or null if unexplored. */
     buildTileView(entities: EntityManager, key: HexKey): TileView | null {
         if (!this._explored.has(key)) return null;
@@ -185,6 +205,24 @@ export class Side {
             payload.forgetEntityIds = diff.forgetEntityIds;
         }
         return payload;
+    }
+
+    /**
+     * Whether this side believes `hex` holds an obstacle: live contents when visible,
+     * remembered contents when explored, and passable when unexplored.
+     */
+    knowsObstacleAt(entities: EntityManager, hex: AxialCoord): boolean {
+        const key = axialKey(hex.q, hex.r);
+        if (this._visible.has(key)) return hexHasObstacle(entities.entitiesAt(hex.q, hex.r));
+        return hexHasObstacle(this._memory.get(key) ?? []);
+    }
+
+    /** Whether every hex in `hexes` is currently visible to this side. */
+    seesAll(hexes: Iterable<AxialCoord>): boolean {
+        for (const hex of hexes) {
+            if (!this._visible.has(axialKey(hex.q, hex.r))) return false;
+        }
+        return true;
     }
 
     visibleKeys(): HexKey[] {

@@ -1,5 +1,7 @@
 import {
     AxialCoord,
+    BattleId,
+    BattleInfo,
     ClientId,
     ClientToServerMessage,
     EntityId,
@@ -14,9 +16,9 @@ import { ClientManager } from "./ClientManager.js";
 import { gameManager } from "./GameManager.js";
 import { axialKey } from "@space/maths";
 import { config } from "../config/config.schema.js";
+import { BattleManager } from "./Battle.js";
 import type { EntityManager } from "./EntityManager.js";
 import { generateSpaceMap, type SpaceMap, type StarSystem } from "./map/generateSpaceMap.js";
-import { moveShip } from "./moveShip.js";
 import { Side, type VisibilityDiff } from "./Side.js";
 import { TurnManager } from "./TurnManager.js";
 
@@ -60,6 +62,7 @@ export class Game {
     private readonly _entities: EntityManager;
     private readonly _systems: StarSystem[];
     private readonly _turns: TurnManager;
+    private readonly _battles: BattleManager;
     private _isDestroying = false;
     private _nextSideIndex = 0;
 
@@ -88,6 +91,7 @@ export class Game {
         this._entities = galaxy.entities;
         this._systems = galaxy.systems;
         this._turns = new TurnManager(this._sides.keys(), this._entities);
+        this._battles = new BattleManager(this._entities);
 
         for (const side of this._sides.values()) {
             side.recomputeVisibility(this._entities, config.visionRange);
@@ -145,6 +149,10 @@ export class Game {
         return this._turns;
     }
 
+    get battles(): BattleManager {
+        return this._battles;
+    }
+
     private _registerMessageHandlers() {
         this._messageManager.registerHandler("client:ping", (_context, payload, from) => {
             from.sendMessage({ type: "server:pong", payload: { nonce: payload.nonce } });
@@ -161,6 +169,10 @@ export class Game {
         this._messageManager.registerHandler("client:turn:end", (_context, _payload, from) => {
             this._handleTurnEnd(from);
         });
+
+        this._messageManager.registerHandler("client:battle:resolve", (_context, payload, from) => {
+            this._handleBattleResolve(from, payload.battleId, payload.winnerSideId);
+        });
     }
 
     private _sendError(client: Client, message: string) {
@@ -168,28 +180,94 @@ export class Game {
     }
 
     private _handleShipMove(client: Client, shipId: EntityId, to: AxialCoord) {
-        const result = moveShip(this._entities, client.sideId, shipId, to);
-        if (!result.ok) {
-            this.logger.warn("Rejected move from", client.id, result.error);
-            this._sendError(client, result.error);
+        const side = client.sideId ? this._sides.get(client.sideId) : undefined;
+        const outcome = this._battles.moveShip(client.sideId, shipId, to, {
+            isObstacle: side ? (hex) => side.knowsObstacleAt(this._entities, hex) : undefined
+        });
+        if (!outcome.ok) {
+            this.logger.warn("Rejected move from", client.id, outcome.error);
+            this._sendError(client, outcome.error);
             return;
         }
 
-        const { ship, from, cost } = result;
+        const result = outcome.move;
+        const { ship, from, path, cost } = result;
         this.logger.info("Ship", ship.id, "moved", from, "->", result.to, "cost", cost);
 
-        this._refreshVisibility([axialKey(from.q, from.r), axialKey(result.to.q, result.to.r)]);
-
-        this.broadcastToSide(ship.sideId, {
+        // Sent before the tiles update so clients animate along the real path. Other
+        // sides only get it when they can see every hex of the route (their own
+        // visibility doesn't depend on this ship); otherwise they infer from tiles.
+        const moved: ServerToClientMessage = {
             type: "server:ship:moved",
             payload: {
                 shipId: ship.id,
                 from,
                 to: result.to,
+                path,
                 facing: ship.facing,
                 movementPoints: ship.movementPoints
             }
-        });
+        };
+        for (const other of this._sides.values()) {
+            if (other.id === ship.sideId || other.seesAll([from, ...path])) {
+                this.broadcastToSide(other.id, moved);
+            }
+        }
+
+        this._refreshVisibility([axialKey(from.q, from.r), axialKey(result.to.q, result.to.r)]);
+
+        if (outcome.battle) {
+            this.logger.info("Battle", outcome.battle.battleId, "started", outcome.battle);
+            this._sendBattleStart(outcome.battle);
+        }
+    }
+
+    private _sendBattleStart(battle: BattleInfo) {
+        for (const sideId of [battle.attackerSideId, battle.defenderSideId]) {
+            this.broadcastToSide(sideId, {
+                type: "server:battle:start",
+                payload: { ...battle, youAreAttacker: sideId === battle.attackerSideId }
+            });
+        }
+    }
+
+    private _handleBattleResolve(client: Client, battleId: BattleId, winnerSideId: SideId) {
+        const battle = this._battles.get(battleId);
+        // Capture viewers first: losers may lose sight of the hex once their ships are gone.
+        const viewers = battle
+            ? [...this._sides.values()].filter(
+                  (side) =>
+                      side.id === battle.attackerSideId ||
+                      side.id === battle.defenderSideId ||
+                      side.seesAll([battle])
+              )
+            : [];
+
+        const result = this._battles.resolve(battleId, client.sideId, winnerSideId);
+        if (!result.ok) {
+            this.logger.warn("Rejected battle resolve from", client.id, result.error);
+            this._sendError(client, result.error);
+            return;
+        }
+
+        const { q, r } = result.battle;
+        this.logger.info("Battle", battleId, "won by", winnerSideId, result.destroyedShipIds);
+        const resolved: ServerToClientMessage = {
+            type: "server:battle:resolved",
+            payload: {
+                battleId,
+                q,
+                r,
+                winnerSideId,
+                loserSideId: result.loserSideId,
+                destroyedShipIds: result.destroyedShipIds
+            }
+        };
+        for (const side of viewers) {
+            this.broadcastToSide(side.id, resolved);
+        }
+
+        this._refreshVisibility([axialKey(q, r)], result.destroyedShipIds);
     }
 
     private _handleTurnEnd(client: Client) {
@@ -210,10 +288,13 @@ export class Game {
     /**
      * Recompute FOW for every side and send each side its `server:tiles:update`
      * diff. `touched` hexes had their contents change and are resent if visible.
+     * `destroyed` entities are scrubbed from every side's memory.
      */
-    private _refreshVisibility(touched: HexKey[]) {
+    private _refreshVisibility(touched: HexKey[], destroyed: EntityId[] = []) {
         for (const side of this._sides.values()) {
             const diff = side.recomputeVisibility(this._entities, config.visionRange);
+            const forgotten = side.forgetEntities(destroyed);
+            diff.forgetEntityIds = [...new Set([...diff.forgetEntityIds, ...forgotten])];
             this._sendTilesUpdate(side, diff, touched);
         }
     }
@@ -267,7 +348,8 @@ export class Game {
                 sideId: side.id,
                 tiles: side.buildTileViews(this._entities),
                 visible: side.visibleKeys(),
-                turn: this._turns.state()
+                turn: this._turns.state(),
+                battles: this._battles.involving(side.id)
             }
         });
     }

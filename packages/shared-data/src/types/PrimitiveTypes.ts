@@ -158,6 +158,22 @@ export const TurnState = z.object({
 });
 export type TurnState = z.infer<typeof TurnState>;
 
+export const BattleId = z.string().min(1);
+export type BattleId = z.infer<typeof BattleId>;
+
+/** A pending battle: a ship moved into a hex holding enemy ships. */
+export const BattleInfo = z.object({
+    battleId: BattleId,
+    q: z.number().int(),
+    r: z.number().int(),
+    /** Side of the moving ship; only its clients may resolve the battle. */
+    attackerSideId: SideId,
+    defenderSideId: SideId,
+    attackerShipIds: z.array(EntityId),
+    defenderShipIds: z.array(EntityId)
+});
+export type BattleInfo = z.infer<typeof BattleInfo>;
+
 export const FogState = z.enum(["unexplored", "explored", "visible"]);
 export type FogState = z.infer<typeof FogState>;
 

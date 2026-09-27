@@ -11,6 +11,7 @@ import { Server, useClientId, useServerMessageManager, useServerSocket } from ".
 import { MainMenu } from "./pages/MainMenu.js";
 import type { GameOutletContext } from "./pages/PlanetPage.js";
 import { HexMapView } from "./components/HexMapView.js";
+import { BattleDialog } from "./components/BattleDialog.js";
 import { TurnHud } from "./components/TurnHud.js";
 import { HexWorld, type HexClickAction } from "./world/HexWorld.js";
 import "./App.css";
@@ -79,7 +80,19 @@ export function App() {
             messageManager.registerHandler("server:ship:moved", (_ctx, payload) => {
                 world.applyShipMoved(payload);
                 appendLog(
-                    `ship moved — ${payload.shipId} ${payload.from.q},${payload.from.r} → ${payload.to.q},${payload.to.r} (MP ${payload.movementPoints})`
+                    `ship moved — ${payload.shipId} ${payload.from.q},${payload.from.r} → ${payload.to.q},${payload.to.r} in ${payload.path.length} steps (MP ${payload.movementPoints})`
+                );
+            }),
+            messageManager.registerHandler("server:battle:start", (_ctx, payload) => {
+                world.applyBattleStart(payload);
+                appendLog(
+                    `battle start — ${payload.attackerSideId} vs ${payload.defenderSideId} at ${payload.q},${payload.r}${payload.youAreAttacker ? " (you attack)" : ""}`
+                );
+            }),
+            messageManager.registerHandler("server:battle:resolved", (_ctx, payload) => {
+                world.applyBattleResolved(payload);
+                appendLog(
+                    `battle resolved — ${payload.winnerSideId} wins at ${payload.q},${payload.r}, destroyed ${payload.destroyedShipIds.join(", ") || "nothing"}`
                 );
             })
         ];
@@ -160,6 +173,14 @@ export function App() {
         appendLog("end turn");
     }, [sendMessage, world, appendLog]);
 
+    const resolveBattle = useCallback(
+        (battleId: string, winnerSideId: string) => {
+            sendMessage({ type: "client:battle:resolve", payload: { battleId, winnerSideId } });
+            appendLog(`resolve battle — ${battleId} → ${winnerSideId} wins`);
+        },
+        [sendMessage, appendLog]
+    );
+
     const onMapAction = useCallback(
         (action: HexClickAction) => {
             switch (action.type) {
@@ -228,6 +249,7 @@ export function App() {
                 <div className="app__game">
                     <HexMapView world={world} onAction={onMapAction} />
                     <TurnHud world={world} onEndTurn={endTurn} />
+                    <BattleDialog world={world} onResolve={resolveBattle} />
                     <Outlet context={outletContext} />
                 </div>
             )}

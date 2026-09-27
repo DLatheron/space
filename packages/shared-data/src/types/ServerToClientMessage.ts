@@ -1,6 +1,8 @@
 import { z } from "zod";
 import {
     AxialCoord,
+    BattleId,
+    BattleInfo,
     ClientSummary,
     EntityId,
     GameId,
@@ -42,7 +44,9 @@ export const ServerToClientMessage = z.discriminatedUnion("type", [
             sideId: SideId,
             tiles: z.array(TileView),
             visible: z.array(HexKey),
-            turn: TurnState
+            turn: TurnState,
+            /** Pending battles involving the receiving side. */
+            battles: z.array(BattleInfo)
         })
     }),
     z.object({
@@ -54,7 +58,11 @@ export const ServerToClientMessage = z.discriminatedUnion("type", [
         payload: z.object({
             shipId: EntityId,
             from: AxialCoord,
+            /** Final hex reached; may fall short of the requested target when MP ran out. */
             to: AxialCoord,
+            /** Hexes stepped into, in order, ending at `to` (excludes `from`). */
+            path: z.array(AxialCoord).min(1),
+            /** Direction of the last step taken. */
             facing: HexDirection,
             movementPoints: z.number().int().min(0)
         })
@@ -66,6 +74,23 @@ export const ServerToClientMessage = z.discriminatedUnion("type", [
             visible: z.array(HexKey),
             /** Entity ids that should be scrubbed from any remembered tile. */
             forgetEntityIds: z.array(z.string()).optional()
+        })
+    }),
+    z.object({
+        /** Sent to both combatant sides. */
+        type: z.literal("server:battle:start"),
+        payload: BattleInfo.extend({ youAreAttacker: z.boolean() })
+    }),
+    z.object({
+        /** Sent to every side that could see the hex, plus both combatants. */
+        type: z.literal("server:battle:resolved"),
+        payload: z.object({
+            battleId: BattleId,
+            q: z.number().int(),
+            r: z.number().int(),
+            winnerSideId: SideId,
+            loserSideId: SideId,
+            destroyedShipIds: z.array(EntityId)
         })
     })
 ]);

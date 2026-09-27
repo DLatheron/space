@@ -1,0 +1,85 @@
+.battle-dialog {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    background: rgba(4, 8, 18, 0.6);
+    z-index: 4;
+}
+
+.battle-dialog__panel {
+    min-width: min(26rem, 90%);
+    padding: 1rem 1.25rem;
+    border: 1px solid #2c3d63;
+    border-radius: 0.5rem;
+    background: #0f1730;
+}
+
+.battle-dialog__panel h2 {
+    margin: 0 0 0.75rem;
+    font-size: 1.3rem;
+}
+
+.battle-dialog__sides {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+}
+
+.battle-dialog__sides h3 {
+    margin: 0 0 0.3rem;
+    font-size: 1rem;
+}
+
+.battle-dialog__ships {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    font-size: 0.9rem;
+}
+
+.battle-dialog__side {
+    font-weight: 600;
+    text-transform: capitalize;
+}
+
+.battle-dialog__side--alpha {
+    color: #5cffb0;
+}
+
+.battle-dialog__side--beta {
+    color: #ff6b8a;
+}
+
+.battle-dialog__muted {
+    color: #7f93b5;
+    font-size: 0.9rem;
+}
+
+.battle-dialog__actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.6rem;
+}
+
+.battle-dialog__button--alpha {
+    border-color: #5cffb0;
+}
+
+.battle-dialog__button--beta {
+    border-color: #ff6b8a;
+}
+
+.battle-notice {
+    position: absolute;
+    top: 0.75rem;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 0.5rem 0.9rem;
+    border: 1px solid #2c3d63;
+    border-radius: 0.4rem;
+    background: rgba(11, 16, 32, 0.82);
+    font-size: 0.85rem;
+    pointer-events: none;
+    z-index: 2;
+}

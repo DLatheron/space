@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { AxialCoord, EntityId } from "./PrimitiveTypes.js";
+import { AxialCoord, BattleId, EntityId, SideId } from "./PrimitiveTypes.js";
 
 export const ClientToServerMessage = z.discriminatedUnion("type", [
     z.object({
@@ -17,6 +17,11 @@ export const ClientToServerMessage = z.discriminatedUnion("type", [
     z.object({
         type: z.literal("client:turn:end"),
         payload: z.object({})
+    }),
+    z.object({
+        /** Only accepted from the attacker's side. */
+        type: z.literal("client:battle:resolve"),
+        payload: z.object({ battleId: BattleId, winnerSideId: SideId })
     })
 ]);
 export type ClientToServerMessage = z.infer<typeof ClientToServerMessage>;

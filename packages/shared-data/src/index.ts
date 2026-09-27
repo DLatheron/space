@@ -1,4 +1,5 @@
 export * from "./types/PrimitiveTypes.js";
+export * from "./types/Movement.js";
 export * from "./types/RestTypes.js";
 export * from "./types/ShipTypes.js";
 export * from "./types/ClientToServerMessage.js";

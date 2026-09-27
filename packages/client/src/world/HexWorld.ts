@@ -1,19 +1,23 @@
 import {
     axialDirectionAngle,
-    axialDistance,
-    axialLine,
-    axialRange,
     axialToOffset,
     axialToPixel,
     hexCorners,
     hexHorizSpacing,
+    hexReachable,
     hexVertSpacing,
+    planHexPath,
     type Axial,
+    type HexPathOptions,
     type Pixel
 } from "@space/maths";
 import {
+    hexHasObstacle,
+    MOVE_COST_PER_HEX,
     SHIP_TYPES,
     type AxialCoord,
+    type BattleId,
+    type BattleInfo,
     type EntityId,
     type EntityOfKind,
     type EntitySummary,
@@ -22,6 +26,7 @@ import {
     type TileView,
     type TurnState
 } from "@space/shared-data";
+import { Explosions } from "./Explosions.js";
 import { ShipMotion, type ShipPose } from "./ShipMotion.js";
 
 export type Camera = {
@@ -43,6 +48,18 @@ type ShipSighting = { q: number; r: number; facing: number; seen: boolean };
 
 type DeferredShip = { entity: ShipEntity; pose: ShipPose; fullColour: boolean };
 
+/** Destroyed ship still finishing its move animation before it explodes. */
+type DyingShip = { entity: ShipEntity; motion: ShipMotion; colour: string };
+
+export type BattleResolved = {
+    battleId: BattleId;
+    q: number;
+    r: number;
+    winnerSideId: SideId;
+    loserSideId: SideId;
+    destroyedShipIds: EntityId[];
+};
+
 export type ShipEntity = EntityOfKind<"ship">;
 export type PlanetEntity = EntityOfKind<"planet">;
 
@@ -58,7 +75,7 @@ const SIDE_COLOURS: Record<string, string> = {
     beta: "#ff6b8a"
 };
 
-function sideColour(sideId: SideId | null | undefined, fallback: string): string {
+export function sideColour(sideId: SideId | null | undefined, fallback: string): string {
     if (!sideId) return fallback;
     return SIDE_COLOURS[sideId] ?? "#ffd166";
 }
@@ -110,6 +127,10 @@ export class HexWorld {
     private readonly _motions = new Map<EntityId, ShipMotion>();
     /** Animated poses for the frame being rendered. */
     private readonly _framePoses = new Map<EntityId, ShipPose>();
+    private readonly _explosions = new Explosions();
+    private _dying: DyingShip[] = [];
+    /** Pending battles involving our side. */
+    private readonly _battles = new Map<BattleId, BattleInfo>();
 
     camera: Camera = { x: 0, y: 0, zoom: 0.35 };
 
@@ -142,6 +163,7 @@ export class HexWorld {
         tiles: TileView[];
         visible: HexKey[];
         turn: TurnState;
+        battles: BattleInfo[];
     }) {
         this.width = payload.width;
         this.height = payload.height;
@@ -152,6 +174,12 @@ export class HexWorld {
         this._tiles.clear();
         this._visible.clear();
         this._motions.clear();
+        this._explosions.clear();
+        this._dying = [];
+        this._battles.clear();
+        for (const battle of payload.battles) {
+            this._battles.set(battle.battleId, battle);
+        }
 
         for (const key of payload.visible) {
             this._visible.add(key);
@@ -216,6 +244,7 @@ export class HexWorld {
         shipId: EntityId;
         from: AxialCoord;
         to: AxialCoord;
+        path: AxialCoord[];
         facing: number;
         movementPoints: number;
     }) {
@@ -240,9 +269,61 @@ export class HexWorld {
         }
         dest.entities = [...dest.entities, moved];
 
-        this._animateMovedShips(before);
+        this._animateMovedShips(before, new Map([[ship.id, [payload.from, ...payload.path]]]));
         this._validateSelection();
         this._notify();
+    }
+
+    applyBattleStart(battle: BattleInfo) {
+        this._battles.set(battle.battleId, battle);
+        if (battle.attackerSideId === this.sideId) {
+            this.selectedShipId = null;
+        }
+        this._notify();
+    }
+
+    /**
+     * Remove destroyed ships and blow them up: immediately at their hex, or once a
+     * still-running move animation reaches its end.
+     */
+    applyBattleResolved(payload: BattleResolved) {
+        this._battles.delete(payload.battleId);
+        const now = performance.now();
+        const colour = sideColour(payload.loserSideId, "#ffd166");
+
+        for (const id of payload.destroyedShipIds) {
+            const ship = this.findEntity(id, "ship");
+            const motion = this._motions.get(id);
+            this._motions.delete(id);
+            if (ship && motion && !motion.isDone(now)) {
+                this._dying.push({ entity: ship, motion, colour });
+                continue;
+            }
+            const at = axialToPixel(ship?.q ?? payload.q, ship?.r ?? payload.r, this.hexSize);
+            this._explosions.spawn(at, colour, this.hexSize, now);
+        }
+        if (!payload.destroyedShipIds.length) {
+            const at = axialToPixel(payload.q, payload.r, this.hexSize);
+            this._explosions.spawn(at, colour, this.hexSize, now);
+        }
+
+        this._removeEntities(new Set(payload.destroyedShipIds));
+        this._validateSelection();
+        this._notify();
+    }
+
+    get battles(): BattleInfo[] {
+        return [...this._battles.values()];
+    }
+
+    /** Pending battle our side must resolve, if any. */
+    get battleToResolve(): BattleInfo | undefined {
+        return this.battles.find((battle) => battle.attackerSideId === this.sideId);
+    }
+
+    /** Pending battle we are defending and waiting on the attacker for, if any. */
+    get battleAwaited(): BattleInfo | undefined {
+        return this.battles.find((battle) => battle.defenderSideId === this.sideId);
     }
 
     applyTurnState(payload: TurnState & { yourSideId?: SideId }) {
@@ -296,13 +377,28 @@ export class HexWorld {
         return col >= 0 && row >= 0 && col < this.width && row < this.height;
     }
 
-    /** Hexes the selected ship can reach this turn (excluding its own hex). */
+    /** Whether our known contents of `hex` block pathing; unexplored hexes are open. */
+    isKnownObstacle(hex: Axial): boolean {
+        return hexHasObstacle(this._tiles.get(hexKey(hex.q, hex.r))?.entities ?? []);
+    }
+
+    private _pathOptions(): HexPathOptions {
+        return {
+            inBounds: (h) => this.isOnMap(h.q, h.r),
+            passable: (h) => !this.isKnownObstacle(h)
+        };
+    }
+
+    /**
+     * Hexes the selected ship can reach this turn going around known obstacles
+     * (excluding its own hex). Obstacles are included when they are the final step.
+     */
     reachableHexes(): Axial[] {
         const ship = this.selectedShip;
-        if (!ship || ship.movementPoints <= 0) return [];
-        return axialRange(ship, ship.movementPoints).filter(
-            (h) => (h.q !== ship.q || h.r !== ship.r) && this.isOnMap(h.q, h.r)
-        );
+        if (!ship) return [];
+        const steps = Math.floor(ship.movementPoints / MOVE_COST_PER_HEX);
+        if (steps <= 0) return [];
+        return hexReachable(ship, steps, this._pathOptions());
     }
 
     pickHex(screen: Pixel, canvas: HTMLCanvasElement): Axial | null {
@@ -313,6 +409,7 @@ export class HexWorld {
 
     /** Decide what a click (not drag) at `screen` should do; selection changes are applied here. */
     handleClick(screen: Pixel, canvas: HTMLCanvasElement): HexClickAction {
+        if (this.battleToResolve) return { type: "none" };
         const hex = this.pickHex(screen, canvas);
         if (!hex) {
             return this._deselect();
@@ -335,15 +432,17 @@ export class HexWorld {
             return { type: "select", shipId: next.id };
         }
 
+        const planet = entities.find((e): e is PlanetEntity => e.kind === "planet");
         const ship = this.selectedShip;
-        if (ship) {
-            const distance = axialDistance(ship, hex);
-            if (distance > 0 && distance <= ship.movementPoints) {
+        if (ship && ship.movementPoints >= MOVE_COST_PER_HEX) {
+            const inRange = this.reachableHexes().some((h) => h.q === hex.q && h.r === hex.r);
+            // Beyond range the ship heads that way and stops when MP run out, except
+            // that far planets still open their page.
+            if (inRange || !planet) {
                 return { type: "move", shipId: ship.id, to: { q: hex.q, r: hex.r } };
             }
         }
 
-        const planet = entities.find((e): e is PlanetEntity => e.kind === "planet");
         if (planet) {
             return { type: "open-planet", planetId: planet.id };
         }
@@ -385,9 +484,14 @@ export class HexWorld {
 
     /**
      * Animate ships now in a visible hex that were last seen in a different visible
-     * hex. Ships emerging from fog or from stale memory just appear.
+     * hex. Ships emerging from fog or from stale memory just appear. `knownPaths`
+     * (start hex first) come from the server; otherwise the route is guessed from
+     * our own map, which is cosmetic only.
      */
-    private _animateMovedShips(before: Map<EntityId, ShipSighting>) {
+    private _animateMovedShips(
+        before: Map<EntityId, ShipSighting>,
+        knownPaths?: Map<EntityId, Axial[]>
+    ) {
         const now = performance.now();
         for (const [key, tile] of this._tiles) {
             if (!this._visible.has(key)) continue;
@@ -404,12 +508,11 @@ export class HexWorld {
                     );
                     this._motions.set(entity.id, motion);
                 }
-                motion.enqueue(
-                    axialLine(prev, tile),
-                    this.hexSize,
-                    SHIP_TYPES[entity.shipType],
-                    now
-                );
+                const known = knownPaths?.get(entity.id);
+                const startsAtPrev = known?.[0].q === prev.q && known[0].r === prev.r;
+                const path =
+                    known && startsAtPrev ? known : planHexPath(prev, tile, this._pathOptions());
+                motion.enqueue(path, this.hexSize, SHIP_TYPES[entity.shipType], now);
             }
         }
     }
@@ -513,7 +616,28 @@ export class HexWorld {
             }
         }
 
+        this._drawDying(context, canvas, now, size);
+        this._explosions.render(
+            context,
+            now,
+            (p) => this.worldToScreen(p, canvas),
+            this.camera.zoom
+        );
+
         this._drawSelection(context, canvas);
+    }
+
+    private _drawDying(ctx: DrawCtx, canvas: HTMLCanvasElement, now: number, size: number) {
+        this._dying = this._dying.filter(({ entity, motion, colour }) => {
+            const pose = motion.poseAt(now);
+            if (motion.isDone(now)) {
+                this._explosions.spawn(pose, colour, this.hexSize, now);
+                return false;
+            }
+            const center = this.worldToScreen(pose, canvas);
+            drawEntityPlaceholder(ctx, center, size, entity, true, pose.heading);
+            return true;
+        });
     }
 
     private _hexPath(ctx: DrawCtx, center: Pixel, size: number) {
