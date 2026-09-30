@@ -222,8 +222,9 @@ export const BuildItem = z.discriminatedUnion("kind", [
 export type BuildItem = z.infer<typeof BuildItem>;
 
 /**
- * A build in progress. Funding is progress: it completes at the end of the turn in which
- * `applied` reaches `cost`, drawing at most `ratePerTurn` of each resource per turn.
+ * A build in progress. Funding is progress, drawing at most `ratePerTurn` of each resource per
+ * turn. Once `applied` reaches `cost` it is ready (see `isFullyFunded`): it stays listed for a
+ * turn and completes at the start of the next end of turn.
  */
 export const BuildOrder = z.object({
     id: OrderId,
@@ -259,7 +260,11 @@ export const LocationEconomy = z.object({
     /** Local production and delivered cargo; builds here draw from it (see `stockpileCap`). */
     stockpile: Resources,
     installations: z.array(Installation),
-    /** Active orders (see `partitionOrders`) are funded concurrently by priority (see `fundOrders`). */
+    /**
+     * Every queue's orders in one list; each queue (see `queueCategory`) keeps its relative
+     * order here, which breaks priority ties. Active orders (see `partitionOrders`) are funded
+     * concurrently by priority (see `fundLocationOrders`); ready ones wait to complete.
+     */
     orders: z.array(BuildOrder)
 });
 export type LocationEconomy = z.infer<typeof LocationEconomy>;
@@ -320,9 +325,15 @@ export const STRUCTURE_INFO: Record<
     habitat: { name: "Habitat", description: "Grows population each turn." },
     mine: { name: "Mine", description: "Produces materials each turn." },
     trade_hub: { name: "Trade Hub", description: "Produces money each turn." },
-    shipyard: { name: "Shipyard", description: "Builds Scouts, Colony Ships and Transports." },
-    advanced_shipyard: { name: "Advanced Shipyard", description: "Builds Frigates." },
-    docks: { name: "Docks", description: "Raises the ship cap." },
+    shipyard: {
+        name: "Shipyard",
+        description: "Builds Scouts, Colony Ships, Transports and Fighter Squadrons."
+    },
+    advanced_shipyard: {
+        name: "Advanced Shipyard",
+        description: "Builds Frigates, Advanced Fighter Squadrons and, with Docks, Star Destroyers."
+    },
+    docks: { name: "Docks", description: "Raises the ship cap. Needed for Star Destroyers." },
     science_academy: {
         name: "Science Academy",
         description: "Produces science each turn and researches techs.",
@@ -605,6 +616,49 @@ export function buildCategory(item: BuildItem): BuildCategory | undefined {
     }
 }
 
+/**
+ * The build queue an item is listed and reordered in. Like `buildCategory`, except ship and
+ * ground unit upgrades join the ships and ground units queues (still without using a slot).
+ */
+export function queueCategory(item: BuildItem): BuildCategory {
+    if (item.kind === "enhancement") {
+        switch (item.target.kind) {
+            case "installation":
+                return "installations";
+            case "ship":
+                return "ships";
+            case "groundUnit":
+                return "groundUnits";
+        }
+    }
+    return buildCategory(item)!;
+}
+
+export const QueueDirection = z.enum(["up", "down"]);
+export type QueueDirection = z.infer<typeof QueueDirection>;
+
+/**
+ * A copy of `orders` with `orderId` swapped with its neighbour in the same queue (see
+ * `queueCategory`); orders in other queues keep their places. Undefined when the order is
+ * missing or already at that end of its queue.
+ */
+export function moveOrderInQueue<T extends Pick<BuildOrder, "id" | "item">>(
+    orders: readonly T[],
+    orderId: OrderId,
+    direction: QueueDirection
+): T[] | undefined {
+    const from = orders.findIndex((o) => o.id === orderId);
+    if (from < 0) return undefined;
+    const queue = queueCategory(orders[from]!.item);
+    const step = direction === "up" ? -1 : 1;
+    let to = from + step;
+    while (to >= 0 && to < orders.length && queueCategory(orders[to]!.item) !== queue) to += step;
+    if (to < 0 || to >= orders.length) return undefined;
+    const result = [...orders];
+    [result[from], result[to]] = [result[to]!, result[from]!];
+    return result;
+}
+
 /** Orders a location may run at once per category: the base plus built installations' bonuses. */
 export function buildSlots(
     location: Pick<LocationEconomy, "installations">,
@@ -624,14 +678,21 @@ export type OrderPartition<T> = {
     active: T[];
     /** Over their category's limit: not funded and no demand until a slot frees up. */
     waiting: T[];
+    /**
+     * Fully funded, completing at the next end of turn; in list order. They draw nothing and
+     * don't hold a build slot.
+     */
+    ready: T[];
 };
 
+type PartitionableOrder = Pick<BuildOrder, "id" | "item" | "priority" | "cost" | "applied">;
+
 /**
- * Splits a location's orders by its `buildSlots`: within each category the highest priority
- * orders are active, older first (list order is placement order). Uncategorised orders
- * are always active.
+ * Splits a location's orders by its `buildSlots`: fully funded orders are ready; of the rest,
+ * within each category the highest priority orders are active, earlier in the queue first
+ * (list order is queue order; see `moveOrderInQueue`). Uncategorised orders are always active.
  */
-export function partitionOrders<T extends Pick<BuildOrder, "id" | "item" | "priority">>(
+export function partitionOrders<T extends PartitionableOrder>(
     location: Pick<LocationEconomy, "installations"> & { orders: readonly T[] },
     balance: EconomyBalance
 ): OrderPartition<T> {
@@ -640,17 +701,19 @@ export function partitionOrders<T extends Pick<BuildOrder, "id" | "item" | "prio
     const tier = (o: T) => BUILD_PRIORITIES.indexOf(o.priority);
     for (const category of BUILD_CATEGORIES) {
         const candidates = location.orders
-            .filter((o) => buildCategory(o.item) === category)
+            .filter((o) => buildCategory(o.item) === category && !isFullyFunded(o))
             .sort((a, b) => tier(a) - tier(b));
         for (const o of candidates.slice(0, slots[category])) activeIds.add(o.id);
     }
     const active: T[] = [];
     const waiting: T[] = [];
+    const ready: T[] = [];
     for (const o of location.orders) {
-        if (buildCategory(o.item) === undefined || activeIds.has(o.id)) active.push(o);
+        if (isFullyFunded(o)) ready.push(o);
+        else if (buildCategory(o.item) === undefined || activeIds.has(o.id)) active.push(o);
         else waiting.push(o);
     }
-    return { active, waiting };
+    return { active, waiting, ready };
 }
 
 export type FundableOrder = Pick<
@@ -707,6 +770,35 @@ export function fundOrders<T extends FundableOrder>(
         drawn,
         orders: orders.map((o) => ({ ...o, applied: addResources(o.applied, drawn[o.id]!) }))
     };
+}
+
+/**
+ * One end of turn's funding at a location: its active orders draw (see `fundOrders`), then
+ * the slots freed by orders that just became fully funded pass straight on, and the newly
+ * active orders draw from what is left. Each order draws at most once. `orders` in the result
+ * is every order of the location, in list order, with `applied` updated.
+ */
+export function fundLocationOrders<T extends PartitionableOrder & FundableOrder>(
+    stockpile: Resources,
+    location: Pick<LocationEconomy, "installations"> & { orders: readonly T[] },
+    balance: EconomyBalance
+): FundingResult<T> {
+    const drawn: Record<OrderId, Resources> = {};
+    let orders = [...location.orders];
+    let left = { ...stockpile };
+    for (;;) {
+        const fresh = partitionOrders(
+            { installations: location.installations, orders },
+            balance
+        ).active.filter((o) => !(o.id in drawn));
+        if (fresh.length === 0) break;
+        const funded = fundOrders(left, fresh);
+        left = funded.stockpile;
+        Object.assign(drawn, funded.drawn);
+        const updated = new Map(funded.orders.map((o) => [o.id, o]));
+        orders = orders.map((o) => updated.get(o.id) ?? o);
+    }
+    return { stockpile: left, drawn, orders };
 }
 
 /** Water-fills `available` across `caps` (in insertion order); returns what is left over. */

@@ -1,0 +1,118 @@
+.build-queue {
+    display: grid;
+    gap: 0.35rem;
+}
+
+.build-queue__summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.1rem 0.45rem;
+    margin: 0;
+    color: #7f93b5;
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.build-queue__label {
+    color: #9ab3d4;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.build-queue__summary strong {
+    color: #dfe8f7;
+}
+
+.build-queue__summary .build-queue__slots--busy strong {
+    color: #ffd166;
+}
+
+.build-queue__list {
+    display: grid;
+    gap: 0.35rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.build-queue__entry {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.6rem;
+    padding: 0.35rem 0.55rem;
+    border: 1px solid #22314f;
+    border-radius: 0.35rem;
+    background: #121c38;
+}
+
+.build-queue__entry--queued {
+    border-style: dashed;
+    opacity: 0.7;
+}
+
+.build-queue__entry--ready {
+    border-color: #6b5a2a;
+}
+
+.build-queue__entry--ready .build-queue__status {
+    color: #ffd166;
+}
+
+.build-queue__main {
+    display: grid;
+    gap: 0.25rem;
+    flex: 1;
+    min-width: 0;
+}
+
+.build-queue__head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.3rem 0.6rem;
+}
+
+.build-queue__title {
+    min-width: 0;
+    font-size: 0.9rem;
+}
+
+.build-queue__status {
+    color: #7f93b5;
+    font-size: 0.78rem;
+}
+
+.build-queue__controls {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+
+.build-queue__move {
+    display: inline-flex;
+    border: 1px solid #2c3d63;
+    border-radius: 0.3rem;
+    overflow: hidden;
+}
+
+.build-queue__move button {
+    padding: 0.1rem 0.4rem;
+    border: none;
+    border-radius: 0;
+    background: #16233f;
+    color: #9ab3d4;
+    font-size: 0.65rem;
+    line-height: 1.4;
+}
+
+.build-queue__move button + button {
+    border-left: 1px solid #2c3d63;
+}
+
+.build-queue__cancel {
+    padding: 0.1rem 0.5rem;
+    font-size: 0.75rem;
+}

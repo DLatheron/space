@@ -1,0 +1,47 @@
+.funding-bars {
+    display: grid;
+    gap: 0.15rem;
+}
+
+.funding-bars__row {
+    display: grid;
+    grid-template-columns: 3rem 1fr 7rem;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.78rem;
+}
+
+.funding-bars__track {
+    display: flex;
+    height: 0.4rem;
+    border-radius: 999px;
+    background: #1a2644;
+    overflow: hidden;
+}
+
+.funding-bars__fill,
+.funding-bars__next {
+    height: 100%;
+    transition: width 0.4s ease-out;
+}
+
+.funding-bars__fill {
+    background: #5cffb0;
+}
+
+.funding-bars__next {
+    background: rgba(92, 255, 176, 0.35);
+}
+
+.funding-bars--ready .funding-bars__fill {
+    background: #ffd166;
+}
+
+.funding-bars__amount {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.funding-bars__draw {
+    color: #5cffb0;
+}

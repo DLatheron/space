@@ -144,7 +144,7 @@ describe("EconomyManager", () => {
     function withShipyard() {
         const world = economyWorld();
         expect(world.economy.build("alpha", world.home.id, structure("shipyard")).ok).toBe(true);
-        advance(world.economy, DEFAULTS.structures.shipyard.buildTurns);
+        advance(world.economy, DEFAULTS.structures.shipyard.buildTurns + 1);
         expect(
             world.economy.locationEconomy(world.home.id)?.installations.map((i) => i.type)
         ).toEqual(["shipyard"]);
@@ -231,7 +231,7 @@ describe("EconomyManager", () => {
         });
     });
 
-    it("funds orders concurrently at their per-turn rate and completes them when funded", () => {
+    it("funds orders concurrently at their per-turn rate and completes them the turn after", () => {
         const { economy, home } = economyWorld();
         economy.build("alpha", home.id, structure("habitat"));
         economy.build("alpha", home.id, structure("mine"));
@@ -240,6 +240,14 @@ describe("EconomyManager", () => {
             { money: 25, materials: 50, population: 0, science: 0 },
             { money: 50, materials: 0, population: 5, science: 0 }
         ]);
+        advance(economy, 1);
+        expect(economy.locationEconomy(home.id)).toMatchObject({
+            installations: [],
+            orders: [
+                { applied: DEFAULTS.structures.habitat.cost },
+                { applied: DEFAULTS.structures.mine.cost }
+            ]
+        });
         advance(economy, 1);
         expect(economy.locationEconomy(home.id)).toMatchObject({
             installations: [
@@ -263,7 +271,7 @@ describe("EconomyManager", () => {
         economy.deposit(moon.id, { ...zeroResources(), money: 30, materials: 50 });
         economy.build("alpha", moon.id, structure("habitat"), "low");
         economy.build("alpha", moon.id, structure("habitat"), "high");
-        economy.fundAndComplete();
+        economy.fund();
         const [low, high] = economy.locationEconomy(moon.id)!.orders;
         expect(high.applied).toMatchObject({ money: 25, materials: 50 });
         expect(low.applied).toMatchObject({ money: 5, materials: 0 });
@@ -272,7 +280,7 @@ describe("EconomyManager", () => {
     it("spawns a finished ship on the location hex with full MP", () => {
         const { entities, economy, home } = withShipyard();
         economy.build("alpha", home.id, ship("scout"));
-        expect(advance(economy, 1)).toEqual([]);
+        expect(advance(economy, DEFAULTS.ships.scout.buildTurns)).toEqual([]);
         const [spawned] = advance(economy, 1);
         expect(spawned).toMatchObject({
             kind: "ship",
@@ -320,7 +328,7 @@ describe("EconomyManager", () => {
             })
         );
 
-        // The habitat completes during turn 2's advance, after that turn's income.
+        // Funded in turn 2's advance, the habitat completes at the start of turn 3's, before income.
         advance(economy, 2);
         expect(economy.stateFor("alpha").lastIncome).toEqual(
             addResources(base, DEFAULTS.structures.habitat.produces)
@@ -358,6 +366,82 @@ describe("EconomyManager", () => {
         expect(economy.setPriority("alpha", home.id, orderId, "low").ok).toBe(true);
         expect(economy.locationEconomy(home.id)?.orders[0].priority).toBe("low");
         expect(economy.setPriority("beta", home.id, orderId, "high").ok).toBe(false);
+    });
+
+    describe("moveOrder", () => {
+        /** One slot per category and Scouts without a Shipyard, so queues can be mixed freely. */
+        function queueWorld() {
+            const map = createEmptyMap({ width: 20, height: 20, hexSize: 50, seed: 1 });
+            const entities = new EntityManager(map);
+            const home = entities.add(makePlanet("home-a", 5, 5, HOME_PLANET_LEVEL, "alpha"));
+            const betaHome = entities.add(makePlanet("home-b", 9, 9, HOME_PLANET_LEVEL, "beta"));
+            const balance: EconomyBalance = {
+                ...DEFAULTS,
+                ships: { ...DEFAULTS.ships, scout: { ...DEFAULTS.ships.scout, requires: [] } },
+                buildSlots: {
+                    base: { ships: 1, installations: 1, groundUnits: 0, research: 0 },
+                    structures: {}
+                }
+            };
+            const economy = new EconomyManager(entities, ["alpha", "beta"], { balance });
+            const place = (item: BuildItem) => {
+                const result = economy.build("alpha", home.id, item);
+                if (!result.ok) throw new Error(result.error);
+                return result.order.id;
+            };
+            const orderIds = () => economy.locationEconomy(home.id)!.orders.map((o) => o.id);
+            const activeIds = () => economy.activeOrders(home.id).map((o) => o.id);
+            return { economy, home, betaHome, place, orderIds, activeIds };
+        }
+
+        it("reorders within a queue, skipping other queues' orders", () => {
+            const { economy, home, place, orderIds } = queueWorld();
+            const habitat = place(structure("habitat"));
+            const scout = place(ship("scout"));
+            const mine = place(structure("mine"));
+            expect(economy.moveOrder("alpha", home.id, mine, "up")).toEqual({ ok: true });
+            expect(orderIds()).toEqual([mine, scout, habitat]);
+            expect(economy.moveOrder("alpha", home.id, mine, "down")).toEqual({ ok: true });
+            expect(orderIds()).toEqual([habitat, scout, mine]);
+        });
+
+        it("rejects moves across queues, past a queue's end, and at foreign locations", () => {
+            const { economy, home, betaHome, place, orderIds } = queueWorld();
+            const scout = place(ship("scout"));
+            const habitat = place(structure("habitat"));
+            const before = orderIds();
+            expect(economy.moveOrder("alpha", home.id, habitat, "up")).toMatchObject({ ok: false });
+            expect(economy.moveOrder("alpha", home.id, scout, "down")).toMatchObject({
+                ok: false
+            });
+            expect(economy.moveOrder("alpha", home.id, "nope", "up")).toMatchObject({ ok: false });
+            expect(economy.moveOrder("beta", home.id, habitat, "up")).toMatchObject({ ok: false });
+            expect(economy.moveOrder("alpha", betaHome.id, habitat, "up")).toMatchObject({
+                ok: false
+            });
+            expect(orderIds()).toEqual(before);
+        });
+
+        it("hands the next free build slot to the order first in the queue", () => {
+            const { economy, home, place, activeIds } = queueWorld();
+            const habitat = place(structure("habitat"));
+            const mine = place(structure("mine"));
+            const tradeHub = place(structure("trade_hub"));
+            expect(activeIds()).toEqual([habitat]);
+
+            economy.moveOrder("alpha", home.id, tradeHub, "up");
+            expect(activeIds()).toEqual([habitat]);
+            economy.moveOrder("alpha", home.id, tradeHub, "up");
+            expect(activeIds()).toEqual([tradeHub]);
+
+            economy.cancel("alpha", home.id, tradeHub);
+            expect(activeIds()).toEqual([habitat]);
+            economy.moveOrder("alpha", home.id, mine, "up");
+            expect(activeIds()).toEqual([mine]);
+            // Priority still outranks queue position.
+            economy.setPriority("alpha", home.id, habitat, "high");
+            expect(activeIds()).toEqual([habitat]);
+        });
     });
 
     it("colonises an unowned planet with a colony ship on its hex", () => {
@@ -497,13 +581,18 @@ describe("EconomyManager with instantBuild", () => {
         const map = createEmptyMap({ width: 20, height: 20, hexSize: 50, seed: 1 });
         const entities = new EntityManager(map);
         const home = entities.add(makePlanet("home-a", 5, 5, HOME_PLANET_LEVEL, "alpha"));
-        entities.add(makeShip("enemy", "beta", 5, 5));
+        const enemy = entities.add(makeShip("enemy", "beta", 5, 5));
         const economy = new EconomyManager(entities, ["alpha", "beta"], { instantBuild: true });
 
         economy.build("alpha", home.id, { kind: "structure", structureType: "shipyard" });
         const result = economy.build("alpha", home.id, { kind: "ship", shipType: "scout" });
         expect(result).toMatchObject({ ok: true, completed: false });
         expect(economy.locationEconomy(home.id)?.orders).toHaveLength(1);
+        expect(economy.activeOrders(home.id)).toEqual([]);
+
+        entities.remove(enemy.id);
+        expect(economy.advanceTurn().spawnedShips).toHaveLength(1);
+        expect(economy.locationEconomy(home.id)?.orders).toEqual([]);
     });
 });
 
@@ -516,13 +605,15 @@ describe("TurnManager with an economy", () => {
         const turns = new TurnManager(["alpha", "beta"], entities, economy);
 
         economy.build("alpha", home.id, { kind: "structure", structureType: "shipyard" });
-        for (let i = 0; i < DEFAULTS.structures.shipyard.buildTurns; i++) {
+        for (let i = 0; i <= DEFAULTS.structures.shipyard.buildTurns; i++) {
             turns.endTurn("alpha");
             turns.endTurn("beta");
         }
         economy.build("alpha", home.id, { kind: "ship", shipType: "scout" });
-        turns.endTurn("alpha");
-        expect(turns.endTurn("beta").economy?.spawnedShips).toEqual([]);
+        for (let i = 0; i < DEFAULTS.ships.scout.buildTurns; i++) {
+            turns.endTurn("alpha");
+            expect(turns.endTurn("beta").economy?.spawnedShips).toEqual([]);
+        }
         turns.endTurn("alpha");
         const result = turns.endTurn("beta");
         expect(result.advanced).toBe(true);

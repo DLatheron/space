@@ -24,14 +24,17 @@ export type EndTurnResult = {
  * Simultaneous turns: each side marks itself ready (any time, even with MP left). Once every
  * side is ready the turn advances, all ships regain full MP and the end of turn runs:
  *
- * 1. installations and base income add to local stockpiles;
- * 2. supply ships move, re-planning around known enemies;
- * 3. arriving cargo goes into the destination's stockpile;
- * 4. builds draw from their local stockpile by priority, capped at their per-turn rate;
- * 5. fully funded builds complete;
+ * 1. builds that were fully funded at the previous end of turn (ready) complete;
+ * 2. installations and base income add to local stockpiles;
+ * 3. supply ships move, re-planning around known enemies;
+ * 4. arriving cargo goes into the destination's stockpile;
+ * 5. builds draw from their local stockpile by priority, capped at their per-turn rate.
+ *    Builds that become fully funded are ready: they stay queued (without holding a build
+ *    slot, so the next queued build starts funding at once) and complete in next turn's
+ *    step 1, so a build takes at least `buildTurns + 1` end turns;
  * 6. released population is sent home;
  * 7. dispatch: demand by priority, nearest source, reserve cargo, pack ships;
- * 8. ships launched in steps 6 and 7 make their first move (as in steps 2 and 3). Cargo
+ * 8. ships launched in steps 6 and 7 make their first move (as in steps 3 and 4). Cargo
  *    they deliver is only used by next turn's funding.
  */
 export class TurnManager {
@@ -85,9 +88,10 @@ export class TurnManager {
         this._turn += 1;
         if (!this._economy) return {};
 
+        const economy = this._economy.completeReady();
         this._economy.produce();
         const moved = this._supply?.move();
-        const economy = this._economy.fundAndComplete();
+        this._economy.fund();
         if (!this._supply || !moved) return { economy };
         const returning = this._supply.returnPopulation();
         const dispatched = this._supply.dispatch();

@@ -188,7 +188,7 @@ export function HexMapView({ world, onAction }: HexMapViewProps) {
         <div className="hex-map-view">
             <canvas ref={canvasRef} className="hex-map-view__canvas" />
             <div className="hex-map-view__hint">
-                Drag to pan · Scroll to zoom · Click to select / inspect · Esc to clear
+                Drag to pan · Scroll to zoom · Click to select / inspect (again to cycle) · Esc to clear
             </div>
         </div>
     );

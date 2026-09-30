@@ -854,18 +854,22 @@ export class HexWorld {
         const tile = this._tiles.get(hexKey(hex.q, hex.r));
         const entities = tile?.entities ?? [];
 
-        const ownShips = entities.filter(
-            (e): e is ShipEntity => e.kind === "ship" && e.sideId === this.sideId
+        // Clicking the hex of the current selection cycles through everything on it
+        // (never a move order); clicking the only selected ship deselects it.
+        const cycle = this.clickCycle(entities);
+        const index = cycle.findIndex(
+            (e) => e.id === (this.selectedShipId ?? this.inspectedEntityId)
         );
-        if (ownShips.length) {
-            // Cycle through stacked ships; clicking the only selected ship deselects it.
-            const index = ownShips.findIndex((s) => s.id === this.selectedShipId);
-            if (index >= 0 && ownShips.length === 1) {
-                return this._deselect();
-            }
-            const next = ownShips[(index + 1) % ownShips.length];
-            this.selectShip(next.id);
-            return { type: "select", shipId: next.id };
+        if (index >= 0 && cycle.length > 1) {
+            return this._pick(cycle[(index + 1) % cycle.length], false);
+        }
+        if (index >= 0 && this.selectedShipId) {
+            return this._deselect();
+        }
+
+        const ownShip = cycle[0];
+        if (ownShip?.kind === "ship" && ownShip.sideId === this.sideId) {
+            return this._pick(ownShip, false);
         }
 
         const location = primaryEntity(entities.filter(isBuildSite));
@@ -879,18 +883,34 @@ export class HexWorld {
             }
         }
 
-        if (location) {
-            this.inspectEntity(location.id);
-            return { type: "open-location", locationId: location.id };
-        }
+        const first = location ?? primaryEntity(entities);
+        return first ? this._pick(first, true) : this._deselect();
+    }
 
-        const inspectable = primaryEntity(entities);
-        if (inspectable) {
-            this.inspectEntity(inspectable.id);
-            return { type: "inspect", entityId: inspectable.id };
-        }
+    /** Entities on a hex in click-cycle order: our ships, then locations, then the rest. */
+    clickCycle(entities: EntitySummary[]): EntitySummary[] {
+        const rank = (e: EntitySummary) =>
+            e.kind === "ship" && e.sideId === this.sideId ? 0 : isBuildSite(e) ? 1 : 2;
+        return [...entities].sort(
+            (a, b) =>
+                rank(a) - rank(b) || ENTITY_FOCUS_PRIORITY[a.kind] - ENTITY_FOCUS_PRIORITY[b.kind]
+        );
+    }
 
-        return this._deselect();
+    /**
+     * Select our ships, inspect anything else. Locations open their page only when
+     * `openLocation` is set, so cycling onto one doesn't cover the map.
+     */
+    private _pick(entity: EntitySummary, openLocation: boolean): HexClickAction {
+        if (entity.kind === "ship" && entity.sideId === this.sideId) {
+            this.selectShip(entity.id);
+            return { type: "select", shipId: entity.id };
+        }
+        this.inspectEntity(entity.id);
+        if (openLocation && isBuildSite(entity)) {
+            return { type: "open-location", locationId: entity.id };
+        }
+        return { type: "inspect", entityId: entity.id };
     }
 
     private _deselect(): HexClickAction {
@@ -1198,8 +1218,32 @@ export class HexWorld {
         ctx.restore();
     }
 
+    /** Amber ring around the inspected entity so stacked hexes show which one is picked. */
+    private _drawInspected(ctx: DrawCtx, canvas: HTMLCanvasElement) {
+        const entity = this.inspectedEntityId
+            ? this.findEntityById(this.inspectedEntityId)
+            : undefined;
+        if (!entity || entity.kind === "supply_ship") return;
+        const size = this.hexSize * this.camera.zoom;
+        const center = this.worldToScreen(
+            this._framePoses.get(entity.id) ?? axialToPixel(entity.q, entity.r, this.hexSize),
+            canvas
+        );
+        const radius = Math.min(0.85, Math.max(0.4, (entity.scale ?? 0.5) * 1.4)) * size;
+        const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 250);
+        ctx.save();
+        ctx.strokeStyle = `rgba(255, 209, 102, ${0.55 + 0.45 * pulse})`;
+        ctx.lineWidth = Math.max(1.5, size * 0.05);
+        ctx.setLineDash([size * 0.12, size * 0.08]);
+        ctx.beginPath();
+        ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+    }
+
     private _drawSelection(ctx: DrawCtx, canvas: HTMLCanvasElement) {
         this._drawSupplyRoute(ctx, canvas);
+        this._drawInspected(ctx, canvas);
         const ship = this.selectedShip;
         if (!ship) return;
         const size = this.hexSize * this.camera.zoom;

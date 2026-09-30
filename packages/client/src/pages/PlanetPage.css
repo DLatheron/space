@@ -1,62 +1,101 @@
 .planet-page {
     position: absolute;
     inset: 0;
-    display: grid;
-    place-items: center;
+    display: flex;
+    justify-content: center;
     /* Leaves room for the resource bar, which stays visible above this overlay. */
     padding: 3.6rem 0.75rem 0.75rem;
     background: rgba(4, 8, 18, 0.72);
     z-index: 3;
+    /* Layout switches on the space this overlay gets, not the viewport (the info pane takes some). */
+    container: planet-page / size;
 }
 
+/* Fills the overlay and never scrolls itself; each card scrolls its own body. */
 .planet-page__panel {
-    width: min(44rem, 100%);
-    max-height: 100%;
-    overflow-y: auto;
-    padding: 1rem 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    width: 100%;
+    max-width: 120rem;
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+    padding: 0.7rem 0.9rem 0.8rem;
     border: 1px solid #2c3d63;
     border-radius: 0.5rem;
     background: #0f1730;
 }
 
+/* Unowned, enemy and unknown locations have little to show. */
+.planet-page__panel--compact {
+    align-self: center;
+    width: min(44rem, 100%);
+    height: auto;
+    max-height: 100%;
+    overflow-y: auto;
+}
+
 .planet-page__header {
     display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 1rem;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 0.5rem 1rem;
+}
+
+.planet-page__title {
+    flex: 1;
+    min-width: 0;
 }
 
 .planet-page__header h2 {
     display: flex;
     align-items: baseline;
     flex-wrap: wrap;
-    gap: 0.6rem;
+    gap: 0.5rem;
     margin: 0;
-    font-size: 1.3rem;
+    font-size: 1.25rem;
+    line-height: 1.25;
 }
 
 .planet-page__level {
-    padding: 0.1rem 0.5rem;
+    padding: 0.05rem 0.5rem;
     border: 1px solid #3a4d73;
     border-radius: 999px;
     color: #9fd0ff;
-    font-size: 0.8rem;
+    font-size: 0.75rem;
     font-weight: 600;
 }
 
 .planet-page__facts {
-    display: grid;
-    grid-template-columns: max-content 1fr;
-    gap: 0.3rem 1rem;
-    margin: 1rem 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.1rem 1.1rem;
+    margin: 0.25rem 0 0;
+    font-size: 0.82rem;
+}
+
+.planet-page__facts > div {
+    display: flex;
+    align-items: baseline;
+    gap: 0.35rem;
 }
 
 .planet-page__facts dt {
-    color: #9ab3d4;
+    color: #7f93b5;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
 }
 
 .planet-page__facts dd {
     margin: 0;
+}
+
+.planet-page__back {
+    flex: none;
+    padding: 0.35rem 0.8rem;
+    font-size: 0.85rem;
 }
 
 .planet-page__side {
@@ -74,342 +113,133 @@
 .planet-page__muted {
     margin: 0.4rem 0 0;
     color: #7f93b5;
-    font-size: 0.9rem;
-}
-
-.planet-page__section {
-    margin-top: 1rem;
-    padding-top: 0.75rem;
-    border-top: 1px solid #243355;
-}
-
-.planet-page__section h3 {
-    margin: 0 0 0.5rem;
-    font-size: 1rem;
-}
-
-.planet-page__section h3 .planet-page__muted {
-    font-weight: 400;
     font-size: 0.85rem;
-}
-
-.planet-page__slots,
-.planet-page__progress {
-    height: 0.4rem;
-    border-radius: 999px;
-    background: #1a2644;
-    overflow: hidden;
-}
-
-.planet-page__progress {
-    display: flex;
-}
-
-.planet-page__slots-fill,
-.planet-page__progress-fill,
-.planet-page__progress-next {
-    height: 100%;
-    background: #4a8fd4;
-    transition: width 0.4s ease-out;
-}
-
-.planet-page__progress-fill {
-    background: #5cffb0;
-}
-
-.planet-page__progress-next {
-    background: rgba(92, 255, 176, 0.35);
-}
-
-.planet-page__funding {
-    display: grid;
-    gap: 0.2rem;
-}
-
-.planet-page__funding-row {
-    display: grid;
-    grid-template-columns: 3.5rem 1fr 7.5rem;
-    align-items: center;
-    gap: 0.5rem;
-    font-size: 0.8rem;
-}
-
-.planet-page__funding-amount {
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-}
-
-.planet-page__next {
-    color: #5cffb0;
-}
-
-.planet-page__order-head {
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    flex-wrap: wrap;
-    gap: 0.4rem 0.75rem;
-}
-
-.planet-page__order-head .planet-page__muted {
-    font-size: 0.8rem;
-}
-
-.planet-page__priority {
-    display: inline-flex;
-    border: 1px solid #2c3d63;
-    border-radius: 0.3rem;
-    overflow: hidden;
-    vertical-align: middle;
-}
-
-.planet-page__panel .planet-page__priority-option {
-    padding: 0.1rem 0.5rem;
-    border: none;
-    border-radius: 0;
-    background: #16233f;
-    color: #9ab3d4;
-    font-size: 0.75rem;
-}
-
-.planet-page__panel .planet-page__priority-option + .planet-page__priority-option {
-    border-left: 1px solid #2c3d63;
-}
-
-.planet-page__panel .planet-page__priority-option--active {
-    color: #0f1730;
-    font-weight: 600;
-}
-
-.planet-page__panel .planet-page__priority-option--low.planet-page__priority-option--active {
-    background: #7f93b5;
-}
-
-.planet-page__panel .planet-page__priority-option--medium.planet-page__priority-option--active {
-    background: #9fd0ff;
-}
-
-.planet-page__panel .planet-page__priority-option--high.planet-page__priority-option--active {
-    background: #ffd166;
-}
-
-.planet-page__new-priority {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-}
-
-.planet-page__stockpile {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
-    gap: 0.4rem;
-    margin: 0;
-    padding: 0;
-    list-style: none;
-}
-
-.planet-page__stock {
-    display: grid;
-    gap: 0.1rem;
-    padding: 0.4rem 0.6rem;
-    border: 1px solid #22314f;
-    border-radius: 0.35rem;
-    background: #121c38;
-    font-variant-numeric: tabular-nums;
-}
-
-.planet-page__stock .planet-page__muted {
-    margin: 0;
-    font-size: 0.75rem;
-}
-
-.planet-page__stock-label {
-    font-size: 0.75rem;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-}
-
-.planet-page__stock--full {
-    border-color: #7a4a2c;
-}
-
-.planet-page__full {
-    color: #ff9f6b;
-    font-weight: 700;
-}
-
-.planet-page__cap {
-    color: #7f93b5;
-    font-size: 0.8rem;
-}
-
-.planet-page__list,
-.planet-page__aboard {
-    display: grid;
-    gap: 0.3rem;
-    margin: 0.6rem 0 0;
-    padding: 0;
-    list-style: none;
-}
-
-.planet-page__aboard {
-    margin: 0.3rem 0 0 1rem;
-    font-size: 0.85rem;
-}
-
-.planet-page__row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 0.75rem;
-    font-size: 0.9rem;
-}
-
-.planet-page__list > li.planet-page__row,
-.planet-page__ship {
-    padding: 0.35rem 0.6rem;
-    border: 1px solid #22314f;
-    border-radius: 0.35rem;
-    background: #121c38;
-}
-
-.planet-page__row-actions {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: flex-end;
-    gap: 0.35rem;
-}
-
-.planet-page__row button {
-    flex: none;
-    padding: 0.2rem 0.6rem;
-    font-size: 0.8rem;
-}
-
-.planet-page__tier {
-    padding: 0 0.35rem;
-    border: 1px solid #3a4d73;
-    border-radius: 0.25rem;
-    color: #9fd0ff;
-    font-size: 0.75rem;
-}
-
-.planet-page__option--known {
-    opacity: 0.65;
 }
 
 .planet-page__alert {
-    margin: 0.5rem 0 0;
-    padding: 0.4rem 0.6rem;
+    align-self: center;
+    margin: 0;
+    padding: 0.3rem 0.6rem;
     border: 1px solid #ff9f6b;
     border-radius: 0.35rem;
     color: #ff9f6b;
-    font-size: 0.9rem;
+    font-size: 0.85rem;
 }
 
-.planet-page__structures {
+/*
+ * Stockpile across the top, installations (beside research, where there is any) in the middle,
+ * forces at the bottom; each card leads with its build queue. Rows below the stockpile share
+ * what is left, so nothing pushes the panel taller.
+ */
+.planet-page__grid {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    gap: 0.6rem;
+    grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1.15fr) minmax(0, 1fr);
+    grid-template-areas:
+        "stock stock"
+        "installations installations"
+        "garrison orbit";
+}
+
+.planet-page__grid--research {
+    grid-template-areas:
+        "stock stock"
+        "installations research"
+        "garrison orbit";
+}
+
+.planet-page__queue {
+    margin-bottom: 0.5rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid #1c2945;
+}
+
+.planet-page__card {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    padding: 0.5rem 0.65rem 0.6rem;
+    border: 1px solid #22314f;
+    border-radius: 0.45rem;
+    background: #0b1226;
+}
+
+.planet-page__card--stock {
+    grid-area: stock;
+}
+
+.planet-page__card--installations {
+    grid-area: installations;
+}
+
+.planet-page__card--research {
+    grid-area: research;
+}
+
+.planet-page__card--garrison {
+    grid-area: garrison;
+}
+
+.planet-page__card--orbit {
+    grid-area: orbit;
+}
+
+.planet-page__panel--compact .planet-page__card {
+    margin-top: 0.75rem;
+}
+
+.planet-page__card-head {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.4rem;
-    margin: 0.6rem 0 0;
-    padding: 0;
-    list-style: none;
-}
-
-.planet-page__structures li {
-    padding: 0.15rem 0.55rem;
-    border: 1px solid #2c3d63;
-    border-radius: 0.3rem;
-    background: #16233f;
-    font-size: 0.9rem;
-}
-
-.planet-page__queue,
-.planet-page__options {
-    display: grid;
-    gap: 0.4rem;
-    margin: 0;
-    padding: 0;
-    list-style: none;
-}
-
-.planet-page__queue-entry,
-.planet-page__option {
-    display: flex;
     justify-content: space-between;
     align-items: center;
-    gap: 0.75rem;
-    padding: 0.45rem 0.6rem;
-    border: 1px solid #22314f;
-    border-radius: 0.35rem;
-    background: #121c38;
+    gap: 0.3rem 0.6rem;
+    margin-bottom: 0.45rem;
 }
 
-.planet-page__queue-entry--queued {
-    border-style: dashed;
-    opacity: 0.7;
-}
-
-.planet-page__queue-main,
-.planet-page__option-main {
-    display: grid;
-    gap: 0.25rem;
-    flex: 1;
-    min-width: 0;
-}
-
-.planet-page__option-main .planet-page__muted {
+.planet-page__card-head h3 {
     margin: 0;
+    font-size: 0.95rem;
+}
+
+.planet-page__card-head h3 .planet-page__muted {
+    font-weight: 400;
     font-size: 0.8rem;
 }
 
-.planet-page__option-meta {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: 0.25rem 0.75rem;
-    font-size: 0.8rem;
+.planet-page__card-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
 }
 
-.planet-page__cost {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-    font-variant-numeric: tabular-nums;
+.planet-page__card-body > .planet-page__muted:first-child {
+    margin-top: 0;
 }
 
-.planet-page__cost-item--money {
-    color: #ffd166;
-}
-
-.planet-page__cost-item--materials {
-    color: #9fb8ff;
-}
-
-.planet-page__cost-item--population {
-    color: #8fdc7a;
-}
-
-.planet-page__cost-item--science {
-    color: #c9a0ff;
-}
-
-.planet-page__turns {
-    color: #b7c7e4;
-}
-
-.planet-page__reason {
-    color: #ff9f6b;
-    font-size: 0.8rem;
-}
-
-.planet-page__queue-entry button,
-.planet-page__option button {
+.planet-page__open {
     flex: none;
-    padding: 0.35rem 0.75rem;
+    padding: 0.25rem 0.65rem;
+    border-color: #2f6b55;
+    font-size: 0.8rem;
 }
 
-.planet-page__panel button:disabled {
+.planet-page__open > span[aria-hidden] {
+    color: #5cffb0;
+    font-weight: 700;
+}
+
+.planet-page__open .planet-page__muted {
+    margin: 0;
+    font-size: 0.75rem;
+}
+
+.planet-page button:disabled {
     opacity: 0.5;
     cursor: not-allowed;
 }
@@ -429,4 +259,28 @@
 .planet-page__primary--danger {
     border-color: #ff9f6b;
     color: #ff9f6b;
+}
+
+/* Too narrow or short for the fixed grid: stack the cards and let the panel scroll instead. */
+@container planet-page (max-width: 50rem) or (max-height: 34rem) {
+    .planet-page__panel {
+        overflow-y: auto;
+    }
+
+    .planet-page__grid,
+    .planet-page__grid--research {
+        flex: none;
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: none;
+        grid-template-areas:
+            "stock"
+            "installations"
+            "research"
+            "garrison"
+            "orbit";
+    }
+
+    .planet-page__card-body {
+        overflow: visible;
+    }
 }

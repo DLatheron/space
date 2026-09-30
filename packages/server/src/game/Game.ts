@@ -11,6 +11,7 @@ import {
     GroundBattleInfo,
     HexKey,
     OrderId,
+    QueueDirection,
     ServerToClientMessage,
     SideId
 } from "@space/shared-data";
@@ -231,6 +232,10 @@ export class Game {
 
         this._messageManager.registerHandler("client:order:priority", (_context, payload, from) => {
             this._handlePriority(from, payload.locationId, payload.orderId, payload.priority);
+        });
+
+        this._messageManager.registerHandler("client:order:move", (_context, payload, from) => {
+            this._handleMoveOrder(from, payload.locationId, payload.orderId, payload.direction);
         });
 
         this._messageManager.registerHandler(
@@ -491,6 +496,17 @@ export class Game {
     ) {
         const result = this._economy.setPriority(client.sideId, locationId, orderId, priority);
         if (!result.ok) return this._reject(client, "priority", result.error);
+        this._sendEconomyState(client.sideId!);
+    }
+
+    private _handleMoveOrder(
+        client: Client,
+        locationId: EntityId,
+        orderId: OrderId,
+        direction: QueueDirection
+    ) {
+        const result = this._economy.moveOrder(client.sideId, locationId, orderId, direction);
+        if (!result.ok) return this._reject(client, "move order", result.error);
         this._sendEconomyState(client.sideId!);
     }
 

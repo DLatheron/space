@@ -74,7 +74,15 @@ export const EnhancementTier = z.number().int().min(ENHANCEMENT_TIER_MIN).max(EN
 export type EnhancementTier = z.infer<typeof EnhancementTier>;
 
 /** Ship class; stats live in `EconomyBalance.ships`, names and animation in `SHIP_TYPE_INFO`. */
-export const ShipType = z.enum(["scout", "frigate", "colony_ship", "transport"]);
+export const ShipType = z.enum([
+    "scout",
+    "frigate",
+    "colony_ship",
+    "transport",
+    "fighter_squadron",
+    "advanced_fighter_squadron",
+    "star_destroyer"
+]);
 export type ShipType = z.infer<typeof ShipType>;
 
 /** Pointy-top direction index 0–5: 0 = east, counter-clockwise on screen (see `axialNeighbor`). */

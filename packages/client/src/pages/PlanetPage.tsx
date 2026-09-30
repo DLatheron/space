@@ -1,57 +1,36 @@
-import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import {
     BUILD_CATEGORIES,
     buildCategory,
-    buildItemCost,
-    buildItemName,
-    buildItemTurns,
     buildSlots,
-    canBuild,
     DEFAULT_BUILD_PRIORITY,
     depositCapped,
-    fundOrders,
+    enhancementTargetId,
+    fundLocationOrders,
     GROUND_UNIT_TYPE_INFO,
-    groundUnitDef,
-    groundUnitStats,
-    GroundUnitType,
-    isFullyFunded,
     locationIncome,
     partitionOrders,
-    RESOURCE_KEYS,
+    queueCategory,
     shipDef,
-    ShipType,
     siteForEntity,
     slotsForEntity,
     slotsUsed,
     stockpileCap,
-    structureCapBonus,
     structureDef,
     STRUCTURE_INFO,
-    structureOutput,
-    StructureType,
     sumResources,
-    TECHS,
     TechId,
-    zeroResources,
     type BuildCategory,
     type BuildContext,
     type BuildItem,
-    type BuildOrder,
     type BuildPriority,
-    type EconomyBalance,
+    type EnhancementTarget,
     type EntityId,
-    type GroundUnit,
     type LocationEconomy,
-    type Resources,
     type StructureSite
 } from "@space/shared-data";
-import {
-    formatNumber,
-    formatResources,
-    RESOURCE_LABELS,
-    RESOURCE_SHORT_LABELS
-} from "../components/format.js";
+import { ModalHostContext } from "../components/modalHost.js";
 import type { GameActions } from "../gameActions.js";
 import { useHexWorldVersion } from "../hooks/index.js";
 import {
@@ -61,6 +40,20 @@ import {
     type LocationEntity,
     type ShipEntity
 } from "../world/HexWorld.js";
+import { BuildPopup } from "./location/BuildPopup.js";
+import { BuildQueue } from "./location/BuildQueue.js";
+import { GarrisonList, OrbitList } from "./location/ForcesLists.js";
+import { InstallationGrid } from "./location/InstallationGrid.js";
+import {
+    GROUND_UNIT_ITEMS,
+    RESEARCH_ITEMS,
+    settleReadyOrders,
+    SHIP_ITEMS,
+    STRUCTURE_ITEMS,
+    upgradeItem
+} from "./location/locationItems.js";
+import { StockpileStrip } from "./location/StockpileStrip.js";
+import { UpgradePopup } from "./location/UpgradePopup.js";
 import "./PlanetPage.css";
 
 export type GameOutletContext = {
@@ -68,47 +61,11 @@ export type GameOutletContext = {
     actions: GameActions;
 };
 
-/** Low to high, as shown in the priority control. */
-const PRIORITY_OPTIONS: BuildPriority[] = ["low", "medium", "high"];
-
-const PRIORITY_LABELS: Record<BuildPriority, string> = {
-    low: "Low",
-    medium: "Medium",
-    high: "High"
-};
-
 const SITE_LABELS: Record<StructureSite, string> = {
     planet: "Planet",
     moon: "Moon",
     asteroid: "Asteroid"
 };
-
-const STRUCTURE_ITEMS: BuildItem[] = StructureType.options.map((structureType) => ({
-    kind: "structure",
-    structureType
-}));
-
-const SHIP_ITEMS: BuildItem[] = ShipType.options.map((shipType) => ({ kind: "ship", shipType }));
-
-const GROUND_UNIT_ITEMS: BuildItem[] = GroundUnitType.options.map((unitType) => ({
-    kind: "groundUnit",
-    unitType
-}));
-
-function itemKey(item: BuildItem): string {
-    switch (item.kind) {
-        case "structure":
-            return `structure:${item.structureType}`;
-        case "ship":
-            return `ship:${item.shipType}`;
-        case "groundUnit":
-            return `groundUnit:${item.unitType}`;
-        case "research":
-            return `research:${item.techId}`;
-        case "enhancement":
-            return `enhancement:${item.target.kind}:${item.tier}`;
-    }
-}
 
 function sideName(sideId: string): string {
     return sideId.charAt(0).toUpperCase() + sideId.slice(1);
@@ -119,210 +76,44 @@ function locationKindLabel(location: LocationEntity): string {
     return site ? SITE_LABELS[site] : "Asteroid";
 }
 
-const CATEGORY_LABELS: Record<BuildCategory, string> = {
-    ships: "Ships",
-    installations: "Installations",
-    groundUnits: "Ground units",
-    research: "Research"
-};
-
-function outputSummary(output: Partial<Resources>): string[] {
-    return RESOURCE_KEYS.filter((key) => output[key]).map(
-        (key) => `+${formatNumber(output[key] ?? 0)} ${RESOURCE_SHORT_LABELS[key]}/turn`
-    );
-}
-
-function capSummary(bonus: Resources): string[] {
-    return RESOURCE_KEYS.filter((key) => bonus[key]).map(
-        (key) => `+${formatNumber(bonus[key])} ${RESOURCE_SHORT_LABELS[key]} cap`
-    );
-}
-
-function itemSummary(item: BuildItem, balance: EconomyBalance): string {
-    switch (item.kind) {
-        case "ship": {
-            const def = balance.ships[item.shipType];
-            const parts = [`MP ${def.maxMovementPoints}`, `HP ${def.hp}`];
-            if (def.canColonise) parts.push("Can colonise");
-            if (def.unitCapacity) parts.push(`Carries ${def.unitCapacity} units`);
-            return parts.join(" · ");
-        }
-        case "structure": {
-            const def = structureDef(item.structureType, balance);
-            const parts = [
-                def.description,
-                ...outputSummary(def.produces ?? {}),
-                ...capSummary(structureCapBonus(item.structureType, 1, balance))
-            ];
-            if (def.pillageProtection) {
-                parts.push(`${Math.round(def.pillageProtection * 100)}% pillage protection`);
-            }
-            if (def.slots !== undefined && def.slots !== 1) {
-                parts.push(`Uses ${def.slots} slots`);
-            }
-            return parts.join(" ");
-        }
-        case "groundUnit": {
-            const def = groundUnitDef(item.unitType, balance);
-            return `${def.description} Attack ${def.attack} · Defence ${def.defence}`;
-        }
-        case "research":
-            return TECHS[item.techId].description;
-        case "enhancement":
-            return "";
-    }
-}
-
-function CostList({ cost }: { cost: Resources }) {
-    return (
-        <span className="planet-page__cost">
-            {RESOURCE_KEYS.filter((key) => cost[key] > 0).map((key) => (
-                <span key={key} className={`planet-page__cost-item planet-page__cost-item--${key}`}>
-                    {formatNumber(cost[key])} {RESOURCE_SHORT_LABELS[key]}
-                </span>
-            ))}
-        </span>
-    );
-}
-
-function PriorityPicker({
-    value,
-    onChange,
-    label
+/** A titled panel of the location screen; only its body scrolls. */
+function Card({
+    area,
+    title,
+    detail,
+    action,
+    children
 }: {
-    value: BuildPriority;
-    onChange: (priority: BuildPriority) => void;
-    label: string;
+    area: string;
+    title: string;
+    detail?: ReactNode;
+    action?: ReactNode;
+    children: ReactNode;
 }) {
     return (
-        <span className="planet-page__priority" role="group" aria-label={label}>
-            {PRIORITY_OPTIONS.map((priority) => (
-                <button
-                    key={priority}
-                    type="button"
-                    aria-pressed={value === priority}
-                    className={`planet-page__priority-option planet-page__priority-option--${priority}${
-                        value === priority ? " planet-page__priority-option--active" : ""
-                    }`}
-                    onClick={() => value !== priority && onChange(priority)}
-                >
-                    {PRIORITY_LABELS[priority]}
-                </button>
-            ))}
-        </span>
+        <section className={`planet-page__card planet-page__card--${area}`}>
+            <header className="planet-page__card-head">
+                <h3>
+                    {title}
+                    {detail !== undefined && <span className="planet-page__muted"> {detail}</span>}
+                </h3>
+                {action}
+            </header>
+            <div className="planet-page__card-body">{children}</div>
+        </section>
     );
 }
 
-/** Applied vs cost per resource, with next turn's estimated draw as a lighter segment. */
-function FundingBars({ order, draw }: { order: BuildOrder; draw: Resources }) {
+function OpenButton({ label, onClick }: { label: string; onClick: () => void }) {
     return (
-        <div className="planet-page__funding">
-            {RESOURCE_KEYS.filter((key) => order.cost[key] > 0).map((key) => {
-                const cost = order.cost[key];
-                const applied = Math.min(cost, order.applied[key]);
-                return (
-                    <div key={key} className="planet-page__funding-row">
-                        <span className={`planet-page__cost-item--${key}`}>
-                            {RESOURCE_SHORT_LABELS[key]}
-                        </span>
-                        <div className="planet-page__progress">
-                            <div
-                                className="planet-page__progress-fill"
-                                style={{ width: `${(applied / cost) * 100}%` }}
-                            />
-                            <div
-                                className="planet-page__progress-next"
-                                style={{
-                                    width: `${(Math.min(draw[key], cost - applied) / cost) * 100}%`
-                                }}
-                            />
-                        </div>
-                        <span className="planet-page__funding-amount">
-                            {formatNumber(applied)}/{formatNumber(cost)}
-                            {draw[key] > 0 && (
-                                <span className="planet-page__next">
-                                    {" "}
-                                    +{formatNumber(draw[key])}
-                                </span>
-                            )}
-                        </span>
-                    </div>
-                );
-            })}
-        </div>
-    );
-}
-
-type OptionProps = {
-    item: BuildItem;
-    context: BuildContext;
-    economy: LocationEconomy;
-    onBuild: (item: BuildItem) => void;
-    label?: string;
-};
-
-function BuildOption({ item, context, economy, onBuild, label = "Build" }: OptionProps) {
-    const check = canBuild(context, economy, item);
-    const reason = check.ok ? undefined : check.reason;
-    const summary = itemSummary(item, context.balance);
-    const turns = buildItemTurns(item, context.balance);
-    return (
-        <li className="planet-page__option">
-            <div className="planet-page__option-main">
-                <strong>{buildItemName(item)}</strong>
-                {summary && <span className="planet-page__muted">{summary}</span>}
-                <span className="planet-page__option-meta">
-                    <CostList cost={buildItemCost(item, context.balance)} />
-                    <span className="planet-page__turns">
-                        {turns} turn{turns === 1 ? "" : "s"} min
-                    </span>
-                </span>
-                {reason && <span className="planet-page__reason">{reason}</span>}
-            </div>
-            <button
-                type="button"
-                disabled={!check.ok}
-                title={reason ?? `Order ${buildItemName(item)}`}
-                onClick={() => onBuild(item)}
-            >
-                {label}
-            </button>
-        </li>
-    );
-}
-
-/** Compact "Upgrade to Tn" button for one installation, ship or ground unit. */
-function UpgradeButton({
-    item,
-    context,
-    economy,
-    onBuild
-}: {
-    item: BuildItem;
-    context: BuildContext;
-    economy: LocationEconomy;
-    onBuild: (item: BuildItem) => void;
-}) {
-    if (item.kind !== "enhancement") return null;
-    const check = canBuild(context, economy, item);
-    const cost = formatResources(buildItemCost(item, context.balance), "free");
-    return (
-        <button
-            type="button"
-            className="planet-page__upgrade"
-            disabled={!check.ok}
-            title={check.ok ? `Upgrade to tier ${item.tier}: ${cost}` : check.reason}
-            onClick={() => onBuild(item)}
-        >
-            Upgrade to T{item.tier}
+        <button type="button" className="planet-page__open" onClick={onClick}>
+            <span aria-hidden="true">+</span> {label}
         </button>
     );
 }
 
-function unitLabel(unit: GroundUnit, balance: EconomyBalance): string {
-    const stats = groundUnitStats(unit.unitType, unit.tier, balance);
-    return `${GROUND_UNIT_TYPE_INFO[unit.unitType].name} T${unit.tier} · ${stats.attack}/${stats.defence}`;
-}
+type Popup =
+    { kind: "build"; category: BuildCategory } | { kind: "upgrade"; target: EnhancementTarget };
 
 type OwnLocationProps = {
     world: HexWorld;
@@ -333,9 +124,11 @@ type OwnLocationProps = {
 };
 
 function OwnLocationPanel({ world, location, economy, context, actions }: OwnLocationProps) {
+    const [popup, setPopup] = useState<Popup>();
     const [newPriority, setNewPriority] = useState<BuildPriority>(DEFAULT_BUILD_PRIORITY);
     const locationId = location.id;
     const onBuild = (item: BuildItem) => actions.build(locationId, item, newPriority);
+    const closePopup = useCallback(() => setPopup(undefined), []);
 
     const balance = context.balance;
     const used = slotsUsed(economy, balance);
@@ -352,486 +145,304 @@ function OwnLocationPanel({ world, location, economy, context, actions }: OwnLoc
             )
             .map((s) => s.cargo)
     );
-    // End of turn adds production (excess lost) then arrivals (up to the cap) before funding.
-    const produced = depositCapped(economy.stockpile, income, cap).stockpile;
-    const { active, waiting } = partitionOrders(economy, balance);
+    // End of turn completes ready orders, adds production (excess lost) then arrivals (up to
+    // the cap) before funding.
+    const settled = settleReadyOrders(economy);
+    const settledCap = stockpileCap(settled, balance);
+    const produced = depositCapped(
+        economy.stockpile,
+        locationIncome(settled, balance),
+        settledCap
+    ).stockpile;
+    const { active, waiting, ready } = partitionOrders(economy, balance);
     const waitingIds = new Set(waiting.map((o) => o.id));
-    const preview = fundOrders(depositCapped(produced, arrivingCargo, cap).stockpile, active);
+    const readyIds = new Set(ready.map((o) => o.id));
+    const preview = fundLocationOrders(
+        depositCapped(produced, arrivingCargo, settledCap).stockpile,
+        settled,
+        balance
+    );
     const previewById = new Map(preview.orders.map((o) => [o.id, o]));
     const slots = buildSlots(economy, balance);
-    const slotSummary = BUILD_CATEGORIES.filter((c) => slots[c] > 0)
-        .map((c) => {
-            const running = active.filter((o) => buildCategory(o.item) === c).length;
-            return `${CATEGORY_LABELS[c]} ${running}/${slots[c]}`;
-        })
-        .join(" · ");
+    const running = Object.fromEntries(
+        BUILD_CATEGORIES.map((c) => [c, active.filter((o) => buildCategory(o.item) === c).length])
+    ) as Record<BuildCategory, number>;
+    const queue = (category: BuildCategory) => {
+        const orders = economy.orders.filter((o) => queueCategory(o.item) === category);
+        if (!orders.length && slots[category] <= 0) return null;
+        return (
+            <div className="planet-page__queue">
+                <BuildQueue
+                    category={category}
+                    orders={orders}
+                    slots={slots[category]}
+                    running={running[category]}
+                    waitingIds={waitingIds}
+                    readyIds={readyIds}
+                    next={previewById}
+                    drawn={preview.drawn}
+                    onPriorityChange={(orderId, priority) =>
+                        actions.setPriority(locationId, orderId, priority)
+                    }
+                    onCancel={(orderId) => actions.cancel(locationId, orderId)}
+                    onMove={(orderId, direction) =>
+                        actions.moveOrder(locationId, orderId, direction)
+                    }
+                />
+            </div>
+        );
+    };
+    const upgradingIds = new Set(
+        economy.orders.flatMap((o) =>
+            o.item.kind === "enhancement" ? [enhancementTargetId(o.item.target)] : []
+        )
+    );
 
     const garrison = world.garrisonAt(locationId);
     const shipsHere = world.ownShipsAt(location.q, location.r);
     const transports = shipsHere.filter((s) => isTransport(s, balance));
     const hasAcademy = economy.installations.some((i) => STRUCTURE_INFO[i.type].enablesResearch);
+    const showResearch = hasAcademy || economy.orders.some((o) => o.item.kind === "research");
     const trainsUnits = economy.installations.some(
         (i) => structureDef(i.type, balance).unlocksGroundUnits?.length
     );
+    const buildsShips = economy.installations.some(
+        (i) => structureDef(i.type, balance).unlocksShips?.length
+    );
     const techs = world.economy?.techs ?? [];
-    const pendingGround = world.groundBattleAt(locationId);
 
     const roomOn = (ship: ShipEntity) =>
         balance.ships[ship.shipType].unitCapacity - world.carriedUnitIds(ship).length;
+    const openBuild = (category: BuildCategory) => setPopup({ kind: "build", category });
+
+    const buildPopupProps = {
+        context,
+        economy,
+        priority: newPriority,
+        onPriorityChange: setNewPriority,
+        onBuild,
+        onClose: closePopup
+    };
+
+    // Resolved on every render so the popup tracks the target's current tier and location.
+    const upgrade = (() => {
+        if (popup?.kind !== "upgrade") return undefined;
+        const target = popup.target;
+        switch (target.kind) {
+            case "installation": {
+                const inst = economy.installations.find((i) => i.id === target.installationId);
+                return inst && { tier: inst.tier, name: structureDef(inst.type, balance).name };
+            }
+            case "ship": {
+                const ship = shipsHere.find((s) => s.id === target.shipId);
+                return (
+                    ship && {
+                        tier: ship.tier ?? 1,
+                        name: ship.name ?? shipDef(ship.shipType, balance).name
+                    }
+                );
+            }
+            case "groundUnit": {
+                const unit = garrison.find((u) => u.id === target.unitId);
+                return unit && { tier: unit.tier, name: GROUND_UNIT_TYPE_INFO[unit.unitType].name };
+            }
+        }
+    })();
 
     return (
-        <>
-            {pendingGround && (
-                <p className="planet-page__alert">
-                    Under invasion by {sideName(pendingGround.attackerSideId)}. Awaiting the outcome
-                    of the ground battle.
-                </p>
+        <div className={`planet-page__grid${showResearch ? " planet-page__grid--research" : ""}`}>
+            <section className="planet-page__card planet-page__card--stock">
+                <StockpileStrip
+                    stockpile={economy.stockpile}
+                    cap={cap}
+                    income={income}
+                    home={!!economy.home}
+                    inboundCargo={inboundCargo}
+                    arrivingCargo={arrivingCargo}
+                    inboundShips={inbound.length}
+                    waitingShips={waitingShips.length}
+                    slots={slots}
+                    running={running}
+                />
+            </section>
+
+            <Card
+                area="installations"
+                title="Installations"
+                detail={`${used}/${economy.slots} slots used`}
+                action={
+                    <OpenButton
+                        label="Add installation"
+                        onClick={() => openBuild("installations")}
+                    />
+                }
+            >
+                {queue("installations")}
+                <InstallationGrid
+                    economy={economy}
+                    balance={balance}
+                    freeSlots={Math.max(0, economy.slots - used)}
+                    waitingIds={waitingIds}
+                    onAdd={() => openBuild("installations")}
+                    onUpgrade={(inst) =>
+                        setPopup({
+                            kind: "upgrade",
+                            target: {
+                                kind: "installation",
+                                installationId: inst.id,
+                                structureType: inst.type
+                            }
+                        })
+                    }
+                />
+            </Card>
+
+            {showResearch && (
+                <Card
+                    area="research"
+                    title="Research"
+                    detail={`${techs.length}/${TechId.options.length} techs known`}
+                    action={
+                        hasAcademy && (
+                            <OpenButton label="Research" onClick={() => openBuild("research")} />
+                        )
+                    }
+                >
+                    {queue("research")}
+                    {!economy.orders.some((o) => o.item.kind === "research") && (
+                        <p className="planet-page__muted">Nothing being researched.</p>
+                    )}
+                </Card>
             )}
 
-            <section className="planet-page__section">
-                <h3>
-                    Stockpile{" "}
-                    <span className="planet-page__muted">
-                        held here / cap{economy.home ? " (home planet)" : ""}
-                    </span>
-                </h3>
-                <ul className="planet-page__stockpile">
-                    {RESOURCE_KEYS.map((key) => {
-                        const full = economy.stockpile[key] >= cap[key];
-                        return (
-                            <li
-                                key={key}
-                                className={`planet-page__stock${full ? " planet-page__stock--full" : ""}`}
-                                title={
-                                    full
-                                        ? "Full: production over the cap is lost and supply ships wait to unload"
-                                        : undefined
-                                }
-                            >
-                                <span
-                                    className={`planet-page__stock-label planet-page__cost-item--${key}`}
-                                >
-                                    {RESOURCE_LABELS[key]}
-                                    {full && <span className="planet-page__full"> Full</span>}
-                                </span>
-                                <span>
-                                    <strong>{formatNumber(economy.stockpile[key])}</strong>
-                                    <span className="planet-page__cap">
-                                        /{formatNumber(cap[key])}
-                                    </span>
-                                </span>
-                                <span className="planet-page__muted">
-                                    {income[key] > 0 && `+${formatNumber(income[key])}/turn`}
-                                    {inboundCargo[key] > 0 &&
-                                        ` · ${formatNumber(inboundCargo[key])} inbound`}
-                                </span>
-                            </li>
-                        );
-                    })}
-                </ul>
-                {inbound.length > 0 && (
-                    <p className="planet-page__muted">
-                        {inbound.length} supply ship{inbound.length === 1 ? "" : "s"} on the way;{" "}
-                        {formatResources(arrivingCargo, "none")} arriving next turn.
-                        {waitingShips.length > 0 &&
-                            ` ${waitingShips.length} waiting here for room to unload.`}
-                    </p>
-                )}
-            </section>
-
-            <section className="planet-page__section">
-                <h3>
-                    Installations{" "}
-                    <span className="planet-page__muted">
-                        {used}/{economy.slots} slots used
-                    </span>
-                </h3>
-                <div
-                    className="planet-page__slots"
-                    role="meter"
-                    aria-valuemin={0}
-                    aria-valuemax={economy.slots}
-                    aria-valuenow={used}
-                >
-                    <div
-                        className="planet-page__slots-fill"
-                        style={{
-                            width: `${economy.slots ? Math.min(100, (used / economy.slots) * 100) : 0}%`
-                        }}
-                    />
-                </div>
-                {economy.installations.length ? (
-                    <ul className="planet-page__list">
-                        {economy.installations.map((inst) => {
-                            const def = structureDef(inst.type, balance);
-                            const output = [
-                                ...outputSummary(structureOutput(inst.type, inst.tier, balance)),
-                                ...capSummary(structureCapBonus(inst.type, inst.tier, balance))
-                            ];
-                            return (
-                                <li key={inst.id} className="planet-page__row">
-                                    <span>
-                                        <strong>{def.name}</strong>{" "}
-                                        <span className="planet-page__tier">T{inst.tier}</span>
-                                        {output.length > 0 && (
-                                            <span className="planet-page__muted">
-                                                {" "}
-                                                {output.join(" ")}
-                                            </span>
-                                        )}
-                                    </span>
-                                    {inst.tier < def.maxTier && (
-                                        <UpgradeButton
-                                            item={{
-                                                kind: "enhancement",
-                                                target: {
-                                                    kind: "installation",
-                                                    installationId: inst.id,
-                                                    structureType: inst.type
-                                                },
-                                                tier: inst.tier + 1
-                                            }}
-                                            context={context}
-                                            economy={economy}
-                                            onBuild={onBuild}
-                                        />
-                                    )}
-                                </li>
-                            );
-                        })}
-                    </ul>
-                ) : (
-                    <p className="planet-page__muted">No installations built yet.</p>
-                )}
-            </section>
-
-            <section className="planet-page__section">
-                <h3>
-                    Orders{" "}
-                    <span className="planet-page__muted">
-                        funded from the stockpile by priority
-                    </span>
-                </h3>
-                {slotSummary && (
-                    <p className="planet-page__muted">
-                        Building at once: {slotSummary}. Extra orders wait, unfunded, by priority
-                        then age.
-                    </p>
-                )}
-                {economy.orders.length ? (
-                    <ol className="planet-page__queue">
-                        {economy.orders.map((order) => {
-                            const queued = waitingIds.has(order.id);
-                            const next = previewById.get(order.id) ?? order;
-                            const draw = preview.drawn[order.id] ?? zeroResources();
-                            const status = queued
-                                ? "Queued · waiting for a build slot"
-                                : isFullyFunded(order)
-                                  ? "Fully funded · completes at end of turn"
-                                  : isFullyFunded(next)
-                                    ? "Completes at end of turn"
-                                    : RESOURCE_KEYS.some((k) => draw[k] > 0)
-                                      ? "Funding"
-                                      : "Waiting for resources";
-                            return (
-                                <li
-                                    key={order.id}
-                                    className={`planet-page__queue-entry${queued ? " planet-page__queue-entry--queued" : ""}`}
-                                >
-                                    <div className="planet-page__queue-main">
-                                        <span className="planet-page__order-head">
-                                            <span>
-                                                <strong>{buildItemName(order.item)}</strong>{" "}
-                                                <span className="planet-page__muted">{status}</span>
-                                            </span>
-                                            <PriorityPicker
-                                                label={`Priority for ${buildItemName(order.item)}`}
-                                                value={order.priority}
-                                                onChange={(priority) =>
-                                                    actions.setPriority(
-                                                        locationId,
-                                                        order.id,
-                                                        priority
-                                                    )
-                                                }
-                                            />
-                                        </span>
-                                        <FundingBars order={order} draw={draw} />
-                                    </div>
-                                    <button
-                                        type="button"
-                                        title="Cancel; resources already applied go into this stockpile"
-                                        onClick={() => actions.cancel(locationId, order.id)}
-                                    >
-                                        Cancel
-                                    </button>
-                                </li>
-                            );
-                        })}
-                    </ol>
-                ) : (
-                    <p className="planet-page__muted">Nothing on order.</p>
-                )}
-                <p className="planet-page__muted planet-page__new-priority">
-                    New orders{" "}
-                    <PriorityPicker
-                        label="Priority for new orders"
-                        value={newPriority}
-                        onChange={setNewPriority}
-                    />
-                </p>
-                {economy.orders.length > 0 && (
-                    <p className="planet-page__muted">
-                        Lighter bar segments estimate next turn&apos;s draw, including this
-                        location&apos;s production and cargo due to arrive.
-                    </p>
-                )}
-            </section>
-
-            <section className="planet-page__section">
-                <h3>
-                    Garrison{" "}
-                    <span className="planet-page__muted">
-                        {garrison.length} unit{garrison.length === 1 ? "" : "s"}
-                    </span>
-                </h3>
+            <Card
+                area="garrison"
+                title="Garrison"
+                detail={`${garrison.length} unit${garrison.length === 1 ? "" : "s"}`}
+                action={
+                    trainsUnits && (
+                        <OpenButton
+                            label="Build ground unit"
+                            onClick={() => openBuild("groundUnits")}
+                        />
+                    )
+                }
+            >
+                {queue("groundUnits")}
                 {garrison.length ? (
-                    <ul className="planet-page__list">
-                        {garrison.map((unit) => (
-                            <li key={unit.id} className="planet-page__row">
-                                <span>{unitLabel(unit, balance)}</span>
-                                <span className="planet-page__row-actions">
-                                    {transports.map((ship) => (
-                                        <button
-                                            key={ship.id}
-                                            type="button"
-                                            disabled={roomOn(ship) <= 0}
-                                            title={
-                                                roomOn(ship) > 0
-                                                    ? `Board ${ship.name ?? "transport"}`
-                                                    : `${ship.name ?? "Transport"} is full`
-                                            }
-                                            onClick={() => actions.load(ship.id, [unit.id])}
-                                        >
-                                            Load
-                                            {transports.length > 1 && ` → ${ship.name ?? ship.id}`}
-                                        </button>
-                                    ))}
-                                    {unit.tier < balance.groundUnits[unit.unitType].maxTier && (
-                                        <UpgradeButton
-                                            item={{
-                                                kind: "enhancement",
-                                                target: {
-                                                    kind: "groundUnit",
-                                                    unitId: unit.id,
-                                                    unitType: unit.unitType
-                                                },
-                                                tier: unit.tier + 1
-                                            }}
-                                            context={{ ...context, targetTier: unit.tier }}
-                                            economy={economy}
-                                            onBuild={onBuild}
-                                        />
-                                    )}
-                                </span>
-                            </li>
-                        ))}
-                    </ul>
+                    <GarrisonList
+                        garrison={garrison}
+                        balance={balance}
+                        transports={transports}
+                        roomOn={roomOn}
+                        upgradingIds={upgradingIds}
+                        onLoad={(shipId, unitId) => actions.load(shipId, [unitId])}
+                        onUpgrade={(unit) =>
+                            setPopup({
+                                kind: "upgrade",
+                                target: {
+                                    kind: "groundUnit",
+                                    unitId: unit.id,
+                                    unitType: unit.unitType
+                                }
+                            })
+                        }
+                    />
                 ) : (
                     <p className="planet-page__muted">No ground units stationed here.</p>
                 )}
-            </section>
+            </Card>
 
-            {shipsHere.length > 0 && (
-                <section className="planet-page__section">
-                    <h3>
-                        Ships in orbit{" "}
-                        <span className="planet-page__muted">
-                            upgrades are lost if the ship leaves first
-                        </span>
-                    </h3>
-                    <ul className="planet-page__list">
-                        {shipsHere.map((ship) => {
-                            const tier = ship.tier ?? 1;
-                            const def = shipDef(ship.shipType, balance);
-                            const aboard = isTransport(ship, balance)
+            <Card
+                area="orbit"
+                title="Ships in orbit"
+                detail={`${shipsHere.length} · ${context.shipCount}/${context.shipCap} ship cap`}
+                action={
+                    buildsShips && (
+                        <OpenButton label="Build ship" onClick={() => openBuild("ships")} />
+                    )
+                }
+            >
+                {queue("ships")}
+                {shipsHere.length ? (
+                    <OrbitList
+                        ships={shipsHere}
+                        balance={balance}
+                        aboard={(ship) =>
+                            isTransport(ship, balance)
                                 ? world.carriedUnitIds(ship).map((id) => ({
                                       id,
                                       unit: world.groundUnit(id)
                                   }))
-                                : [];
-                            return (
-                                <li key={ship.id} className="planet-page__ship">
-                                    <div className="planet-page__row">
-                                        <span>
-                                            <strong>{ship.name ?? def.name}</strong>{" "}
-                                            <span className="planet-page__tier">T{tier}</span>
-                                            <span className="planet-page__muted"> {def.name}</span>
-                                        </span>
-                                        <span className="planet-page__row-actions">
-                                            {aboard.length > 1 && (
-                                                <button
-                                                    type="button"
-                                                    onClick={() =>
-                                                        actions.unload(
-                                                            ship.id,
-                                                            locationId,
-                                                            aboard.map((a) => a.id)
-                                                        )
-                                                    }
-                                                >
-                                                    Unload all
-                                                </button>
-                                            )}
-                                            {tier < def.maxTier && (
-                                                <UpgradeButton
-                                                    item={{
-                                                        kind: "enhancement",
-                                                        target: {
-                                                            kind: "ship",
-                                                            shipId: ship.id,
-                                                            shipType: ship.shipType
-                                                        },
-                                                        tier: tier + 1
-                                                    }}
-                                                    context={{ ...context, targetTier: tier }}
-                                                    economy={economy}
-                                                    onBuild={onBuild}
-                                                />
-                                            )}
-                                        </span>
-                                    </div>
-                                    {isTransport(ship, balance) && (
-                                        <ul className="planet-page__aboard">
-                                            {aboard.map(({ id, unit }) => (
-                                                <li key={id} className="planet-page__row">
-                                                    <span>
-                                                        {unit ? unitLabel(unit, balance) : id}
-                                                    </span>
-                                                    <button
-                                                        type="button"
-                                                        title="Land into this garrison"
-                                                        onClick={() =>
-                                                            actions.unload(ship.id, locationId, [
-                                                                id
-                                                            ])
-                                                        }
-                                                    >
-                                                        Unload
-                                                    </button>
-                                                </li>
-                                            ))}
-                                            <li className="planet-page__muted">
-                                                {aboard.length}/{def.unitCapacity} aboard
-                                            </li>
-                                        </ul>
-                                    )}
-                                </li>
-                            );
-                        })}
-                    </ul>
-                </section>
-            )}
+                                : undefined
+                        }
+                        upgradingIds={upgradingIds}
+                        onUnload={(shipId, unitIds) => actions.unload(shipId, locationId, unitIds)}
+                        onUpgrade={(ship) =>
+                            setPopup({
+                                kind: "upgrade",
+                                target: { kind: "ship", shipId: ship.id, shipType: ship.shipType }
+                            })
+                        }
+                    />
+                ) : (
+                    <p className="planet-page__muted">No ships in orbit.</p>
+                )}
+            </Card>
 
-            {hasAcademy && (
-                <section className="planet-page__section">
-                    <h3>
-                        Research{" "}
-                        <span className="planet-page__muted">
-                            {techs.length}/{TechId.options.length} techs known
-                        </span>
-                    </h3>
-                    <ul className="planet-page__options">
-                        {TechId.options.map((techId) =>
-                            techs.includes(techId) ? (
-                                <li
-                                    key={techId}
-                                    className="planet-page__option planet-page__option--known"
-                                >
-                                    <div className="planet-page__option-main">
-                                        <strong>{TECHS[techId].name}</strong>
-                                        <span className="planet-page__muted">
-                                            {TECHS[techId].description}
-                                        </span>
-                                    </div>
-                                    <span className="planet-page__tier">Known</span>
-                                </li>
-                            ) : (
-                                <BuildOption
-                                    key={techId}
-                                    item={{ kind: "research", techId }}
-                                    context={context}
-                                    economy={economy}
-                                    onBuild={onBuild}
-                                    label="Research"
-                                />
-                            )
-                        )}
-                    </ul>
-                </section>
-            )}
-
-            <section className="planet-page__section">
-                <h3>Build installations</h3>
-                <ul className="planet-page__options">
-                    {STRUCTURE_ITEMS.filter(
+            {popup?.kind === "build" && popup.category === "installations" && (
+                <BuildPopup
+                    {...buildPopupProps}
+                    title="Add installation"
+                    detail={`${used}/${economy.slots} slots used`}
+                    items={STRUCTURE_ITEMS.filter(
                         (item) =>
                             item.kind === "structure" &&
                             structureDef(item.structureType, balance).sites.includes(economy.site)
-                    ).map((item) => (
-                        <BuildOption
-                            key={itemKey(item)}
-                            item={item}
-                            context={context}
-                            economy={economy}
-                            onBuild={onBuild}
-                        />
-                    ))}
-                </ul>
-            </section>
-
-            {structureDef("barracks", balance).sites.includes(economy.site) && (
-                <section className="planet-page__section">
-                    <h3>Train ground units</h3>
-                    {!trainsUnits && (
-                        <p className="planet-page__muted">Build a Barracks here to train units.</p>
                     )}
-                    <ul className="planet-page__options">
-                        {GROUND_UNIT_ITEMS.map((item) => (
-                            <BuildOption
-                                key={itemKey(item)}
-                                item={item}
-                                context={context}
-                                economy={economy}
-                                onBuild={onBuild}
-                            />
-                        ))}
-                    </ul>
-                </section>
+                    actionLabel="Build"
+                />
             )}
-
-            {economy.site === "planet" && (
-                <section className="planet-page__section">
-                    <h3>
-                        Build ships{" "}
-                        <span className="planet-page__muted">
-                            {context.shipCount}/{context.shipCap} ships
-                        </span>
-                    </h3>
-                    <ul className="planet-page__options">
-                        {SHIP_ITEMS.map((item) => (
-                            <BuildOption
-                                key={itemKey(item)}
-                                item={item}
-                                context={context}
-                                economy={economy}
-                                onBuild={onBuild}
-                            />
-                        ))}
-                    </ul>
-                </section>
+            {popup?.kind === "build" && popup.category === "groundUnits" && (
+                <BuildPopup
+                    {...buildPopupProps}
+                    title="Build ground unit"
+                    detail={`${garrison.length} in garrison`}
+                    items={GROUND_UNIT_ITEMS}
+                    actionLabel="Train"
+                />
             )}
-        </>
+            {popup?.kind === "build" && popup.category === "ships" && (
+                <BuildPopup
+                    {...buildPopupProps}
+                    title="Build ship"
+                    detail={`${context.shipCount}/${context.shipCap} ships`}
+                    items={SHIP_ITEMS}
+                    actionLabel="Build"
+                />
+            )}
+            {popup?.kind === "build" && popup.category === "research" && (
+                <BuildPopup
+                    {...buildPopupProps}
+                    title="Research"
+                    detail={`${techs.length}/${TechId.options.length} techs known`}
+                    items={RESEARCH_ITEMS}
+                    actionLabel="Research"
+                />
+            )}
+            {popup?.kind === "upgrade" && upgrade && (
+                <UpgradePopup
+                    {...buildPopupProps}
+                    item={upgradeItem(popup.target, upgrade.tier)}
+                    name={upgrade.name}
+                    context={
+                        popup.target.kind === "installation"
+                            ? context
+                            : { ...context, targetTier: upgrade.tier }
+                    }
+                />
+            )}
+        </div>
     );
 }
 
@@ -849,8 +460,7 @@ function UnownedLocationPanel({
     }
     const colonyShip = world.colonyShipsAt(location.q, location.r)[0];
     return (
-        <section className="planet-page__section">
-            <h3>Colonise</h3>
+        <Card area="colonise" title="Colonise">
             {colonyShip ? (
                 <div className="planet-page__colonise">
                     <span>
@@ -870,7 +480,7 @@ function UnownedLocationPanel({
                     &apos;s hex to claim it.
                 </p>
             )}
-        </section>
+        </Card>
     );
 }
 
@@ -896,8 +506,7 @@ function EnemyLocationPanel({
                 {location.garrison &&
                     ` ${location.garrison.length} ground unit${location.garrison.length === 1 ? "" : "s"} seen in the garrison.`}
             </p>
-            <section className="planet-page__section">
-                <h3>Invade</h3>
+            <Card area="invade" title="Invade">
                 {pending ? (
                     <p className="planet-page__muted">A ground battle is already under way here.</p>
                 ) : invasion ? (
@@ -921,7 +530,7 @@ function EnemyLocationPanel({
                         Bring transports carrying ground units onto this hex to invade.
                     </p>
                 )}
-            </section>
+            </Card>
         </>
     );
 }
@@ -931,6 +540,7 @@ export function PlanetPage() {
     const { world, actions } = useOutletContext<GameOutletContext>();
     const navigate = useNavigate();
     const routerLocation = useLocation();
+    const [modalHost, setModalHost] = useState<HTMLDivElement | null>(null);
     useHexWorldVersion(world);
 
     const found = locationId ? world.findEntityById(locationId) : undefined;
@@ -939,6 +549,8 @@ export function PlanetPage() {
     const context = world.buildContext;
     const own = !!location?.sideId && location.sideId === world.sideId;
     const kindLabel = location ? locationKindLabel(location) : "Location";
+    const full = !!(location && own && economy && context);
+    const pendingGround = own && locationId ? world.groundBattleAt(locationId) : undefined;
 
     const back = useCallback(() => {
         navigate({ pathname: "/", search: routerLocation.search });
@@ -946,7 +558,8 @@ export function PlanetPage() {
 
     useEffect(() => {
         const onKeyDown = (e: KeyboardEvent) => {
-            if (e.key === "Escape") back();
+            // Popups handle (and prevent) their own Escape first.
+            if (e.key === "Escape" && !e.defaultPrevented) back();
         };
         window.addEventListener("keydown", onKeyDown);
         return () => window.removeEventListener("keydown", onKeyDown);
@@ -963,86 +576,114 @@ export function PlanetPage() {
     };
 
     return (
-        <div className="planet-page" onMouseDown={onBackdropMouseDown} onClick={onBackdropClick}>
-            <section className="planet-page__panel">
-                <header className="planet-page__header">
-                    <h2>
-                        {location?.name ?? `Unknown ${kindLabel.toLowerCase()}`}
-                        {location && (
-                            <span className="planet-page__level">
-                                {location.kind === "planet" ? `Level ${location.level}` : kindLabel}
-                            </span>
+        <div
+            ref={setModalHost}
+            className="planet-page"
+            onMouseDown={onBackdropMouseDown}
+            onClick={onBackdropClick}
+        >
+            <ModalHostContext.Provider value={modalHost}>
+                <section
+                    className={`planet-page__panel${full ? "" : " planet-page__panel--compact"}`}
+                >
+                    <header className="planet-page__header">
+                        <div className="planet-page__title">
+                            <h2>
+                                {location?.name ?? `Unknown ${kindLabel.toLowerCase()}`}
+                                {location && (
+                                    <span className="planet-page__level">
+                                        {location.kind === "planet"
+                                            ? `Level ${location.level}`
+                                            : kindLabel}
+                                    </span>
+                                )}
+                                {economy?.home && own && (
+                                    <span className="planet-page__level">Home</span>
+                                )}
+                            </h2>
+                            <dl className="planet-page__facts">
+                                <div>
+                                    <dt>Owner</dt>
+                                    <dd>
+                                        {location ? (
+                                            location.sideId ? (
+                                                <span
+                                                    className={`planet-page__side planet-page__side--${location.sideId}`}
+                                                >
+                                                    {sideName(location.sideId)}
+                                                    {own && " (you)"}
+                                                </span>
+                                            ) : (
+                                                "Unclaimed"
+                                            )
+                                        ) : (
+                                            "—"
+                                        )}
+                                    </dd>
+                                </div>
+                                <div>
+                                    <dt>System</dt>
+                                    <dd>{location?.systemId ?? "—"}</dd>
+                                </div>
+                                <div>
+                                    <dt>Hex</dt>
+                                    <dd>{location ? `${location.q}, ${location.r}` : "—"}</dd>
+                                </div>
+                                <div>
+                                    <dt>Slots</dt>
+                                    <dd>{location ? slotsForEntity(location) : "—"}</dd>
+                                </div>
+                                <div>
+                                    <dt>Id</dt>
+                                    <dd>
+                                        <code>{locationId}</code>
+                                    </dd>
+                                </div>
+                            </dl>
+                        </div>
+                        {pendingGround && (
+                            <p className="planet-page__alert">
+                                Under invasion by {sideName(pendingGround.attackerSideId)}. Awaiting
+                                the outcome of the ground battle.
+                            </p>
                         )}
-                    </h2>
-                    <button type="button" onClick={back}>
-                        Back to map
-                    </button>
-                </header>
-                <dl className="planet-page__facts">
-                    <dt>Id</dt>
-                    <dd>
-                        <code>{locationId}</code>
-                    </dd>
-                    <dt>Owner</dt>
-                    <dd>
-                        {location ? (
-                            location.sideId ? (
-                                <span
-                                    className={`planet-page__side planet-page__side--${location.sideId}`}
-                                >
-                                    {sideName(location.sideId)}
-                                    {own && " (you)"}
-                                </span>
-                            ) : (
-                                "Unclaimed"
-                            )
-                        ) : (
-                            "—"
-                        )}
-                    </dd>
-                    <dt>System</dt>
-                    <dd>{location?.systemId ?? "—"}</dd>
-                    <dt>Location</dt>
-                    <dd>{location ? `${location.q}, ${location.r}` : "—"}</dd>
-                    <dt>Slots</dt>
-                    <dd>
-                        {location
-                            ? `${slotsForEntity(location)} installation${slotsForEntity(location) === 1 ? "" : "s"}`
-                            : "—"}
-                    </dd>
-                </dl>
-                {!location && (
-                    <p className="planet-page__muted">
-                        This location is not in your known map (it may be out of sight).
-                    </p>
-                )}
-                {location && own && economy && context && (
-                    <OwnLocationPanel
-                        world={world}
-                        location={location}
-                        economy={economy}
-                        context={context}
-                        actions={actions}
-                    />
-                )}
-                {location && own && !(economy && context) && (
-                    <p className="planet-page__muted">Waiting for economy data…</p>
-                )}
-                {location && !location.sideId && (
-                    <UnownedLocationPanel
-                        world={world}
-                        location={location}
-                        onColonise={(shipId) => actions.colonise(location.id, shipId)}
-                    />
-                )}
-                {location && location.sideId && !own && (
-                    <EnemyLocationPanel
-                        world={world}
-                        location={location}
-                        onInvade={(shipIds) => actions.invade(location.id, shipIds)}
-                    />
-                )}
-            </section>
+                        <button type="button" className="planet-page__back" onClick={back}>
+                            Back to map
+                        </button>
+                    </header>
+                    {!location && (
+                        <p className="planet-page__muted">
+                            This location is not in your known map (it may be out of sight).
+                        </p>
+                    )}
+                    {location && own && economy && context && (
+                        <OwnLocationPanel
+                            world={world}
+                            location={location}
+                            economy={economy}
+                            context={context}
+                            actions={actions}
+                        />
+                    )}
+                    {location && own && !(economy && context) && (
+                        <p className="planet-page__muted">Waiting for economy data…</p>
+                    )}
+                    {location && !location.sideId && (
+                        <UnownedLocationPanel
+                            world={world}
+                            location={location}
+                            onColonise={(shipId) => actions.colonise(location.id, shipId)}
+                        />
+                    )}
+                    {location && location.sideId && !own && (
+                        <EnemyLocationPanel
+                            world={world}
+                            location={location}
+                            onInvade={(shipIds) => actions.invade(location.id, shipIds)}
+                        />
+                    )}
+                </section>
+            </ModalHostContext.Provider>
         </div>
     );
 }

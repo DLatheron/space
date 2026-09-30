@@ -1,0 +1,27 @@
+.cost-list {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 0.2rem 0.6rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.cost-list--empty {
+    color: #7f93b5;
+}
+
+/* Shared resource colours (also used by the location screen). */
+.resource-text--money {
+    color: #ffd166;
+}
+
+.resource-text--materials {
+    color: #9fb8ff;
+}
+
+.resource-text--population {
+    color: #8fdc7a;
+}
+
+.resource-text--science {
+    color: #c9a0ff;
+}

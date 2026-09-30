@@ -169,6 +169,52 @@ describe("Game economy messages", () => {
         game.destroyGame();
     });
 
+    it("moves orders within their queue and rejects moves at another side's location", async () => {
+        const { game, alpha, beta } = createGame({ revealMap: false, fullVisibility: false });
+        const home = game.entities.ofKind("planet").find((p) => p.sideId === "alpha")!;
+        const betaHome = game.entities.ofKind("planet").find((p) => p.sideId === "beta")!;
+        for (const structureType of ["habitat", "mine"] as const) {
+            game.economy.build("alpha", home.id, { kind: "structure", structureType });
+        }
+        const [habitat, mine] = game.economy.locationEconomy(home.id)!.orders.map((o) => o.id);
+
+        game.queueMessage(
+            {
+                type: "client:order:move",
+                payload: { locationId: home.id, orderId: mine!, direction: "up" }
+            },
+            alpha.client
+        );
+        await vi.waitFor(() => expect(alpha.last("server:economy:state")).toBeDefined());
+        const orders = alpha
+            .last("server:economy:state")!
+            .payload.locations.find((l) => l.locationId === home.id)!.orders;
+        expect(orders.map((o) => o.id)).toEqual([mine, habitat]);
+        expect(game.economy.activeOrders(home.id).map((o) => o.id)).toEqual([mine]);
+
+        game.queueMessage(
+            {
+                type: "client:order:move",
+                payload: { locationId: home.id, orderId: mine!, direction: "down" }
+            },
+            beta.client
+        );
+        game.queueMessage(
+            {
+                type: "client:order:move",
+                payload: { locationId: betaHome.id, orderId: mine!, direction: "down" }
+            },
+            alpha.client
+        );
+        await vi.waitFor(() => expect(beta.last("server:error")).toBeDefined());
+        await vi.waitFor(() => expect(alpha.last("server:error")).toBeDefined());
+        expect(game.economy.locationEconomy(home.id)!.orders.map((o) => o.id)).toEqual([
+            mine,
+            habitat
+        ]);
+        game.destroyGame();
+    });
+
     it("uses ship, structure and starting values from the economy config", async () => {
         const economy = EconomyBalanceConfig.parse({
             startingShips: ["scout", "colony_ship"],
@@ -214,14 +260,19 @@ describe("Game economy messages", () => {
                 expect(alpha.last("server:turn:state")?.payload.turn).toBe(turn)
             );
         };
+        const installed = () =>
+            game.economy.locationEconomy(home.id)!.installations.map((i) => i.type);
+        // Funded in one turn, the hub completes the turn after; its slot passes straight to the
+        // habitat, which takes its default 2 turns plus one to complete.
         await endTurn(2);
-        expect(game.economy.locationEconomy(home.id)!.installations.map((i) => i.type)).toEqual([
-            "trade_hub"
+        expect(installed()).toEqual([]);
+        expect(game.economy.activeOrders(home.id).map((o) => o.item)).toEqual([
+            { kind: "structure", structureType: "habitat" }
         ]);
-        // Installations run one at a time: the habitat takes its default 2 turns after the hub.
         await endTurn(3);
+        expect(installed()).toEqual(["trade_hub"]);
         await endTurn(4);
-        await endTurn(5);
+        expect(installed()).toEqual(["trade_hub", "habitat"]);
         expect(game.economy.stateFor("alpha").lastIncome).toEqual({
             money: 40 + 77,
             materials: 0,

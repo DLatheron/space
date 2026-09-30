@@ -8,10 +8,11 @@ import {
     DEFAULT_BUILD_PRIORITY,
     depositCapped,
     enhancementTargetId,
-    fundOrders,
+    fundLocationOrders,
     isFullyFunded,
     locationIncome,
     minResources,
+    moveOrderInQueue,
     partitionOrders,
     remainingNeed,
     SHIP_TYPE_INFO,
@@ -38,6 +39,7 @@ import {
     type LocationEconomy,
     type LocationEntity,
     type OrderId,
+    type QueueDirection,
     type Resources,
     type ShipType,
     type SideId,
@@ -204,7 +206,10 @@ export class EconomyManager {
         return this._cap(this._record(locationId));
     }
 
-    /** Orders funded and generating supply demand; the rest wait for a concurrency slot. */
+    /**
+     * Orders funded and generating supply demand; the rest wait for a concurrency slot or,
+     * fully funded, to complete.
+     */
     activeOrders(locationId: EntityId): BuildOrder[] {
         return partitionOrders(this._record(locationId), this._balance).active;
     }
@@ -256,7 +261,7 @@ export class EconomyManager {
     /**
      * Validate and place an order at an owned location. Nothing is paid up front; it is
      * funded over the following turns. With `instantBuild` it is funded straight away from
-     * any of the side's stockpiles and completes if that covers it (a ship still waits
+     * any of the side's stockpiles and completes if that covers it (a ship still waits, ready,
      * while enemy warships hold the location's hex).
      */
     build(
@@ -295,8 +300,10 @@ export class EconomyManager {
         );
         record.orders.push(order);
 
-        const active = this.activeOrders(location.id).some((o) => o.id === order.id);
-        if (!this._instantBuild || !active) {
+        const waiting = partitionOrders(record, this._balance).waiting.some(
+            (o) => o.id === order.id
+        );
+        if (!this._instantBuild || waiting) {
             return { ok: true, order: { ...order }, completed: false };
         }
 
@@ -338,6 +345,30 @@ export class EconomyManager {
         const order = this._record(locationId).orders.find((o) => o.id === orderId);
         if (!order) return { ok: false, error: `No order ${orderId} at ${locationId}` };
         order.priority = priority;
+        return { ok: true };
+    }
+
+    /** Swap an order with its neighbour in the same build queue (see `moveOrderInQueue`). */
+    moveOrder(
+        sideId: SideId | null,
+        locationId: EntityId,
+        orderId: OrderId,
+        direction: QueueDirection
+    ): EconomyResult {
+        const owned = this._owned(sideId, locationId);
+        if (!owned.ok) return owned;
+        const record = this._record(locationId);
+        if (!record.orders.some((o) => o.id === orderId)) {
+            return { ok: false, error: `No order ${orderId} at ${locationId}` };
+        }
+        const moved = moveOrderInQueue(record.orders, orderId, direction);
+        if (!moved) {
+            return {
+                ok: false,
+                error: `Order ${orderId} is already ${direction === "up" ? "first" : "last"} in its queue`
+            };
+        }
+        record.orders = moved;
         return { ok: true };
     }
 
@@ -386,7 +417,7 @@ export class EconomyManager {
     }
 
     /**
-     * Step 1: planet base income and installation output go into each local stockpile;
+     * Step 2: planet base income and installation output go into each local stockpile;
      * whatever doesn't fit under its cap is lost.
      */
     produce(): void {
@@ -407,21 +438,14 @@ export class EconomyManager {
     }
 
     /**
-     * Steps 4 and 5: every active order draws from its local stockpile (see `fundOrders`),
-     * then fully funded orders complete. A finished ship waits while enemy warships hold its hex.
+     * Step 1: orders that were already fully funded (ready) complete. A finished ship waits
+     * while enemy warships hold its hex.
      */
-    fundAndComplete(): EconomyAdvance {
+    completeReady(): EconomyAdvance {
         const result: EconomyAdvance = { completed: [], spawnedShips: [], spawnedUnits: [] };
         for (const sideId of this._sideIds) {
             for (const location of this.ownedLocations(sideId)) {
                 const record = this._record(location.id);
-                const funded = fundOrders(record.stockpile, this.activeOrders(location.id));
-                record.stockpile = funded.stockpile;
-                const applied = new Map(funded.orders.map((o) => [o.id, o.applied]));
-                for (const order of record.orders) {
-                    order.applied = applied.get(order.id) ?? order.applied;
-                }
-
                 for (const order of [...record.orders]) {
                     if (!isFullyFunded(order)) continue;
                     const completion = this._complete(sideId, location, order);
@@ -441,10 +465,31 @@ export class EconomyManager {
         return result;
     }
 
-    /** Steps 1, 4 and 5 without supply movement (for callers with no SupplyManager). */
+    /**
+     * Step 5: active orders draw from their local stockpile (see `fundLocationOrders`). Those
+     * that become fully funded are ready: they complete at the next end of turn and free their
+     * build slot straight away.
+     */
+    fund(): void {
+        for (const sideId of this._sideIds) {
+            for (const location of this.ownedLocations(sideId)) {
+                const record = this._record(location.id);
+                const funded = fundLocationOrders(record.stockpile, record, this._balance);
+                record.stockpile = funded.stockpile;
+                const applied = new Map(funded.orders.map((o) => [o.id, o.applied]));
+                for (const order of record.orders) {
+                    order.applied = applied.get(order.id) ?? order.applied;
+                }
+            }
+        }
+    }
+
+    /** Steps 1, 2 and 5 without supply movement (for callers with no SupplyManager). */
     advanceTurn(): EconomyAdvance {
+        const result = this.completeReady();
         this.produce();
-        return this.fundAndComplete();
+        this.fund();
+        return result;
     }
 
     /** Add delivered cargo to a location's stockpile, up to its cap; returns what was taken in. */

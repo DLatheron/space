@@ -1,0 +1,39 @@
+.priority-picker {
+    display: inline-flex;
+    flex: none;
+    border: 1px solid #2c3d63;
+    border-radius: 0.3rem;
+    overflow: hidden;
+    vertical-align: middle;
+}
+
+/* Doubled class beats the global `button:hover` background. */
+.priority-picker .priority-picker__option {
+    padding: 0.1rem 0.5rem;
+    border: none;
+    border-radius: 0;
+    background: #16233f;
+    color: #9ab3d4;
+    font-size: 0.75rem;
+}
+
+.priority-picker .priority-picker__option + .priority-picker__option {
+    border-left: 1px solid #2c3d63;
+}
+
+.priority-picker .priority-picker__option--active {
+    color: #0f1730;
+    font-weight: 600;
+}
+
+.priority-picker .priority-picker__option--low.priority-picker__option--active {
+    background: #7f93b5;
+}
+
+.priority-picker .priority-picker__option--medium.priority-picker__option--active {
+    background: #9fd0ff;
+}
+
+.priority-picker .priority-picker__option--high.priority-picker__option--active {
+    background: #ffd166;
+}

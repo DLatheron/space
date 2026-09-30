@@ -1,11 +1,13 @@
 import {
     GROUND_UNIT_TYPE_INFO,
+    isFullyFunded,
     resourceUnits,
     SHIP_TYPE_INFO,
     slotsForEntity,
     type EntityKind,
     type EntitySummary
 } from "@space/shared-data";
+import { imageUrl } from "../assets/images.js";
 import type { GameActions } from "../gameActions.js";
 import { useHexWorldVersion } from "../hooks/index.js";
 import {
@@ -17,6 +19,7 @@ import {
     type MapFocus
 } from "../world/HexWorld.js";
 import { formatNumber, formatResources } from "./format.js";
+import { Thumbnail } from "./Thumbnail.js";
 import "./InfoPane.css";
 
 const KIND_LABELS: Record<EntityKind, string> = {
@@ -36,9 +39,10 @@ type InfoPaneProps = {
     world: HexWorld;
     onEndTurn: () => void;
     actions: Pick<GameActions, "colonise" | "invade">;
+    onOpenLocation: (locationId: string) => void;
 };
 
-export function InfoPane({ world, onEndTurn, actions }: InfoPaneProps) {
+export function InfoPane({ world, onEndTurn, actions, onOpenLocation }: InfoPaneProps) {
     useHexWorldVersion(world);
 
     const turn = world.turn;
@@ -110,7 +114,7 @@ export function InfoPane({ world, onEndTurn, actions }: InfoPaneProps) {
                         </span>
                     )}
                 </header>
-                <FocusBody world={world} focus={focus} />
+                <FocusBody world={world} focus={focus} onOpenLocation={onOpenLocation} />
             </section>
         </aside>
     );
@@ -134,7 +138,15 @@ function entityName(world: HexWorld, id: string): string {
     return entity ? entityTitle(entity) : id;
 }
 
-function FocusBody({ world, focus }: { world: HexWorld; focus: MapFocus }) {
+function FocusBody({
+    world,
+    focus,
+    onOpenLocation
+}: {
+    world: HexWorld;
+    focus: MapFocus;
+    onOpenLocation: (locationId: string) => void;
+}) {
     if (focus.mode === "none") {
         return (
             <p className="info-pane__muted">
@@ -161,6 +173,16 @@ function FocusBody({ world, focus }: { world: HexWorld; focus: MapFocus }) {
                 </div>
             </dl>
 
+            {entity && focus.mode === "selection" && isBuildSite(entity) && (
+                <button
+                    type="button"
+                    className="info-pane__open"
+                    onClick={() => onOpenLocation(entity.id)}
+                >
+                    Open {entityTitle(entity)}
+                </button>
+            )}
+
             {entity ? (
                 <EntityDetails world={world} entity={entity} />
             ) : (
@@ -175,14 +197,15 @@ function FocusBody({ world, focus }: { world: HexWorld; focus: MapFocus }) {
                 <div className="info-pane__stack">
                     <h3>Also here</h3>
                     <ul>
-                        {entities
+                        {world
+                            .clickCycle(entities)
                             .filter((e) => e.id !== entity?.id)
                             .map((e) => (
                                 <li key={e.id}>
                                     <button
                                         type="button"
-                                        className="info-pane__link"
-                                        title="Inspect"
+                                        className="info-pane__stack-item"
+                                        title={`Select ${entityTitle(e)}`}
                                         onClick={() =>
                                             e.kind === "ship" && e.sideId === world.sideId
                                                 ? world.selectShip(e.id)
@@ -192,12 +215,14 @@ function FocusBody({ world, focus }: { world: HexWorld; focus: MapFocus }) {
                                         <span className="info-pane__kind">
                                             {KIND_LABELS[e.kind]}
                                         </span>
-                                        {" · "}
-                                        {entityTitle(e)}
+                                        <span>{entityTitle(e)}</span>
                                     </button>
                                 </li>
                             ))}
                     </ul>
+                    {focus.mode === "selection" && (
+                        <p className="info-pane__hint">Click the hex again to cycle.</p>
+                    )}
                 </div>
             )}
         </div>
@@ -219,8 +244,23 @@ function EntityDetails({ world, entity }: { world: HexWorld; entity: EntitySumma
     const routeTurns =
         entity.kind === "supply_ship" ? Math.ceil(route.length / Math.max(1, entity.speed)) : 0;
 
+    const picture =
+        entity.kind === "ship"
+            ? imageUrl({ kind: "ship", shipType: entity.shipType })
+            : entity.kind === "supply_ship"
+              ? imageUrl({ kind: "supplyShip" })
+              : undefined;
+
     return (
         <div className="info-pane__entity">
+            {picture && (
+                <Thumbnail
+                    src={picture}
+                    label={entityTitle(entity)}
+                    size="banner"
+                    className="info-pane__picture"
+                />
+            )}
             <dl className="info-pane__facts">
                 <div>
                     <dt>Type</dt>
@@ -339,7 +379,11 @@ function EntityDetails({ world, entity }: { world: HexWorld; entity: EntitySumma
                         </div>
                         <div>
                             <dt>Orders</dt>
-                            <dd>{economy.orders.length}</dd>
+                            <dd>
+                                {economy.orders.length}
+                                {economy.orders.some(isFullyFunded) &&
+                                    ` (${economy.orders.filter(isFullyFunded).length} ready next turn)`}
+                            </dd>
                         </div>
                         <div>
                             <dt>Stockpile</dt>

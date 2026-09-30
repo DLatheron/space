@@ -1,4 +1,5 @@
 import {
+    addResources,
     borrowedPopulation,
     buildItemCost,
     buildItemName,
@@ -8,6 +9,7 @@ import {
     countQueuedShips,
     createBuildOrder,
     depositCapped,
+    fundLocationOrders,
     fundOrders,
     groundUnitStats,
     HOME_PLANET_LEVEL,
@@ -16,9 +18,11 @@ import {
     locationDemand,
     locationIncome,
     maxEnhancementTierFor,
+    moveOrderInQueue,
     orderDemands,
     packCargo,
     partitionOrders,
+    queueCategory,
     ratePerTurn,
     resourceUnits,
     shipCapFor,
@@ -29,6 +33,7 @@ import {
     stockpileCap,
     storageRoom,
     structureDef,
+    subtractResources,
     structureOutput,
     supplyCapacityFor,
     supplySpeedFor,
@@ -165,6 +170,21 @@ const balance: EconomyBalance = {
             hp: 8,
             requiresTech: "transports",
             unitCapacity: 4
+        }),
+        fighter_squadron: ship({ cost: res(80, 60, 10), maxMovementPoints: 6, hp: 4 }),
+        advanced_fighter_squadron: ship({
+            cost: res(150, 120, 15),
+            buildTurns: 3,
+            maxMovementPoints: 6,
+            hp: 7,
+            requires: ["advanced_shipyard"]
+        }),
+        star_destroyer: ship({
+            cost: res(600, 800, 60),
+            buildTurns: 6,
+            maxMovementPoints: 2,
+            hp: 30,
+            requires: ["advanced_shipyard", "docks"]
         })
     },
     shipTiers: { hpMultiplier: [1, 1.5, 2], movementBonus: [0, 0, 1] },
@@ -534,9 +554,15 @@ describe("structureDef", () => {
             name: "Shipyard",
             cost: res(150, 200, 20),
             unique: true,
-            unlocksShips: ["scout", "colony_ship", "transport"],
+            unlocksShips: ["scout", "colony_ship", "transport", "fighter_squadron"],
             unlocksGroundUnits: []
         });
+        expect(structureDef("advanced_shipyard", balance).unlocksShips).toEqual([
+            "frigate",
+            "advanced_fighter_squadron",
+            "star_destroyer"
+        ]);
+        expect(structureDef("docks", balance).unlocksShips).toEqual(["star_destroyer"]);
         expect(structureDef("barracks", balance).unlocksGroundUnits).toEqual([
             "infantry",
             "armour"
@@ -549,7 +575,7 @@ describe("structureDef", () => {
             }
         };
         expect(structureDef("shipyard", moved).unlocksShips).toContain("frigate");
-        expect(structureDef("advanced_shipyard", moved).unlocksShips).toEqual([]);
+        expect(structureDef("advanced_shipyard", moved).unlocksShips).not.toContain("frigate");
     });
 });
 
@@ -748,6 +774,27 @@ describe("canBuild", () => {
         expect(canBuild(ctx(), yard, { kind: "ship", shipType: "colony_ship" })).toEqual({
             ok: true
         });
+        expect(canBuild(ctx(), yard, { kind: "ship", shipType: "fighter_squadron" })).toEqual({
+            ok: true
+        });
+    });
+
+    it("needs an Advanced Shipyard and Docks for a Star Destroyer", () => {
+        const destroyer: BuildItem = { kind: "ship", shipType: "star_destroyer" };
+        const advanced = [inst("shipyard"), inst("advanced_shipyard")];
+        expect(canBuild(ctx(), location({ installations: advanced }), destroyer)).toEqual({
+            ok: false,
+            reason: "Requires Docks"
+        });
+        expect(
+            canBuild(ctx(), location({ installations: [...advanced, inst("docks")] }), destroyer)
+        ).toEqual({ ok: true });
+        expect(
+            canBuild(ctx(), location({ installations: advanced }), {
+                kind: "ship",
+                shipType: "advanced_fighter_squadron"
+            })
+        ).toEqual({ ok: true });
     });
 
     it("rejects ships at the ship cap", () => {
@@ -1013,5 +1060,136 @@ describe("buildSlots / partitionOrders", () => {
         const { active, waiting } = partitionOrders(p, balance);
         expect(ids(active)).toEqual(["u1", "u2"]);
         expect(ids(waiting)).toEqual(["m1"]);
+    });
+
+    it("breaks priority ties by queue position after a move", () => {
+        const orders = [
+            createBuildOrder("s1", scout, balance),
+            createBuildOrder("m1", mine, balance),
+            createBuildOrder("s2", scout, balance),
+            createBuildOrder("s3", scout, balance, "high")
+        ];
+        const moved = moveOrderInQueue(orders, "s2", "up")!;
+        expect(ids(moved)).toEqual(["s2", "m1", "s1", "s3"]);
+        const yard = { installations: [inst("shipyard"), inst("advanced_shipyard")] };
+        const before = partitionOrders(location({ ...yard, orders }), balance);
+        expect(ids(before.active)).toEqual(["s1", "m1", "s3"]);
+        const after = partitionOrders(location({ ...yard, orders: moved }), balance);
+        expect(ids(after.active)).toEqual(["s2", "m1", "s3"]);
+        expect(ids(after.waiting)).toEqual(["s1"]);
+    });
+
+    it("sets fully funded orders aside as ready without holding a slot", () => {
+        const funded = createBuildOrder("s1", scout, balance);
+        funded.applied = { ...funded.cost };
+        const p = location({
+            installations: [inst("shipyard")],
+            orders: [
+                funded,
+                createBuildOrder("s2", scout, balance),
+                createBuildOrder("s3", scout, balance)
+            ]
+        });
+        const { active, waiting, ready } = partitionOrders(p, balance);
+        expect(ids(ready)).toEqual(["s1"]);
+        expect(ids(active)).toEqual(["s2"]);
+        expect(ids(waiting)).toEqual(["s3"]);
+        // Still counted against the ship cap until it completes.
+        expect(countQueuedShips([p])).toBe(3);
+    });
+});
+
+describe("fundLocationOrders", () => {
+    /** An order with exactly one turn's draw left. */
+    const lastTurn = (id: string) => {
+        const order = createBuildOrder(id, scout, balance);
+        order.applied = subtractResources(order.cost, order.ratePerTurn);
+        return order;
+    };
+    const yard = { installations: [inst("shipyard")] };
+
+    it("hands a slot freed by a newly funded order to the next, from what is left", () => {
+        const first = lastTurn("s1");
+        const second = createBuildOrder("s2", scout, balance);
+        const third = createBuildOrder("s3", scout, balance);
+        const stock = res(1000, 1000, 1000, 1000);
+        const result = fundLocationOrders(
+            stock,
+            location({ ...yard, orders: [first, second, third] }),
+            balance
+        );
+        expect(result.drawn).toEqual({ s1: first.ratePerTurn, s2: second.ratePerTurn });
+        expect(result.orders.map((o) => o.applied)).toEqual([
+            first.cost,
+            second.ratePerTurn,
+            zeroResources()
+        ]);
+        expect(result.stockpile).toEqual(
+            subtractResources(stock, addResources(first.ratePerTurn, second.ratePerTurn))
+        );
+    });
+
+    it("draws nothing for ready orders and leaves the next unfunded when stock runs out", () => {
+        const ready = createBuildOrder("s0", scout, balance);
+        ready.applied = { ...ready.cost };
+        const first = lastTurn("s1");
+        const second = createBuildOrder("s2", scout, balance);
+        const result = fundLocationOrders(
+            first.ratePerTurn,
+            location({ ...yard, orders: [ready, first, second] }),
+            balance
+        );
+        expect(result.drawn.s0).toBeUndefined();
+        expect(result.drawn.s2).toEqual(zeroResources());
+        expect(result.orders.map((o) => o.applied)).toEqual([
+            ready.cost,
+            first.cost,
+            zeroResources()
+        ]);
+        expect(result.stockpile).toEqual(zeroResources());
+    });
+});
+
+describe("queueCategory / moveOrderInQueue", () => {
+    const ids = (orders: readonly BuildOrder[]) => orders.map((o) => o.id);
+    const shipUpgrade: BuildItem = {
+        kind: "enhancement",
+        target: { kind: "ship", shipId: "s1", shipType: "scout" },
+        tier: 2
+    };
+    const unitUpgrade: BuildItem = {
+        kind: "enhancement",
+        target: { kind: "groundUnit", unitId: "g1", unitType: "infantry" },
+        tier: 2
+    };
+
+    it("puts ship and ground unit upgrades in their queues without a slot category", () => {
+        expect(queueCategory(shipUpgrade)).toBe("ships");
+        expect(queueCategory(unitUpgrade)).toBe("groundUnits");
+        expect(queueCategory(mine)).toBe("installations");
+        expect(queueCategory(scout)).toBe("ships");
+    });
+
+    it("swaps only with the neighbour in the same queue", () => {
+        const orders = [
+            createBuildOrder("s1", scout, balance),
+            createBuildOrder("m1", mine, balance),
+            createBuildOrder("u1", shipUpgrade, balance),
+            createBuildOrder("m2", mine, balance)
+        ];
+        expect(ids(moveOrderInQueue(orders, "s1", "down")!)).toEqual(["u1", "m1", "s1", "m2"]);
+        expect(ids(moveOrderInQueue(orders, "m2", "up")!)).toEqual(["s1", "m2", "u1", "m1"]);
+        expect(ids(orders)).toEqual(["s1", "m1", "u1", "m2"]);
+    });
+
+    it("refuses moves past the end of the queue or for unknown orders", () => {
+        const orders = [
+            createBuildOrder("s1", scout, balance),
+            createBuildOrder("m1", mine, balance)
+        ];
+        expect(moveOrderInQueue(orders, "m1", "up")).toBeUndefined();
+        expect(moveOrderInQueue(orders, "s1", "down")).toBeUndefined();
+        expect(moveOrderInQueue(orders, "s1", "up")).toBeUndefined();
+        expect(moveOrderInQueue(orders, "nope", "up")).toBeUndefined();
     });
 });

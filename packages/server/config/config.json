@@ -225,6 +225,39 @@
                 "maxTier": 3,
                 "unitCapacity": 4,
                 "canColonise": false
+            },
+            "fighter_squadron": {
+                "cost": { "money": 80, "materials": 60, "population": 10, "science": 0 },
+                "buildTurns": 2,
+                "maxMovementPoints": 6,
+                "hp": 4,
+                "requires": ["shipyard"],
+                "requiresTech": null,
+                "maxTier": 3,
+                "unitCapacity": 0,
+                "canColonise": false
+            },
+            "advanced_fighter_squadron": {
+                "cost": { "money": 150, "materials": 120, "population": 15, "science": 0 },
+                "buildTurns": 3,
+                "maxMovementPoints": 6,
+                "hp": 7,
+                "requires": ["advanced_shipyard"],
+                "requiresTech": null,
+                "maxTier": 3,
+                "unitCapacity": 0,
+                "canColonise": false
+            },
+            "star_destroyer": {
+                "cost": { "money": 600, "materials": 800, "population": 60, "science": 0 },
+                "buildTurns": 6,
+                "maxMovementPoints": 2,
+                "hp": 30,
+                "requires": ["advanced_shipyard", "docks"],
+                "requiresTech": null,
+                "maxTier": 3,
+                "unitCapacity": 0,
+                "canColonise": false
             }
         },
         "shipTiers": {

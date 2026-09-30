@@ -223,6 +223,13 @@ export function App() {
                 });
                 appendLog(`priority — order ${orderId} on ${locationId} → ${priority}`);
             },
+            moveOrder: (locationId, orderId, direction) => {
+                sendMessage({
+                    type: "client:order:move",
+                    payload: { locationId, orderId, direction }
+                });
+                appendLog(`move — order ${orderId} on ${locationId} ${direction}`);
+            },
             colonise: (locationId, shipId) => {
                 sendMessage({ type: "client:location:colonise", payload: { locationId, shipId } });
                 appendLog(`colonise — ${locationId} with ${shipId}`);
@@ -256,6 +263,16 @@ export function App() {
 
     const outletContext = useMemo<GameOutletContext>(() => ({ world, actions }), [world, actions]);
 
+    const openLocation = useCallback(
+        (locationId: string) => {
+            navigate({
+                pathname: `/location/${encodeURIComponent(locationId)}`,
+                search: location.search
+            });
+        },
+        [navigate, location.search]
+    );
+
     const onMapAction = useCallback(
         (action: HexClickAction) => {
             switch (action.type) {
@@ -267,10 +284,7 @@ export function App() {
                     appendLog(`move — ${action.shipId} → ${action.to.q},${action.to.r}`);
                     break;
                 case "open-location":
-                    navigate({
-                        pathname: `/location/${encodeURIComponent(action.locationId)}`,
-                        search: location.search
-                    });
+                    openLocation(action.locationId);
                     break;
                 case "inspect":
                     appendLog(`inspect — ${action.entityId}`);
@@ -281,7 +295,7 @@ export function App() {
                     break;
             }
         },
-        [sendMessage, appendLog, navigate, location.search]
+        [sendMessage, appendLog, openLocation]
     );
 
     useEffect(() => {
@@ -343,7 +357,12 @@ export function App() {
                         />
                         <Outlet context={outletContext} />
                     </div>
-                    <InfoPane world={world} onEndTurn={endTurn} actions={actions} />
+                    <InfoPane
+                        world={world}
+                        onEndTurn={endTurn}
+                        actions={actions}
+                        onOpenLocation={openLocation}
+                    />
                 </div>
             )}
 

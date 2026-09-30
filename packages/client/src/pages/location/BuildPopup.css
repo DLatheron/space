@@ -1,0 +1,20 @@
+.build-popup__detail {
+    color: #7f93b5;
+    font-size: 0.85rem;
+    font-weight: 400;
+}
+
+.build-popup__priority {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: #e8eefc;
+}
+
+.build-popup__options {
+    display: grid;
+    gap: 0.45rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}

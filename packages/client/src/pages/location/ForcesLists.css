@@ -1,0 +1,66 @@
+.forces,
+.forces__aboard {
+    display: grid;
+    gap: 0.3rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.forces__aboard {
+    margin: 0.3rem 0 0 2.85rem;
+    font-size: 0.85rem;
+}
+
+.forces__row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.6rem;
+    font-size: 0.88rem;
+}
+
+.forces > li.forces__row,
+.forces__ship {
+    padding: 0.3rem 0.5rem;
+    border: 1px solid #22314f;
+    border-radius: 0.35rem;
+    background: #121c38;
+}
+
+.forces__who {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    min-width: 0;
+}
+
+.forces__name {
+    min-width: 0;
+}
+
+.forces__tier {
+    padding: 0 0.35rem;
+    border: 1px solid #3a4d73;
+    border-radius: 0.25rem;
+    color: #9fd0ff;
+    font-size: 0.72rem;
+}
+
+.forces__muted {
+    color: #7f93b5;
+    font-size: 0.8rem;
+}
+
+.forces__actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 0.35rem;
+}
+
+.forces__row button {
+    flex: none;
+    padding: 0.2rem 0.6rem;
+    font-size: 0.78rem;
+}

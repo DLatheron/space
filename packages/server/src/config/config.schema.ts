@@ -287,6 +287,32 @@ export const EconomyBalanceConfig = z
                     requiresTech: "transports",
                     maxTier: 3,
                     unitCapacity: 4
+                }),
+                fighter_squadron: ship({
+                    ...SHIP_DEFAULTS,
+                    cost: { money: 80, materials: 60, population: 10, science: 0 },
+                    buildTurns: 2,
+                    maxMovementPoints: 6,
+                    hp: 4,
+                    maxTier: 3
+                }),
+                advanced_fighter_squadron: ship({
+                    ...SHIP_DEFAULTS,
+                    cost: { money: 150, materials: 120, population: 15, science: 0 },
+                    buildTurns: 3,
+                    maxMovementPoints: 6,
+                    hp: 7,
+                    requires: ["advanced_shipyard"],
+                    maxTier: 3
+                }),
+                star_destroyer: ship({
+                    ...SHIP_DEFAULTS,
+                    cost: { money: 600, materials: 800, population: 60, science: 0 },
+                    buildTurns: 6,
+                    maxMovementPoints: 2,
+                    hp: 30,
+                    requires: ["advanced_shipyard", "docks"],
+                    maxTier: 3
                 })
             })
             .strict()

@@ -80,6 +80,18 @@ describe("economy balance config", () => {
         });
         expect(economy.ships.frigate.requires).toEqual(["advanced_shipyard"]);
         expect(economy.ships.colony_ship).toMatchObject({ canColonise: true, maxTier: 1 });
+        expect(economy.ships.fighter_squadron).toMatchObject({
+            maxMovementPoints: 6,
+            hp: 4,
+            requires: ["shipyard"]
+        });
+        expect(economy.ships.advanced_fighter_squadron.requires).toEqual(["advanced_shipyard"]);
+        expect(economy.ships.star_destroyer).toMatchObject({
+            maxMovementPoints: 2,
+            hp: 30,
+            requires: ["advanced_shipyard", "docks"],
+            maxTier: 3
+        });
         expect(economy.shipTiers).toEqual({ hpMultiplier: [1, 1.5, 2], movementBonus: [0, 0, 1] });
         expect(economy.groundUnits.armour).toEqual({
             cost: { money: 120, materials: 150, population: 10, science: 0 },

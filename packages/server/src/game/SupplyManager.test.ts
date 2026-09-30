@@ -190,9 +190,13 @@ describe("SupplyManager dispatch", () => {
         expect(arrived?.arrivals).toHaveLength(2);
         expect(supply.shipsOf("alpha")).toEqual([]);
         expect(economy.stockpile(dest.id)).toEqual(res({ money: 25, materials: 50 }));
+        // Fully funded: nothing more is dispatched while it waits a turn to complete.
+        expect(endTurn().supply?.dispatched).toEqual([]);
+        expect(economy.stockpile(dest.id)).toEqual(zeroResources());
         expect(endTurn().economy?.completed).toMatchObject([{ locationId: dest.id }]);
 
-        expect(economy.stockpile(dest.id)).toEqual(zeroResources());
+        // Completed before income, the habitat produces that same end of turn.
+        expect(economy.stockpile(dest.id)).toEqual(DEFAULTS.structures.habitat.produces);
         expect(economy.stockpile(source.id)).toEqual(res({ money: 950, materials: 900 }));
         expect(supply.shipsOf("alpha")).toEqual([]);
     });
@@ -672,8 +676,9 @@ describe("SupplyManager population returns", () => {
         const { economy, supply, outpost } = populationWorld(hex(14, 10));
         economy.deposit(outpost.id, res({ money: 100, population: 10 }));
         economy.build("alpha", outpost.id, mine);
-        economy.fundAndComplete();
-        economy.fundAndComplete();
+        economy.fund();
+        economy.fund();
+        economy.completeReady();
         const [installation] = economy.locationEconomy(outpost.id)!.installations;
         expect(installation).toMatchObject({ type: "mine", populationFrom: outpost.id });
         expect(economy.stockpile(outpost.id)).toEqual(zeroResources());

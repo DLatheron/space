@@ -1,0 +1,167 @@
+.installation-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(6.75rem, 1fr));
+    gap: 0.5rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+@container planet-page (min-width: 100rem) and (min-height: 55rem) {
+    .installation-grid {
+        grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr));
+    }
+}
+
+.installation-tile {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    border: 1px solid #22314f;
+    border-radius: 0.4rem;
+    background: #121c38;
+    overflow: hidden;
+}
+
+.installation-tile__picture {
+    position: relative;
+    aspect-ratio: 16 / 10;
+    background: #16233f;
+}
+
+.installation-tile--building .installation-tile__picture > .thumbnail {
+    filter: grayscale(0.8) brightness(0.6);
+}
+
+/* Name over a gradient so it reads on any picture. */
+.installation-tile__caption {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    display: grid;
+    gap: 0.05rem;
+    padding: 1.1rem 0.4rem 0.25rem;
+    background: linear-gradient(transparent, rgba(6, 10, 22, 0.92) 55%);
+    font-size: 0.8rem;
+    line-height: 1.2;
+}
+
+.installation-tile__name {
+    display: flex;
+    align-items: baseline;
+    gap: 0.3rem;
+    min-width: 0;
+}
+
+.installation-tile__name strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.installation-tile__tier {
+    flex: none;
+    padding: 0 0.25rem;
+    border: 1px solid #3a4d73;
+    border-radius: 0.2rem;
+    background: rgba(15, 23, 48, 0.8);
+    color: #9fd0ff;
+    font-size: 0.7rem;
+}
+
+.installation-tile__output {
+    overflow: hidden;
+    color: #b7c7e4;
+    font-size: 0.7rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.installation-tile__slots {
+    position: absolute;
+    top: 0.25rem;
+    left: 0.25rem;
+    padding: 0 0.3rem;
+    border-radius: 0.2rem;
+    background: rgba(6, 10, 22, 0.8);
+    color: #9ab3d4;
+    font-size: 0.7rem;
+}
+
+.installation-tile__progress {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    display: grid;
+    gap: 0.2rem;
+    padding: 0.3rem 0.4rem;
+    background: rgba(6, 10, 22, 0.78);
+}
+
+.installation-tile__progress-label {
+    color: #5cffb0;
+    font-size: 0.7rem;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.installation-tile__progress-track {
+    height: 0.3rem;
+    border-radius: 999px;
+    background: #1a2644;
+    overflow: hidden;
+}
+
+.installation-tile__progress-fill {
+    display: block;
+    height: 100%;
+    background: #5cffb0;
+    transition: width 0.4s ease-out;
+}
+
+.installation-tile__action,
+.installation-tile__max {
+    margin: 0.3rem;
+    padding: 0.2rem 0.4rem;
+    font-size: 0.75rem;
+    text-align: center;
+}
+
+.installation-tile__max {
+    color: #7f93b5;
+}
+
+.installation-tile--free {
+    border: 1px dashed #3a4d73;
+    background: transparent;
+}
+
+.installation-tile__add {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.2rem;
+    min-height: 6rem;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    color: #9ab3d4;
+    font-size: 0.8rem;
+}
+
+.installation-tile__add:hover {
+    background: rgba(29, 45, 80, 0.6);
+    color: #e8eefc;
+}
+
+.installation-tile__plus {
+    font-size: 1.6rem;
+    line-height: 1;
+    color: #5cffb0;
+}

@@ -156,7 +156,7 @@ describe("GroundManager transports", () => {
             tier: 2
         });
         expect(upgrade.ok).toBe(true);
-        economy.fundAndComplete();
+        economy.fund();
         const applied = economy.locationEconomy(home.id)!.orders[0].applied;
         expect(applied).toEqual(res({ money: 13, materials: 8 }));
         const stock = economy.stockpile(home.id);
@@ -211,13 +211,14 @@ describe("GroundManager invasion", () => {
         const { entities, economy, ground, target, transport } = world;
         economy.deposit(target.id, res({ money: 500, materials: 500, population: 50 }));
         economy.build("beta", target.id, { kind: "structure", structureType: "mine" });
-        economy.fundAndComplete();
-        economy.fundAndComplete();
+        economy.fund();
+        economy.fund();
+        economy.completeReady();
         const habitat = economy.build("beta", target.id, {
             kind: "structure",
             structureType: "habitat"
         });
-        economy.fundAndComplete();
+        economy.fund();
         const inbound = entities.add<EntityOf<"supply_ship">>({
             id: "supply-b",
             kind: "supply_ship",

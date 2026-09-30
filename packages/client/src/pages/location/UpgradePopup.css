@@ -1,0 +1,134 @@
+.modal__panel.upgrade-popup {
+    width: min(36rem, 100%);
+}
+
+.upgrade-popup__priority {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: #e8eefc;
+}
+
+.upgrade-popup__summary {
+    display: flex;
+    align-items: center;
+    gap: 0.85rem;
+}
+
+.upgrade-popup__muted {
+    margin: 0.25rem 0 0;
+    color: #7f93b5;
+    font-size: 0.85rem;
+}
+
+.upgrade-popup__tiers {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    align-items: stretch;
+    gap: 0.6rem;
+    margin-top: 0.85rem;
+}
+
+.upgrade-popup__tier {
+    padding: 0.6rem 0.75rem;
+    border: 1px solid #22314f;
+    border-radius: 0.4rem;
+    background: #121c38;
+}
+
+.upgrade-popup__tier--next {
+    border-color: #2f6b55;
+}
+
+.upgrade-popup__tier h3 {
+    margin: 0 0 0.45rem;
+    color: #9ab3d4;
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.upgrade-popup__tier dl {
+    display: grid;
+    gap: 0.3rem;
+    margin: 0;
+}
+
+.upgrade-popup__tier dl > div {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.5rem;
+    font-size: 0.88rem;
+}
+
+.upgrade-popup__tier dt {
+    color: #9ab3d4;
+}
+
+.upgrade-popup__tier dd {
+    margin: 0;
+    font-variant-numeric: tabular-nums;
+}
+
+.upgrade-popup__delta {
+    color: #5cffb0;
+}
+
+.upgrade-popup__delta--down {
+    color: #ff9f6b;
+}
+
+.upgrade-popup__arrow {
+    align-self: center;
+    color: #5cffb0;
+    font-size: 1.3rem;
+}
+
+.upgrade-popup__footer {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem 1rem;
+    margin-top: 0.85rem;
+}
+
+.upgrade-popup__cost {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.25rem 0.75rem;
+    font-size: 0.9rem;
+}
+
+.upgrade-popup__cost .upgrade-popup__muted {
+    margin: 0;
+}
+
+.upgrade-popup__reason {
+    color: #ff9f6b;
+    font-size: 0.85rem;
+}
+
+.upgrade-popup__action {
+    margin-left: auto;
+    border-color: #5cffb0;
+    font-weight: 600;
+}
+
+.upgrade-popup__action:disabled {
+    border-color: #3a4d73;
+    font-weight: 400;
+}
+
+@media (max-width: 520px) {
+    .upgrade-popup__tiers {
+        grid-template-columns: 1fr;
+    }
+
+    .upgrade-popup__arrow {
+        justify-self: center;
+        transform: rotate(90deg);
+    }
+}

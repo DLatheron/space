@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { BuildItem, BuildPriority } from "./Economy.js";
+import { BuildItem, BuildPriority, QueueDirection } from "./Economy.js";
 import { AxialCoord, BattleId, EntityId, OrderId, SideId } from "./PrimitiveTypes.js";
 
 export const ClientToServerMessage = z.discriminatedUnion("type", [
@@ -40,6 +40,11 @@ export const ClientToServerMessage = z.discriminatedUnion("type", [
     z.object({
         type: z.literal("client:order:priority"),
         payload: z.object({ locationId: EntityId, orderId: OrderId, priority: BuildPriority })
+    }),
+    z.object({
+        /** Swap an order with its neighbour in the same build queue (see `moveOrderInQueue`). */
+        type: z.literal("client:order:move"),
+        payload: z.object({ locationId: EntityId, orderId: OrderId, direction: QueueDirection })
     }),
     z.object({
         /** Consume a colony ship on the location's hex to claim the unowned planet, moon or asteroid. */

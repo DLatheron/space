@@ -4,6 +4,7 @@ import type {
     BuildPriority,
     EntityId,
     OrderId,
+    QueueDirection,
     SideId
 } from "@space/shared-data";
 
@@ -12,6 +13,7 @@ export type GameActions = {
     build: (locationId: EntityId, item: BuildItem, priority: BuildPriority) => void;
     cancel: (locationId: EntityId, orderId: OrderId) => void;
     setPriority: (locationId: EntityId, orderId: OrderId, priority: BuildPriority) => void;
+    moveOrder: (locationId: EntityId, orderId: OrderId, direction: QueueDirection) => void;
     colonise: (locationId: EntityId, shipId: EntityId) => void;
     load: (shipId: EntityId, unitIds: EntityId[]) => void;
     unload: (shipId: EntityId, locationId: EntityId, unitIds: EntityId[]) => void;

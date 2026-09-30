@@ -114,20 +114,25 @@ describe("EconomyManager funding at end of turn", () => {
         expect(orders(moon.id)[0].applied).toEqual(res({ money: 25, materials: 50 }));
         expect(economy.stockpile(moon.id)).toEqual(res({ money: 975, materials: 950 }));
         endTurn();
-        expect(installed(moon.id)).toEqual(["habitat"]);
+        expect(orders(moon.id)[0].applied).toEqual(orders(moon.id)[0].cost);
+        expect(installed(moon.id)).toEqual([]);
         expect(economy.stockpile(moon.id)).toEqual(res({ money: 950, materials: 900 }));
+        endTurn();
+        expect(installed(moon.id)).toEqual(["habitat"]);
+        expect(orders(moon.id)).toEqual([]);
     });
 
     it.each(["habitat", "mine", "trade_hub", "shipyard", "science_academy"] as const)(
-        "never completes a %s before its build turns, however much stock there is",
+        "is fully funded after a %s's build turns and completes the end turn after",
         (structureType) => {
-            const { economy, endTurn, home, installed } = economyWorld();
+            const { economy, endTurn, home, installed, orders } = economyWorld();
             economy.deposit(home.id, res({ money: 10_000, materials: 10_000, population: 1000 }));
             economy.build("alpha", home.id, structure(structureType));
-            for (let turn = 1; turn < DEFAULTS.structures[structureType].buildTurns; turn++) {
-                endTurn();
+            for (let turn = 1; turn <= DEFAULTS.structures[structureType].buildTurns; turn++) {
+                expect(endTurn().economy?.completed).toEqual([]);
                 expect(installed(home.id)).toEqual([]);
             }
+            expect(orders(home.id)[0].applied).toEqual(orders(home.id)[0].cost);
             expect(endTurn().economy?.completed).toMatchObject([
                 { locationId: home.id, item: structure(structureType) }
             ]);
@@ -152,6 +157,7 @@ describe("EconomyManager funding at end of turn", () => {
         const built = economy.build("alpha", home.id, { kind: "ship", shipType: "scout" });
         expect(built.ok && built.order.cost).toEqual(res({ money: 7, population: 1 }));
         expect(built.ok && built.order.ratePerTurn).toEqual(res({ money: 7, population: 1 }));
+        expect(endTurn().economy?.spawnedShips).toEqual([]);
         expect(endTurn().economy?.spawnedShips).toMatchObject([
             { shipType: "scout", hp: 2, maxMovementPoints: 9, movementPoints: 9 }
         ]);
@@ -186,6 +192,26 @@ describe("EconomyManager funding at end of turn", () => {
         expect(inbound.reservedFor).toEqual([]);
         expect(inbound.cargo).toEqual(res({ money: 20 }));
     });
+
+    it("keeps a fully funded order for a turn without drawing more, and refunds it on cancel", () => {
+        const { economy, endTurn, moon, orders } = economyWorld();
+        economy.deposit(moon.id, res({ money: 1000, materials: 1000 }));
+        const id = orderId(economy.build("alpha", moon.id, structure("habitat")));
+        endTurn();
+        endTurn();
+        const [order] = orders(moon.id);
+        expect(order.applied).toEqual(order.cost);
+        expect(economy.activeOrders(moon.id)).toEqual([]);
+        const stock = economy.stockpile(moon.id);
+
+        expect(economy.cancel("alpha", moon.id, id)).toEqual({ ok: true });
+        expect(orders(moon.id)).toEqual([]);
+        expect(economy.stockpile(moon.id)).toEqual({
+            ...stock,
+            money: stock.money + order.cost.money,
+            materials: stock.materials + order.cost.materials
+        });
+    });
 });
 
 describe("EconomyManager research", () => {
@@ -202,7 +228,9 @@ describe("EconomyManager research", () => {
         });
 
         economy.build("alpha", home.id, structure("science_academy"));
-        for (let turn = 0; turn < DEFAULTS.structures.science_academy.buildTurns; turn++) endTurn();
+        for (let turn = 0; turn <= DEFAULTS.structures.science_academy.buildTurns; turn++) {
+            endTurn();
+        }
         expect(installed(home.id)).toEqual(["science_academy"]);
 
         expect(economy.build("alpha", home.id, research).ok).toBe(true);
@@ -211,7 +239,12 @@ describe("EconomyManager research", () => {
             error: "Already being researched"
         });
         endTurn();
+        endTurn();
         expect(economy.stateFor("alpha").techs).toEqual([]);
+        expect(economy.build("alpha", home.id, research)).toEqual({
+            ok: false,
+            error: "Already being researched"
+        });
         endTurn();
         expect(economy.stateFor("alpha").techs).toEqual(["ground_forces"]);
         expect(economy.stateFor("beta").techs).toEqual([]);
@@ -340,6 +373,7 @@ describe("EconomyManager enhancements", () => {
         economy.build("alpha", moon.id, structure("mine"));
         endTurn();
         endTurn();
+        endTurn();
         expect(installed(moon.id)).toEqual(["mine"]);
         const [mine] = economy.locationEconomy(moon.id)!.installations;
         const item: BuildItem = {
@@ -351,14 +385,16 @@ describe("EconomyManager enhancements", () => {
         economy.build("alpha", moon.id, item);
 
         const materials = () => economy.stockpile(moon.id).materials;
+        const tier = () => economy.locationEconomy(moon.id)!.installations[0].tier;
         const before = materials();
         endTurn();
-        expect(materials() - before).toBe(40);
         endTurn();
-        expect(economy.locationEconomy(moon.id)!.installations[0].tier).toBe(2);
-        const upgraded = materials();
+        expect(materials() - before).toBe(80);
+        expect(tier()).toBe(1);
+        const funded = materials();
         endTurn();
-        expect(materials() - upgraded).toBe(60);
+        expect(tier()).toBe(2);
+        expect(materials() - funded).toBe(60);
         expect(
             locationIncome(
                 { site: "moon", level: 0, installations: [{ ...mine, tier: 2 }] },
@@ -430,8 +466,9 @@ describe("EconomyManager stockpile caps", () => {
         economy.build("alpha", moon.id, structure("mine"));
         endTurn();
         endTurn();
-        expect(installed(moon.id)).toEqual(["mine"]);
+        expect(installed(moon.id)).toEqual([]);
         endTurn();
+        expect(installed(moon.id)).toEqual(["mine"]);
         expect(economy.stockpile(moon.id).materials).toBe(40);
         endTurn();
         expect(economy.stockpile(moon.id).materials).toBe(50);
@@ -492,34 +529,41 @@ describe("EconomyManager concurrent build limits", () => {
         return world;
     }
 
-    it("builds one installation at a time, leaving the next unfunded", () => {
+    it("builds one installation at a time, handing the slot on once the first is funded", () => {
         const { economy, endTurn, home, orders, installed } = economyWorld({
             balance: defaultEconomyBalance()
         });
         const first = orderId(economy.build("alpha", home.id, structure("mine")));
         const second = orderId(economy.build("alpha", home.id, structure("trade_hub")));
+        const order = (id: string) => orders(home.id).find((o) => o.id === id)!;
         expect(economy.activeOrders(home.id).map((o) => o.id)).toEqual([first]);
         endTurn();
-        expect(orders(home.id).find((o) => o.id === second)?.applied).toEqual(zeroResources());
+        expect(order(second).applied).toEqual(zeroResources());
+        endTurn();
+        expect(order(first).applied).toEqual(order(first).cost);
+        expect(installed(home.id)).toEqual([]);
+        expect(economy.activeOrders(home.id).map((o) => o.id)).toEqual([second]);
+        expect(order(second).applied.materials).toBeGreaterThan(0);
         endTurn();
         expect(installed(home.id)).toEqual(["mine"]);
-        endTurn();
-        expect(orders(home.id)[0].applied.materials).toBeGreaterThan(0);
     });
 
-    it("holds an extra ship order until the first completes", () => {
+    it("hands the ship slot on once the first order is fully funded", () => {
         const { economy, endTurn, home, orders } = withYards(["shipyard"]);
         const first = orderId(economy.build("alpha", home.id, scout));
         const second = orderId(economy.build("alpha", home.id, scout));
+        const perTurn = res({ money: 50, materials: 50, population: 3 });
         endTurn();
         const applied = (id: string) => orders(home.id).find((o) => o.id === id)?.applied;
-        expect(applied(first)).toEqual(res({ money: 50, materials: 50, population: 3 }));
+        expect(applied(first)).toEqual(perTurn);
         expect(applied(second)).toEqual(zeroResources());
-        const done = endTurn().economy!;
-        expect(done.completed.map((c) => c.orderId)).toEqual([first]);
-        expect(applied(second)).toEqual(zeroResources());
-        endTurn();
-        expect(applied(second)).toEqual(res({ money: 50, materials: 50, population: 3 }));
+        expect(endTurn().economy!.completed).toEqual([]);
+        expect(applied(first)).toEqual(DEFAULTS.ships.scout.cost);
+        expect(applied(second)).toEqual(perTurn);
+        expect(economy.shipCount("alpha")).toBe(2);
+        expect(endTurn().economy!.completed.map((c) => c.orderId)).toEqual([first]);
+        expect(applied(second)).toEqual(DEFAULTS.ships.scout.cost);
+        expect(endTurn().economy!.completed.map((c) => c.orderId)).toEqual([second]);
     });
 
     it("lets a later high priority order take the slot", () => {
@@ -542,6 +586,7 @@ describe("EconomyManager concurrent build limits", () => {
         economy.build("alpha", home.id, scout);
         endTurn();
         expect(orders(home.id).map((o) => o.applied.money)).toEqual([50, 50]);
+        expect(endTurn().economy!.spawnedShips).toHaveLength(0);
         expect(endTurn().economy!.spawnedShips).toHaveLength(2);
     });
 });
