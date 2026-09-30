@@ -6,15 +6,16 @@ import {
     GameId,
     parseURLSearchParams,
     ServerToClientMessage,
-    type BuildItem,
-    type EntityId
+    sumResources
 } from "@space/shared-data";
 import { GameSocket } from "./GameSocket.js";
+import type { GameActions } from "./gameActions.js";
 import { Server, useClientId, useServerMessageManager, useServerSocket } from "./hooks/index.js";
 import { MainMenu } from "./pages/MainMenu.js";
 import type { GameOutletContext } from "./pages/PlanetPage.js";
 import { HexMapView } from "./components/HexMapView.js";
 import { BattleDialog } from "./components/BattleDialog.js";
+import { formatResources } from "./components/format.js";
 import { ResourceBar } from "./components/ResourceBar.js";
 import { InfoPane } from "./components/InfoPane.js";
 import { HexWorld, type HexClickAction } from "./world/HexWorld.js";
@@ -68,9 +69,10 @@ export function App() {
             }),
             messageManager.registerHandler("server:economy:state", (_ctx, payload) => {
                 world.applyEconomyState(payload);
-                const { food, gold, resources } = payload.stockpile;
+                const total = sumResources(payload.locations.map((l) => l.stockpile));
+                const transit = sumResources(payload.supplyShips.map((s) => s.cargo));
                 appendLog(
-                    `economy — food ${food}, gold ${gold}, resources ${resources}, ships ${payload.shipCount}/${payload.shipCap}`
+                    `economy — ${formatResources(total)} across ${payload.locations.length} locations, ${formatResources(transit)} in transit on ${payload.supplyShips.length} supply ships, ships ${payload.shipCount}/${payload.shipCap}`
                 );
             }),
             messageManager.registerHandler("server:tiles:update", (_ctx, payload) => {
@@ -102,7 +104,25 @@ export function App() {
             messageManager.registerHandler("server:battle:resolved", (_ctx, payload) => {
                 world.applyBattleResolved(payload);
                 appendLog(
-                    `battle resolved — ${payload.winnerSideId} wins at ${payload.q},${payload.r}, destroyed ${payload.destroyedShipIds.join(", ") || "nothing"}`
+                    `battle resolved — ${payload.winnerSideId} wins at ${payload.q},${payload.r}, destroyed ${payload.destroyedShipIds.join(", ") || "nothing"}${payload.destroyedUnitIds.length ? ` and units ${payload.destroyedUnitIds.join(", ")}` : ""}`
+                );
+            }),
+            messageManager.registerHandler("server:supply:moved", (_ctx, payload) => {
+                world.applySupplyMoved(payload);
+                appendLog(
+                    `supply moved — ${payload.supplyShipId} ${payload.from.q},${payload.from.r} → ${payload.to.q},${payload.to.r} in ${payload.path.length} steps`
+                );
+            }),
+            messageManager.registerHandler("server:ground:start", (_ctx, payload) => {
+                world.applyGroundStart(payload);
+                appendLog(
+                    `ground battle start — ${payload.attackerSideId} invades ${payload.locationId}${payload.youAreAttacker ? " (you attack)" : ""}`
+                );
+            }),
+            messageManager.registerHandler("server:ground:resolved", (_ctx, payload) => {
+                world.applyGroundResolved(payload);
+                appendLog(
+                    `ground battle resolved — ${payload.winnerSideId} wins at ${payload.locationId}${payload.captured ? " (captured)" : ""}, destroyed ${payload.destroyedUnitIds.join(", ") || "nothing"}`
                 );
             })
         ];
@@ -183,42 +203,58 @@ export function App() {
         appendLog("end turn");
     }, [sendMessage, world, appendLog]);
 
-    const resolveBattle = useCallback(
-        (battleId: string, winnerSideId: string) => {
-            sendMessage({ type: "client:battle:resolve", payload: { battleId, winnerSideId } });
-            appendLog(`resolve battle — ${battleId} → ${winnerSideId} wins`);
-        },
+    const actions = useMemo<GameActions>(
+        () => ({
+            build: (locationId, item, priority) => {
+                sendMessage({
+                    type: "client:location:build",
+                    payload: { locationId, item, priority }
+                });
+                appendLog(`build — ${buildItemName(item)} on ${locationId} (${priority})`);
+            },
+            cancel: (locationId, orderId) => {
+                sendMessage({ type: "client:location:cancel", payload: { locationId, orderId } });
+                appendLog(`cancel — order ${orderId} on ${locationId}`);
+            },
+            setPriority: (locationId, orderId, priority) => {
+                sendMessage({
+                    type: "client:order:priority",
+                    payload: { locationId, orderId, priority }
+                });
+                appendLog(`priority — order ${orderId} on ${locationId} → ${priority}`);
+            },
+            colonise: (locationId, shipId) => {
+                sendMessage({ type: "client:location:colonise", payload: { locationId, shipId } });
+                appendLog(`colonise — ${locationId} with ${shipId}`);
+            },
+            load: (shipId, unitIds) => {
+                sendMessage({ type: "client:unit:load", payload: { shipId, unitIds } });
+                appendLog(`load — ${unitIds.join(", ")} onto ${shipId}`);
+            },
+            unload: (shipId, locationId, unitIds) => {
+                sendMessage({
+                    type: "client:unit:unload",
+                    payload: { shipId, locationId, unitIds }
+                });
+                appendLog(`unload — ${unitIds.join(", ")} from ${shipId} to ${locationId}`);
+            },
+            invade: (locationId, shipIds) => {
+                sendMessage({ type: "client:invade", payload: { locationId, shipIds } });
+                appendLog(`invade — ${locationId} from ${shipIds.join(", ")}`);
+            },
+            resolveBattle: (battleId, winnerSideId) => {
+                sendMessage({ type: "client:battle:resolve", payload: { battleId, winnerSideId } });
+                appendLog(`resolve battle — ${battleId} → ${winnerSideId} wins`);
+            },
+            resolveGroundBattle: (battleId, winnerSideId) => {
+                sendMessage({ type: "client:ground:resolve", payload: { battleId, winnerSideId } });
+                appendLog(`resolve ground battle — ${battleId} → ${winnerSideId} wins`);
+            }
+        }),
         [sendMessage, appendLog]
     );
 
-    const sendBuild = useCallback(
-        (planetId: EntityId, item: BuildItem) => {
-            sendMessage({ type: "client:planet:build", payload: { planetId, item } });
-            appendLog(`build — ${buildItemName(item)} on ${planetId}`);
-        },
-        [sendMessage, appendLog]
-    );
-
-    const sendCancel = useCallback(
-        (planetId: EntityId, index: number) => {
-            sendMessage({ type: "client:planet:cancel", payload: { planetId, index } });
-            appendLog(`cancel — queue #${index} on ${planetId}`);
-        },
-        [sendMessage, appendLog]
-    );
-
-    const sendColonise = useCallback(
-        (planetId: EntityId, shipId: EntityId) => {
-            sendMessage({ type: "client:planet:colonise", payload: { planetId, shipId } });
-            appendLog(`colonise — ${planetId} with ${shipId}`);
-        },
-        [sendMessage, appendLog]
-    );
-
-    const outletContext = useMemo<GameOutletContext>(
-        () => ({ world, sendBuild, sendCancel, sendColonise }),
-        [world, sendBuild, sendCancel, sendColonise]
-    );
+    const outletContext = useMemo<GameOutletContext>(() => ({ world, actions }), [world, actions]);
 
     const onMapAction = useCallback(
         (action: HexClickAction) => {
@@ -230,9 +266,9 @@ export function App() {
                     });
                     appendLog(`move — ${action.shipId} → ${action.to.q},${action.to.r}`);
                     break;
-                case "open-planet":
+                case "open-location":
                     navigate({
-                        pathname: `/planet/${encodeURIComponent(action.planetId)}`,
+                        pathname: `/location/${encodeURIComponent(action.locationId)}`,
                         search: location.search
                     });
                     break;
@@ -300,10 +336,14 @@ export function App() {
                                 </button>
                             </div>
                         </div>
-                        <BattleDialog world={world} onResolve={resolveBattle} />
+                        <BattleDialog
+                            world={world}
+                            onResolve={actions.resolveBattle}
+                            onResolveGround={actions.resolveGroundBattle}
+                        />
                         <Outlet context={outletContext} />
                     </div>
-                    <InfoPane world={world} onEndTurn={endTurn} onColonise={sendColonise} />
+                    <InfoPane world={world} onEndTurn={endTurn} actions={actions} />
                 </div>
             )}
 

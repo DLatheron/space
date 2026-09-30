@@ -15,8 +15,14 @@ const Config = z
         revealMap: z.boolean().optional().default(false),
         /** Every hex is visible to every side at all times (implies explored). */
         fullVisibility: z.boolean().optional().default(false),
-        /** Structures and ships complete as soon as they are ordered (cost is still paid). */
+        /** Orders are funded from any of the side's stockpiles when placed, completing if covered. */
         instantBuild: z.boolean().optional().default(false),
+        /** Supply ship hexes per turn before techs. */
+        supplySpeed: z.int().nonnegative().optional().default(6),
+        /** Supply ship capacity (total units) before techs. */
+        supplyCapacity: z.int().positive().optional().default(100),
+        /** How far a supply ship sees. */
+        supplyVisionRange: z.int().nonnegative().optional().default(1),
         logLevels: z
             .object({
                 gameManager: LogLevel.optional(),

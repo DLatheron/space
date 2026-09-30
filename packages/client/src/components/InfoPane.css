@@ -59,6 +59,30 @@
     font-weight: 600;
 }
 
+.info-pane__invade {
+    border-color: #ff9f6b;
+    color: #ff9f6b;
+    font-weight: 600;
+}
+
+.info-pane__link {
+    padding: 0;
+    border: none;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.info-pane__link:hover {
+    text-decoration: underline;
+}
+
+.info-pane__muted-inline {
+    color: #7f93b5;
+}
+
 .info-pane button:disabled {
     opacity: 0.6;
     cursor: default;

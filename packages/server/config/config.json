@@ -8,5 +8,8 @@
     "mapSeed": 42,
     "revealMap": true,
     "fullVisibility": true,
-    "instantBuild": true
+    "instantBuild": false,
+    "supplySpeed": 6,
+    "supplyCapacity": 100,
+    "supplyVisionRange": 1
 }

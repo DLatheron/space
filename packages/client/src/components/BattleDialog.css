@@ -38,6 +38,11 @@
     font-size: 0.9rem;
 }
 
+.battle-dialog__strength {
+    margin: 0 0 0.3rem;
+    font-size: 0.8rem;
+}
+
 .battle-dialog__side {
     font-weight: 600;
     text-transform: capitalize;

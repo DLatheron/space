@@ -1,17 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { RESOURCE_KEYS, type Resources } from "@space/shared-data";
+import { RESOURCE_KEYS, resourceUnits } from "@space/shared-data";
 import { useHexWorldVersion } from "../hooks/index.js";
 import { HexWorld } from "../world/HexWorld.js";
-import { formatDelta, formatNumber } from "./format.js";
+import { formatDelta, formatNumber, formatResources, RESOURCE_LABELS } from "./format.js";
 import "./ResourceBar.css";
 
 const COUNT_DURATION_MS = 1500;
-
-const RESOURCE_LABELS: Record<keyof Resources, string> = {
-    food: "Food",
-    gold: "Gold",
-    resources: "Resources"
-};
 
 function easeOutCubic(t: number): number {
     return 1 - Math.pow(1 - t, 3);
@@ -78,6 +72,9 @@ export function ResourceBar({ world }: ResourceBarProps) {
     if (!economy) return null;
 
     const atCap = economy.shipCount >= economy.shipCap;
+    const stockpile = world.sideStockpile;
+    const transit = world.cargoInTransit;
+    const supplyShips = economy.supplyShips.length;
 
     return (
         <div className="resource-bar" role="status" aria-label="Stockpile">
@@ -88,13 +85,30 @@ export function ResourceBar({ world }: ResourceBarProps) {
                         <div
                             key={key}
                             className={`resource-bar__item resource-bar__item--${key}`}
-                            title={`${RESOURCE_LABELS[key]}: ${formatNumber(economy.stockpile[key])} (last income ${formatDelta(income)})`}
+                            title={`${RESOURCE_LABELS[key]}: ${formatNumber(stockpile[key])} across all locations, ${formatNumber(transit[key])} in transit (last income ${formatDelta(income)})`}
                         >
                             <span className="resource-bar__label">{RESOURCE_LABELS[key]}</span>
-                            <AnimatedNumber value={economy.stockpile[key]} />
+                            <AnimatedNumber value={stockpile[key]} />
+                            {transit[key] > 0 && (
+                                <span className="resource-bar__transit">
+                                    +{formatNumber(transit[key])}
+                                </span>
+                            )}
                         </div>
                     );
                 })}
+                <div
+                    className="resource-bar__item resource-bar__item--transit"
+                    title={`${supplyShips} supply ship${supplyShips === 1 ? "" : "s"} carrying ${formatResources(transit)}`}
+                >
+                    <span className="resource-bar__label">In transit</span>
+                    <span className="resource-bar__value">
+                        {formatNumber(resourceUnits(transit))}
+                    </span>
+                    <span className="resource-bar__transit">
+                        {supplyShips} ship{supplyShips === 1 ? "" : "s"}
+                    </span>
+                </div>
                 <div
                     className={`resource-bar__item resource-bar__item--ships${atCap ? " resource-bar__item--capped" : ""}`}
                     title="Ships built or queued / ship cap"

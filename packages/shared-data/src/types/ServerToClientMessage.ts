@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { EconomyState } from "./Economy.js";
+import { GroundBattleInfo } from "./GroundUnitTypes.js";
 import {
     AxialCoord,
     BattleId,
@@ -10,6 +11,7 @@ import {
     HexDirection,
     HexKey,
     SideId,
+    SupplyShipEntity,
     TileView,
     TurnState
 } from "./PrimitiveTypes.js";
@@ -48,6 +50,8 @@ export const ServerToClientMessage = z.discriminatedUnion("type", [
             turn: TurnState,
             /** Pending battles involving the receiving side. */
             battles: z.array(BattleInfo),
+            /** Pending ground battles involving the receiving side. */
+            groundBattles: z.array(GroundBattleInfo),
             economy: EconomyState
         })
     }),
@@ -97,7 +101,47 @@ export const ServerToClientMessage = z.discriminatedUnion("type", [
             r: z.number().int(),
             winnerSideId: SideId,
             loserSideId: SideId,
-            destroyedShipIds: z.array(EntityId)
+            /** May include supply ships (cargo lost) and transports. */
+            destroyedShipIds: z.array(EntityId),
+            /** Ground units lost aboard destroyed transports. */
+            destroyedUnitIds: z.array(EntityId)
+        })
+    }),
+    z.object({
+        /** Same visibility rules as `server:ship:moved`. */
+        type: z.literal("server:supply:moved"),
+        payload: z.object({
+            supplyShipId: EntityId,
+            from: AxialCoord,
+            to: AxialCoord,
+            /** Hexes stepped into, in order, ending at `to` (excludes `from`). */
+            path: z.array(AxialCoord).min(1),
+            facing: HexDirection,
+            /**
+             * The ship as the recipient may see it, present when it was launched this turn
+             * so clients that have never seen it can fly it out from `from`.
+             */
+            supplyShip: SupplyShipEntity.optional()
+        })
+    }),
+    z.object({
+        /** Sent to both combatant sides. */
+        type: z.literal("server:ground:start"),
+        payload: GroundBattleInfo.extend({ youAreAttacker: z.boolean() })
+    }),
+    z.object({
+        /** Sent to every side that could see the location, plus both combatants. */
+        type: z.literal("server:ground:resolved"),
+        payload: z.object({
+            battleId: BattleId,
+            locationId: EntityId,
+            q: z.number().int(),
+            r: z.number().int(),
+            winnerSideId: SideId,
+            loserSideId: SideId,
+            destroyedUnitIds: z.array(EntityId),
+            /** The attacker won and now owns the location. */
+            captured: z.boolean()
         })
     })
 ]);

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { Resources } from "./Resources.js";
 
 export const ClientId = z.uuid();
 export type ClientId = z.infer<typeof ClientId>;
@@ -11,6 +12,10 @@ export type SideId = z.infer<typeof SideId>;
 
 export const EntityId = z.string().min(1);
 export type EntityId = z.infer<typeof EntityId>;
+
+/** Id of a build order (see `BuildOrder`). */
+export const OrderId = z.string().min(1);
+export type OrderId = z.infer<typeof OrderId>;
 
 export const ClientSummary = z.object({
     id: ClientId,
@@ -32,6 +37,7 @@ export type SystemId = z.infer<typeof SystemId>;
 
 export const EntityKind = z.enum([
     "ship",
+    "supply_ship",
     "planet",
     "moon",
     "large_asteroid",
@@ -57,8 +63,18 @@ const HazardLevel = z.number().min(0);
 export const PLANET_LEVEL_MIN = 1;
 export const PLANET_LEVEL_MAX = 20;
 
+/** Structure slots on a moon / mineable large asteroid when the entity doesn't say. */
+export const MOON_DEFAULT_SLOTS = 3;
+export const LARGE_ASTEROID_DEFAULT_SLOTS = 2;
+
+/** Per-instance enhancement tier of an installation, ship or ground unit; everything starts at 1. */
+export const ENHANCEMENT_TIER_MIN = 1;
+export const ENHANCEMENT_TIER_MAX = 3;
+export const EnhancementTier = z.number().int().min(ENHANCEMENT_TIER_MIN).max(ENHANCEMENT_TIER_MAX);
+export type EnhancementTier = z.infer<typeof EnhancementTier>;
+
 /** Ship class; stats and animation speeds live in `SHIP_TYPES`. */
-export const ShipType = z.enum(["scout", "frigate", "colony_ship"]);
+export const ShipType = z.enum(["scout", "frigate", "colony_ship", "transport"]);
 export type ShipType = z.infer<typeof ShipType>;
 
 /** Pointy-top direction index 0–5: 0 = east, counter-clockwise on screen (see `axialNeighbor`). */
@@ -73,16 +89,52 @@ export const ShipEntity = EntityBase.extend({
     sideId: SideId,
     movementPoints: z.number().int().min(0),
     maxMovementPoints: z.number().int().min(0),
-    hp: z.number().min(0).optional()
+    hp: z.number().min(0).optional(),
+    /** Absent means tier 1. */
+    tier: EnhancementTier.optional(),
+    /** Ground units aboard; transports only. */
+    carriedUnitIds: z.array(EntityId).optional()
 });
 export type ShipEntity = z.infer<typeof ShipEntity>;
+
+/** Reserves part of a supply ship's cargo for one build order at its destination. */
+export const CargoReservation = z.object({
+    orderId: OrderId,
+    amount: Resources
+});
+export type CargoReservation = z.infer<typeof CargoReservation>;
+
+/**
+ * Autonomous cargo carrier. The destination is fixed at dispatch; the route is re-planned
+ * every turn around hexes the side believes hold enemies.
+ */
+export const SupplyShipEntity = EntityBase.extend({
+    kind: z.literal("supply_ship"),
+    sideId: SideId,
+    facing: HexDirection,
+    /** Location (planet, moon or asteroid) the cargo was loaded at. */
+    originId: EntityId,
+    destinationId: EntityId,
+    cargo: Resources,
+    /** Empty for population returning home, which isn't tied to an order. */
+    reservedFor: z.array(CargoReservation),
+    /** Hexes per turn. */
+    speed: z.number().int().min(0),
+    /** Maximum total units of cargo (all resource types together). */
+    capacity: z.number().int().min(0),
+    /** Planned hexes ahead, excluding the current hex; only sent to the owning side. */
+    route: z.array(AxialCoord).optional()
+});
+export type SupplyShipEntity = z.infer<typeof SupplyShipEntity>;
 
 export const PlanetEntity = EntityBase.extend({
     kind: z.literal("planet"),
     sideId: SideId.nullable(),
     systemId: SystemId,
     /** Fixed for the game; also the number of structure slots. */
-    level: z.number().int().min(PLANET_LEVEL_MIN).max(PLANET_LEVEL_MAX)
+    level: z.number().int().min(PLANET_LEVEL_MIN).max(PLANET_LEVEL_MAX),
+    /** Ground unit ids stationed here; absent means none. */
+    garrison: z.array(EntityId).optional()
 });
 export type PlanetEntity = z.infer<typeof PlanetEntity>;
 
@@ -90,7 +142,10 @@ export const MoonEntity = EntityBase.extend({
     kind: z.literal("moon"),
     sideId: SideId.nullable(),
     systemId: SystemId,
-    parentPlanetId: EntityId.optional()
+    parentPlanetId: EntityId.optional(),
+    /** Structure slots; absent means `MOON_DEFAULT_SLOTS`. */
+    slots: z.number().int().min(0).optional(),
+    garrison: z.array(EntityId).optional()
 });
 export type MoonEntity = z.infer<typeof MoonEntity>;
 
@@ -98,7 +153,11 @@ export const LargeAsteroidEntity = EntityBase.extend({
     kind: z.literal("large_asteroid"),
     sideId: SideId.nullable(),
     systemId: SystemId,
-    mineable: z.boolean().optional()
+    /** Only mineable asteroids can be colonised and built on. */
+    mineable: z.boolean().optional(),
+    /** Structure slots when mineable; absent means `LARGE_ASTEROID_DEFAULT_SLOTS`. */
+    slots: z.number().int().min(0).optional(),
+    garrison: z.array(EntityId).optional()
 });
 export type LargeAsteroidEntity = z.infer<typeof LargeAsteroidEntity>;
 
@@ -142,6 +201,7 @@ export type HyperspaceTunnelEntity = z.infer<typeof HyperspaceTunnelEntity>;
 
 export const EntitySummary = z.discriminatedUnion("kind", [
     ShipEntity,
+    SupplyShipEntity,
     PlanetEntity,
     MoonEntity,
     LargeAsteroidEntity,
@@ -164,7 +224,10 @@ export type TurnState = z.infer<typeof TurnState>;
 export const BattleId = z.string().min(1);
 export type BattleId = z.infer<typeof BattleId>;
 
-/** A pending battle: a ship moved into a hex holding enemy ships. */
+/**
+ * A pending battle: a ship moved into a hex holding enemy ships. Defender ids may include
+ * supply ships and transports.
+ */
 export const BattleInfo = z.object({
     battleId: BattleId,
     q: z.number().int(),

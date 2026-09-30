@@ -1,5 +1,6 @@
 import {
     axialDirectionAngle,
+    axialDirectionTowards,
     axialToOffset,
     axialToPixel,
     hexCorners,
@@ -16,6 +17,8 @@ import {
     MOVE_COST_PER_HEX,
     PLANET_LEVEL_MAX,
     SHIP_TYPES,
+    siteForEntity,
+    sumResources,
     type AxialCoord,
     type BattleId,
     type BattleInfo,
@@ -24,14 +27,19 @@ import {
     type EntityId,
     type EntityOfKind,
     type EntitySummary,
+    type GroundBattleInfo,
+    type GroundUnit,
     type HexKey,
-    type PlanetEconomy,
+    type LocationEconomy,
+    type LocationEntity,
+    type Resources,
     type SideId,
+    type TechId,
     type TileView,
     type TurnState
 } from "@space/shared-data";
 import { Explosions } from "./Explosions.js";
-import { ShipMotion, type ShipPose } from "./ShipMotion.js";
+import { ShipMotion, SUPPLY_SHIP_MOTION, type MotionSpeeds, type ShipPose } from "./ShipMotion.js";
 
 export type Camera = {
     x: number;
@@ -50,10 +58,13 @@ type DrawCtx = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
 
 type ShipSighting = { q: number; r: number; facing: number; seen: boolean };
 
-type DeferredShip = { entity: ShipEntity; pose: ShipPose; fullColour: boolean };
+type DeferredShip = { entity: MobileEntity; pose: ShipPose; fullColour: boolean };
 
-/** Destroyed ship still finishing its move animation before it explodes. */
-type DyingShip = { entity: ShipEntity; motion: ShipMotion; colour: string };
+/**
+ * Ship gone from the map (destroyed, unloaded at its destination or lost from view) still
+ * finishing its move animation. It explodes at the end when `colour` is set.
+ */
+type DyingShip = { entity: MobileEntity; motion: ShipMotion; colour?: string };
 
 export type BattleResolved = {
     battleId: BattleId;
@@ -62,17 +73,55 @@ export type BattleResolved = {
     winnerSideId: SideId;
     loserSideId: SideId;
     destroyedShipIds: EntityId[];
+    destroyedUnitIds: EntityId[];
+};
+
+export type GroundBattleResolved = {
+    battleId: BattleId;
+    locationId: EntityId;
+    q: number;
+    r: number;
+    winnerSideId: SideId;
+    loserSideId: SideId;
+    destroyedUnitIds: EntityId[];
+    captured: boolean;
 };
 
 export type ShipEntity = EntityOfKind<"ship">;
+export type SupplyShipEntity = EntityOfKind<"supply_ship">;
 export type PlanetEntity = EntityOfKind<"planet">;
+export type { LocationEntity };
+
+/** Entities that move between hexes and animate doing so. */
+export type MobileEntity = ShipEntity | SupplyShipEntity;
+
+function isMobile(entity: EntitySummary): entity is MobileEntity {
+    return entity.kind === "ship" || entity.kind === "supply_ship";
+}
+
+function motionSpeeds(entity: MobileEntity): MotionSpeeds {
+    return entity.kind === "ship" ? SHIP_TYPES[entity.shipType] : SUPPLY_SHIP_MOTION;
+}
+
+export function isLocationEntity(entity: EntitySummary): entity is LocationEntity {
+    return entity.kind === "planet" || entity.kind === "moon" || entity.kind === "large_asteroid";
+}
+
+/** Planets, moons and mineable asteroids: the locations that can be owned and built on. */
+export function isBuildSite(entity: EntitySummary): entity is LocationEntity {
+    return isLocationEntity(entity) && siteForEntity(entity) !== undefined;
+}
+
+export function isTransport(ship: ShipEntity): boolean {
+    return (SHIP_TYPES[ship.shipType].unitCapacity ?? 0) > 0;
+}
 
 export type HexClickAction =
     | { type: "none" }
     | { type: "select"; shipId: EntityId }
     | { type: "inspect"; entityId: EntityId }
     | { type: "deselect" }
-    | { type: "open-planet"; planetId: EntityId }
+    | { type: "open-location"; locationId: EntityId }
     | { type: "move"; shipId: EntityId; to: AxialCoord };
 
 /** What the right-hand info pane should display. */
@@ -92,12 +141,13 @@ const ENTITY_FOCUS_PRIORITY: Record<EntitySummary["kind"], number> = {
     ship: 0,
     planet: 1,
     moon: 2,
-    sun: 3,
-    large_asteroid: 4,
-    asteroid_belt: 5,
-    wormhole: 6,
-    black_hole: 7,
-    hyperspace_tunnel: 8
+    supply_ship: 3,
+    sun: 4,
+    large_asteroid: 5,
+    asteroid_belt: 6,
+    wormhole: 7,
+    black_hole: 8,
+    hyperspace_tunnel: 9
 };
 
 export function primaryEntity(entities: EntitySummary[]): EntitySummary | null {
@@ -174,6 +224,7 @@ export class HexWorld {
     private _dying: DyingShip[] = [];
     /** Pending battles involving our side. */
     private readonly _battles = new Map<BattleId, BattleInfo>();
+    private readonly _groundBattles = new Map<BattleId, GroundBattleInfo>();
 
     camera: Camera = { x: 0, y: 0, zoom: 0.35 };
 
@@ -207,6 +258,7 @@ export class HexWorld {
         visible: HexKey[];
         turn: TurnState;
         battles: BattleInfo[];
+        groundBattles: GroundBattleInfo[];
         economy: EconomyState;
     }) {
         this.width = payload.width;
@@ -226,6 +278,10 @@ export class HexWorld {
         this._battles.clear();
         for (const battle of payload.battles) {
             this._battles.set(battle.battleId, battle);
+        }
+        this._groundBattles.clear();
+        for (const battle of payload.groundBattles) {
+            this._groundBattles.set(battle.battleId, battle);
         }
 
         for (const key of payload.visible) {
@@ -250,6 +306,7 @@ export class HexWorld {
         forgetEntityIds?: string[];
     }) {
         const before = this._snapshotShips();
+        const moving = this._movingEntities();
         this._visible.clear();
         for (const key of payload.visible) {
             this._visible.add(key);
@@ -264,9 +321,7 @@ export class HexWorld {
 
         for (const tile of payload.tiles) {
             // A ship arriving in this view may still linger in a remembered tile elsewhere.
-            const incomingShipIds = new Set(
-                tile.entities.filter((e) => e.kind === "ship").map((e) => e.id)
-            );
+            const incomingShipIds = new Set(tile.entities.filter(isMobile).map((e) => e.id));
             if (incomingShipIds.size) {
                 this._removeEntities(incomingShipIds, hexKey(tile.q, tile.r));
             }
@@ -282,6 +337,12 @@ export class HexWorld {
             tile.fog = this._visible.has(key) ? "visible" : "explored";
         }
 
+        // An arriving supply ship is removed by the same update that follows its move.
+        for (const [id, { entity, motion }] of moving) {
+            if (this.findEntityById(id)) continue;
+            this._motions.delete(id);
+            this._dying.push({ entity, motion });
+        }
         this._animateMovedShips(before);
         this._validateSelection();
         this._notify();
@@ -297,26 +358,65 @@ export class HexWorld {
     }) {
         const ship = this.findEntity(payload.shipId, "ship");
         if (!ship) return;
+        this._applyMoved(
+            { ...ship, movementPoints: payload.movementPoints },
+            payload.from,
+            payload.to,
+            payload.path,
+            payload.facing
+        );
+    }
+
+    applySupplyMoved(payload: {
+        supplyShipId: EntityId;
+        from: AxialCoord;
+        to: AxialCoord;
+        path: AxialCoord[];
+        facing: number;
+        supplyShip?: SupplyShipEntity;
+    }) {
+        let supplyShip = this.findEntity(payload.supplyShipId, "supply_ship");
+        if (!supplyShip && payload.supplyShip) {
+            // Launched this turn: place it at its source so it flies out from there.
+            const { from } = payload;
+            supplyShip = {
+                ...payload.supplyShip,
+                q: from.q,
+                r: from.r,
+                facing: axialDirectionTowards(from, payload.path[0])
+            };
+            const key = hexKey(from.q, from.r);
+            let source = this._tiles.get(key);
+            if (!source) {
+                source = { q: from.q, r: from.r, fog: "visible", entities: [] };
+                this._tiles.set(key, source);
+            }
+            source.entities = [...source.entities, supplyShip];
+        }
+        if (!supplyShip) return;
+        this._applyMoved(supplyShip, payload.from, payload.to, payload.path, payload.facing);
+    }
+
+    private _applyMoved(
+        entity: MobileEntity,
+        from: AxialCoord,
+        to: AxialCoord,
+        path: AxialCoord[],
+        facing: number
+    ) {
         const before = this._snapshotShips();
+        const moved: MobileEntity = { ...entity, q: to.q, r: to.r, facing };
+        this._removeEntities(new Set([entity.id]));
 
-        const moved: ShipEntity = {
-            ...ship,
-            q: payload.to.q,
-            r: payload.to.r,
-            facing: payload.facing,
-            movementPoints: payload.movementPoints
-        };
-        this._removeEntities(new Set([ship.id]));
-
-        const key = hexKey(payload.to.q, payload.to.r);
+        const key = hexKey(to.q, to.r);
         let dest = this._tiles.get(key);
         if (!dest) {
-            dest = { q: payload.to.q, r: payload.to.r, fog: "visible", entities: [] };
+            dest = { q: to.q, r: to.r, fog: "visible", entities: [] };
             this._tiles.set(key, dest);
         }
         dest.entities = [...dest.entities, moved];
 
-        this._animateMovedShips(before, new Map([[ship.id, [payload.from, ...payload.path]]]));
+        this._animateMovedShips(before, new Map([[entity.id, [from, ...path]]]));
         this._validateSelection();
         this._notify();
     }
@@ -340,7 +440,8 @@ export class HexWorld {
         const colour = sideColour(payload.loserSideId, "#ffd166");
 
         for (const id of payload.destroyedShipIds) {
-            const ship = this.findEntity(id, "ship");
+            const found = this.findEntityById(id);
+            const ship = found && isMobile(found) ? found : undefined;
             const motion = this._motions.get(id);
             this._motions.delete(id);
             if (ship && motion && !motion.isDone(now)) {
@@ -374,6 +475,56 @@ export class HexWorld {
         return this.battles.find((battle) => battle.defenderSideId === this.sideId);
     }
 
+    applyGroundStart(battle: GroundBattleInfo) {
+        this._groundBattles.set(battle.battleId, battle);
+        if (battle.attackerSideId === this.sideId) {
+            this.selectedShipId = null;
+            this.inspectedEntityId = null;
+        }
+        this._notify();
+    }
+
+    /**
+     * Drop the battle and scrub lost units from remembered garrisons. On capture the
+     * location changes hands here too, ahead of the tiles update that confirms it.
+     */
+    applyGroundResolved(payload: GroundBattleResolved) {
+        this._groundBattles.delete(payload.battleId);
+        const destroyed = new Set(payload.destroyedUnitIds);
+        for (const tile of this._tiles.values()) {
+            tile.entities = tile.entities.map((e) => {
+                if (!isLocationEntity(e)) return e;
+                const garrison = e.garrison?.filter((id) => !destroyed.has(id));
+                const sideId =
+                    payload.captured && e.id === payload.locationId
+                        ? payload.winnerSideId
+                        : e.sideId;
+                return garrison || sideId !== e.sideId ? { ...e, sideId, garrison } : e;
+            });
+        }
+        const colour = sideColour(payload.loserSideId, "#ffd166");
+        const at = axialToPixel(payload.q, payload.r, this.hexSize);
+        this._explosions.spawn(at, colour, this.hexSize, performance.now());
+        this._notify();
+    }
+
+    get groundBattles(): GroundBattleInfo[] {
+        return [...this._groundBattles.values()];
+    }
+
+    /** Pending ground battle our side invaded and must resolve, if any. */
+    get groundBattleToResolve(): GroundBattleInfo | undefined {
+        return this.groundBattles.find((battle) => battle.attackerSideId === this.sideId);
+    }
+
+    get groundBattleAwaited(): GroundBattleInfo | undefined {
+        return this.groundBattles.find((battle) => battle.defenderSideId === this.sideId);
+    }
+
+    groundBattleAt(locationId: EntityId): GroundBattleInfo | undefined {
+        return this.groundBattles.find((battle) => battle.locationId === locationId);
+    }
+
     applyTurnState(payload: TurnState & { yourSideId?: SideId }) {
         this.turn = { turn: payload.turn, sideReady: payload.sideReady };
         if (payload.yourSideId) {
@@ -387,39 +538,119 @@ export class HexWorld {
         this._notify();
     }
 
-    /** Private economy for one of our planets, if we own it. */
-    planetEconomy(planetId: EntityId): PlanetEconomy | undefined {
-        return this.economy?.planets.find((p) => p.planetId === planetId);
+    /** Private economy for one of our planets, moons or asteroids, if we own it. */
+    locationEconomy(locationId: EntityId): LocationEconomy | undefined {
+        return this.economy?.locations.find((l) => l.locationId === locationId);
     }
 
-    /** Inputs for `canBuild`; `shipCount` already includes queued ships. */
+    /** Inputs for `canBuild`; `shipCount` already includes ships on order. */
     get buildContext(): BuildContext | null {
         if (!this.economy) return null;
-        const { stockpile, shipCount, shipCap } = this.economy;
-        return { stockpile, shipCount, shipCap };
+        const { shipCount, shipCap, techs, locations } = this.economy;
+        const researching: TechId[] = [];
+        for (const location of locations) {
+            for (const order of location.orders) {
+                if (order.item.kind === "research") researching.push(order.item.techId);
+            }
+        }
+        return { shipCount, shipCap, techs, researching };
+    }
+
+    /** Stock held across every location we own. */
+    get sideStockpile(): Resources {
+        return sumResources(this.economy?.locations.map((l) => l.stockpile) ?? []);
+    }
+
+    /** Cargo aboard our supply ships. */
+    get cargoInTransit(): Resources {
+        return sumResources(this.economy?.supplyShips.map((s) => s.cargo) ?? []);
+    }
+
+    groundUnit(unitId: EntityId): GroundUnit | undefined {
+        return this.economy?.groundUnits.find((u) => u.id === unitId);
+    }
+
+    /** Our ground units stationed at `locationId`. */
+    garrisonAt(locationId: EntityId): GroundUnit[] {
+        return (
+            this.economy?.groundUnits.filter(
+                (u) => u.location.kind === "garrison" && u.location.locationId === locationId
+            ) ?? []
+        );
+    }
+
+    /** Our ground units aboard transport `shipId`. */
+    unitsAboard(shipId: EntityId): GroundUnit[] {
+        return (
+            this.economy?.groundUnits.filter(
+                (u) => u.location.kind === "transport" && u.location.shipId === shipId
+            ) ?? []
+        );
+    }
+
+    /** Planned route for one of our supply ships (hexes ahead, excluding its current hex). */
+    supplyRoute(supplyShipId: EntityId): AxialCoord[] {
+        const own = this.economy?.supplyShips.find((s) => s.id === supplyShipId);
+        return own?.route ?? this.findEntity(supplyShipId, "supply_ship")?.route ?? [];
+    }
+
+    entitiesAt(q: number, r: number): EntitySummary[] {
+        return this._tiles.get(hexKey(q, r))?.entities ?? [];
+    }
+
+    /** Our warships (not supply ships) on `hex`. */
+    ownShipsAt(q: number, r: number): ShipEntity[] {
+        return this.entitiesAt(q, r).filter(
+            (e): e is ShipEntity => e.kind === "ship" && e.sideId === this.sideId
+        );
     }
 
     /** Our ships on `hex` that can colonise. */
     colonyShipsAt(q: number, r: number): ShipEntity[] {
-        const entities = this._tiles.get(hexKey(q, r))?.entities ?? [];
-        return entities.filter(
-            (e): e is ShipEntity =>
-                e.kind === "ship" &&
-                e.sideId === this.sideId &&
-                !!SHIP_TYPES[e.shipType].canColonise
-        );
+        return this.ownShipsAt(q, r).filter((s) => !!SHIP_TYPES[s.shipType].canColonise);
     }
 
-    /** Unowned planet the selected colony ship is sitting on, if it could colonise it. */
-    get colonisablePlanet(): { ship: ShipEntity; planet: PlanetEntity } | undefined {
+    /** Our transports on `hex`. */
+    transportsAt(q: number, r: number): ShipEntity[] {
+        return this.ownShipsAt(q, r).filter(isTransport);
+    }
+
+    /** Units a transport carries, per its entity (falls back to our economy's unit list). */
+    carriedUnitIds(ship: ShipEntity): EntityId[] {
+        return ship.carriedUnitIds ?? this.unitsAboard(ship.id).map((u) => u.id);
+    }
+
+    /** Unowned build site the selected colony ship is sitting on, if it could colonise it. */
+    get colonisableLocation(): { ship: ShipEntity; location: LocationEntity } | undefined {
         const ship = this.selectedShip;
         if (!ship || ship.sideId !== this.sideId || !SHIP_TYPES[ship.shipType].canColonise) {
             return undefined;
         }
-        const planet = this._tiles
-            .get(hexKey(ship.q, ship.r))
-            ?.entities.find((e): e is PlanetEntity => e.kind === "planet" && e.sideId === null);
-        return planet ? { ship, planet } : undefined;
+        const location = this.entitiesAt(ship.q, ship.r).find(
+            (e): e is LocationEntity => isBuildSite(e) && e.sideId === null
+        );
+        return location ? { ship, location } : undefined;
+    }
+
+    /** Enemy location on `hex` plus our transports there that have units aboard. */
+    invasionAt(
+        q: number,
+        r: number
+    ): { location: LocationEntity; ships: ShipEntity[] } | undefined {
+        const location = this.entitiesAt(q, r).find(
+            (e): e is LocationEntity =>
+                isLocationEntity(e) && e.sideId !== null && e.sideId !== this.sideId
+        );
+        if (!location || this.groundBattleAt(location.id)) return undefined;
+        const ships = this.transportsAt(q, r).filter((s) => this.carriedUnitIds(s).length > 0);
+        return ships.length ? { location, ships } : undefined;
+    }
+
+    /** Invasion the selected transport could launch from its hex. */
+    get invasionOption(): { location: LocationEntity; ships: ShipEntity[] } | undefined {
+        const ship = this.selectedShip;
+        if (!ship || ship.sideId !== this.sideId || !isTransport(ship)) return undefined;
+        return this.invasionAt(ship.q, ship.r);
     }
 
     /** Optimistically mark our side ready until the server confirms via `server:turn:state`. */
@@ -578,7 +809,7 @@ export class HexWorld {
 
     /** Decide what a click (not drag) at `screen` should do; selection changes are applied here. */
     handleClick(screen: Pixel, canvas: HTMLCanvasElement): HexClickAction {
-        if (this.battleToResolve) return { type: "none" };
+        if (this.battleToResolve || this.groundBattleToResolve) return { type: "none" };
         const hex = this.pickHex(screen, canvas);
         if (!hex) {
             return this._deselect();
@@ -601,20 +832,20 @@ export class HexWorld {
             return { type: "select", shipId: next.id };
         }
 
-        const planet = entities.find((e): e is PlanetEntity => e.kind === "planet");
+        const location = primaryEntity(entities.filter(isBuildSite));
         const ship = this.selectedShip;
         if (ship && ship.movementPoints >= MOVE_COST_PER_HEX) {
             const inRange = this.reachableHexes().some((h) => h.q === hex.q && h.r === hex.r);
             // Beyond range the ship heads that way and stops when MP run out, except
-            // that far planets still open their page.
-            if (inRange || !planet) {
+            // that far locations still open their page.
+            if (inRange || !location) {
                 return { type: "move", shipId: ship.id, to: { q: hex.q, r: hex.r } };
             }
         }
 
-        if (planet) {
-            this.inspectEntity(planet.id);
-            return { type: "open-planet", planetId: planet.id };
+        if (location) {
+            this.inspectEntity(location.id);
+            return { type: "open-location", locationId: location.id };
         }
 
         const inspectable = primaryEntity(entities);
@@ -643,12 +874,24 @@ export class HexWorld {
         }
     }
 
+    /** Ships with a move animation still running. */
+    private _movingEntities(): Map<EntityId, { entity: MobileEntity; motion: ShipMotion }> {
+        const now = performance.now();
+        const moving = new Map<EntityId, { entity: MobileEntity; motion: ShipMotion }>();
+        for (const [id, motion] of this._motions) {
+            if (motion.isDone(now)) continue;
+            const entity = this.findEntityById(id);
+            if (entity && isMobile(entity)) moving.set(id, { entity, motion });
+        }
+        return moving;
+    }
+
     /** Where every known ship currently is, and whether that hex is visible to us. */
     private _snapshotShips(): Map<EntityId, ShipSighting> {
         const sightings = new Map<EntityId, ShipSighting>();
         for (const [key, tile] of this._tiles) {
             for (const entity of tile.entities) {
-                if (entity.kind !== "ship") continue;
+                if (!isMobile(entity)) continue;
                 sightings.set(entity.id, {
                     q: tile.q,
                     r: tile.r,
@@ -674,7 +917,7 @@ export class HexWorld {
         for (const [key, tile] of this._tiles) {
             if (!this._visible.has(key)) continue;
             for (const entity of tile.entities) {
-                if (entity.kind !== "ship") continue;
+                if (!isMobile(entity)) continue;
                 const prev = before.get(entity.id);
                 if (!prev?.seen || (prev.q === tile.q && prev.r === tile.r)) continue;
 
@@ -690,7 +933,7 @@ export class HexWorld {
                 const startsAtPrev = known?.[0].q === prev.q && known[0].r === prev.r;
                 const path =
                     known && startsAtPrev ? known : planHexPath(prev, tile, this._pathOptions());
-                motion.enqueue(path, this.hexSize, SHIP_TYPES[entity.shipType], now);
+                motion.enqueue(path, this.hexSize, motionSpeeds(entity), now);
             }
         }
     }
@@ -813,7 +1056,7 @@ export class HexWorld {
         this._dying = this._dying.filter(({ entity, motion, colour }) => {
             const pose = motion.poseAt(now);
             if (motion.isDone(now)) {
-                this._explosions.spawn(pose, colour, this.hexSize, now);
+                if (colour) this._explosions.spawn(pose, colour, this.hexSize, now);
                 return false;
             }
             const center = this.worldToScreen(pose, canvas);
@@ -851,8 +1094,8 @@ export class HexWorld {
         ctx.stroke();
 
         for (const entity of tile.entities) {
-            const pose = entity.kind === "ship" ? this._framePoses.get(entity.id) : undefined;
-            if (entity.kind === "ship" && pose) {
+            const pose = isMobile(entity) ? this._framePoses.get(entity.id) : undefined;
+            if (isMobile(entity) && pose) {
                 deferred.push({ entity, pose, fullColour });
                 continue;
             }
@@ -860,7 +1103,59 @@ export class HexWorld {
         }
     }
 
+    /** Planned route of the inspected supply ship: solid for this turn's hexes, dashed after. */
+    private _drawSupplyRoute(ctx: DrawCtx, canvas: HTMLCanvasElement) {
+        const supplyShip = this.inspectedEntityId
+            ? this.findEntity(this.inspectedEntityId, "supply_ship")
+            : undefined;
+        if (!supplyShip) return;
+        const size = this.hexSize * this.camera.zoom;
+        const toScreen = (hex: Axial) =>
+            this.worldToScreen(axialToPixel(hex.q, hex.r, this.hexSize), canvas);
+        const start = this.worldToScreen(
+            this._framePoses.get(supplyShip.id) ??
+                axialToPixel(supplyShip.q, supplyShip.r, this.hexSize),
+            canvas
+        );
+        const route = this.supplyRoute(supplyShip.id).map(toScreen);
+        const thisTurn = Math.min(route.length, supplyShip.speed);
+
+        ctx.save();
+        ctx.strokeStyle = "rgba(255, 209, 102, 0.85)";
+        ctx.fillStyle = "rgba(255, 209, 102, 0.85)";
+        ctx.lineWidth = Math.max(1, size * 0.05);
+        const drawLeg = (points: Pixel[], dashed: boolean) => {
+            if (points.length < 2) return;
+            ctx.setLineDash(dashed ? [size * 0.18, size * 0.14] : []);
+            ctx.beginPath();
+            ctx.moveTo(points[0].x, points[0].y);
+            for (const p of points.slice(1)) ctx.lineTo(p.x, p.y);
+            ctx.stroke();
+        };
+        drawLeg([start, ...route.slice(0, thisTurn)], false);
+        drawLeg(route.slice(Math.max(0, thisTurn - 1)), true);
+        ctx.setLineDash([]);
+        for (const p of route) {
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, Math.max(1.5, size * 0.07), 0, Math.PI * 2);
+            ctx.fill();
+        }
+        const end = route[route.length - 1];
+        if (end) {
+            this._hexPath(ctx, end, size * 0.92);
+            ctx.stroke();
+        }
+        const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 250);
+        ctx.strokeStyle = `rgba(255, 255, 255, ${0.6 + 0.4 * pulse})`;
+        ctx.lineWidth = Math.max(1.5, size * 0.05);
+        ctx.beginPath();
+        ctx.arc(start.x, start.y, size * 0.55, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+    }
+
     private _drawSelection(ctx: DrawCtx, canvas: HTMLCanvasElement) {
+        this._drawSupplyRoute(ctx, canvas);
         const ship = this.selectedShip;
         if (!ship) return;
         const size = this.hexSize * this.camera.zoom;
@@ -1088,6 +1383,21 @@ function drawEntityPlaceholder(
             ctx.beginPath();
             ctx.arc(scale * 0.45, 0, Math.max(1, scale * 0.12), 0, Math.PI * 2);
             ctx.fill();
+            if (isTransport(entity) && entity.carriedUnitIds?.length) {
+                ctx.fillStyle = "#ffd166";
+                ctx.fillRect(-scale * 0.4, -scale * 0.18, scale * 0.36, scale * 0.36);
+            }
+            break;
+        }
+        case "supply_ship": {
+            drawSupplyShip(
+                ctx,
+                (entity.scale ?? 0.32) * hexSize,
+                hexSize,
+                sideColour(entity.sideId, "#d0d0d0"),
+                center,
+                heading ?? axialDirectionAngle(entity.facing)
+            );
             break;
         }
         default: {
@@ -1097,6 +1407,34 @@ function drawEntityPlaceholder(
     }
 
     ctx.restore();
+}
+
+/** Boxy freighter: cab in the side colour towing two cargo pods; nose along `heading`. */
+function drawSupplyShip(
+    ctx: DrawCtx,
+    scale: number,
+    hexSize: number,
+    colour: string,
+    center: Pixel,
+    heading: number
+) {
+    ctx.translate(center.x, center.y);
+    ctx.rotate(heading);
+    ctx.strokeStyle = "#ffffffaa";
+    ctx.lineWidth = Math.max(1, hexSize * 0.025);
+    ctx.fillStyle = "#c9b27a";
+    for (const x of [-scale * 0.95, -scale * 0.35]) {
+        ctx.fillRect(x, -scale * 0.32, scale * 0.5, scale * 0.64);
+        ctx.strokeRect(x, -scale * 0.32, scale * 0.5, scale * 0.64);
+    }
+    ctx.fillStyle = colour;
+    ctx.beginPath();
+    ctx.moveTo(scale * 0.9, 0);
+    ctx.lineTo(scale * 0.2, scale * 0.42);
+    ctx.lineTo(scale * 0.2, -scale * 0.42);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
 }
 
 /** Capsule hull with a habitat ring; nose along +x (context already rotated). */

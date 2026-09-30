@@ -101,8 +101,13 @@
     overflow: hidden;
 }
 
+.planet-page__progress {
+    display: flex;
+}
+
 .planet-page__slots-fill,
-.planet-page__progress-fill {
+.planet-page__progress-fill,
+.planet-page__progress-next {
     height: 100%;
     background: #4a8fd4;
     transition: width 0.4s ease-out;
@@ -110,6 +115,182 @@
 
 .planet-page__progress-fill {
     background: #5cffb0;
+}
+
+.planet-page__progress-next {
+    background: rgba(92, 255, 176, 0.35);
+}
+
+.planet-page__funding {
+    display: grid;
+    gap: 0.2rem;
+}
+
+.planet-page__funding-row {
+    display: grid;
+    grid-template-columns: 3.5rem 1fr 7.5rem;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.8rem;
+}
+
+.planet-page__funding-amount {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.planet-page__next {
+    color: #5cffb0;
+}
+
+.planet-page__order-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 0.4rem 0.75rem;
+}
+
+.planet-page__order-head .planet-page__muted {
+    font-size: 0.8rem;
+}
+
+.planet-page__priority {
+    display: inline-flex;
+    border: 1px solid #2c3d63;
+    border-radius: 0.3rem;
+    overflow: hidden;
+    vertical-align: middle;
+}
+
+.planet-page__panel .planet-page__priority-option {
+    padding: 0.1rem 0.5rem;
+    border: none;
+    border-radius: 0;
+    background: #16233f;
+    color: #9ab3d4;
+    font-size: 0.75rem;
+}
+
+.planet-page__panel .planet-page__priority-option + .planet-page__priority-option {
+    border-left: 1px solid #2c3d63;
+}
+
+.planet-page__panel .planet-page__priority-option--active {
+    color: #0f1730;
+    font-weight: 600;
+}
+
+.planet-page__panel .planet-page__priority-option--low.planet-page__priority-option--active {
+    background: #7f93b5;
+}
+
+.planet-page__panel .planet-page__priority-option--medium.planet-page__priority-option--active {
+    background: #9fd0ff;
+}
+
+.planet-page__panel .planet-page__priority-option--high.planet-page__priority-option--active {
+    background: #ffd166;
+}
+
+.planet-page__new-priority {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.planet-page__stockpile {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+    gap: 0.4rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.planet-page__stock {
+    display: grid;
+    gap: 0.1rem;
+    padding: 0.4rem 0.6rem;
+    border: 1px solid #22314f;
+    border-radius: 0.35rem;
+    background: #121c38;
+    font-variant-numeric: tabular-nums;
+}
+
+.planet-page__stock .planet-page__muted {
+    margin: 0;
+    font-size: 0.75rem;
+}
+
+.planet-page__stock-label {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.planet-page__list,
+.planet-page__aboard {
+    display: grid;
+    gap: 0.3rem;
+    margin: 0.6rem 0 0;
+    padding: 0;
+    list-style: none;
+}
+
+.planet-page__aboard {
+    margin: 0.3rem 0 0 1rem;
+    font-size: 0.85rem;
+}
+
+.planet-page__row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.75rem;
+    font-size: 0.9rem;
+}
+
+.planet-page__list > li.planet-page__row,
+.planet-page__ship {
+    padding: 0.35rem 0.6rem;
+    border: 1px solid #22314f;
+    border-radius: 0.35rem;
+    background: #121c38;
+}
+
+.planet-page__row-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 0.35rem;
+}
+
+.planet-page__row button {
+    flex: none;
+    padding: 0.2rem 0.6rem;
+    font-size: 0.8rem;
+}
+
+.planet-page__tier {
+    padding: 0 0.35rem;
+    border: 1px solid #3a4d73;
+    border-radius: 0.25rem;
+    color: #9fd0ff;
+    font-size: 0.75rem;
+}
+
+.planet-page__option--known {
+    opacity: 0.65;
+}
+
+.planet-page__alert {
+    margin: 0.5rem 0 0;
+    padding: 0.4rem 0.6rem;
+    border: 1px solid #ff9f6b;
+    border-radius: 0.35rem;
+    color: #ff9f6b;
+    font-size: 0.9rem;
 }
 
 .planet-page__structures {
@@ -178,21 +359,20 @@
     font-variant-numeric: tabular-nums;
 }
 
-.planet-page__cost-item--food {
-    color: #8fdc7a;
-}
-
-.planet-page__cost-item--gold {
+.planet-page__cost-item--money {
     color: #ffd166;
 }
 
-.planet-page__cost-item--resources {
+.planet-page__cost-item--materials {
     color: #9fb8ff;
 }
 
-.planet-page__cost-item--short {
-    color: #ff6b8a;
-    text-decoration: underline dotted;
+.planet-page__cost-item--population {
+    color: #8fdc7a;
+}
+
+.planet-page__cost-item--science {
+    color: #c9a0ff;
 }
 
 .planet-page__turns {
@@ -225,4 +405,9 @@
 .planet-page__primary {
     border-color: #5cffb0;
     font-weight: 600;
+}
+
+.planet-page__primary--danger {
+    border-color: #ff9f6b;
+    color: #ff9f6b;
 }

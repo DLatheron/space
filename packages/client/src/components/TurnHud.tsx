@@ -6,7 +6,7 @@ import "./TurnHud.css";
 type TurnHudProps = {
     world: HexWorld;
     onEndTurn: () => void;
-    onColonise: (planetId: EntityId, shipId: EntityId) => void;
+    onColonise: (locationId: EntityId, shipId: EntityId) => void;
 };
 
 export function TurnHud({ world, onEndTurn, onColonise }: TurnHudProps) {
@@ -15,7 +15,7 @@ export function TurnHud({ world, onEndTurn, onColonise }: TurnHudProps) {
     const turn = world.turn;
     const ownReady = world.ownSideReady;
     const ship = world.selectedShip;
-    const colonisable = world.colonisablePlanet;
+    const colonisable = world.colonisableLocation;
     const sides = Object.entries(turn?.sideReady ?? {}).sort(([a], [b]) => a.localeCompare(b));
 
     return (
@@ -49,9 +49,9 @@ export function TurnHud({ world, onEndTurn, onColonise }: TurnHudProps) {
                 <button
                     type="button"
                     className="turn-hud__colonise"
-                    onClick={() => onColonise(colonisable.planet.id, colonisable.ship.id)}
+                    onClick={() => onColonise(colonisable.location.id, colonisable.ship.id)}
                 >
-                    Colonise {colonisable.planet.name ?? "planet"}
+                    Colonise {colonisable.location.name ?? "location"}
                 </button>
             )}
             <button type="button" onClick={onEndTurn} disabled={ownReady || !turn}>

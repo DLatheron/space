@@ -99,11 +99,10 @@ describe("Game with fullVisibility", () => {
 describe("Game economy messages", () => {
     it("includes economy in map:init and sends tiles, economy then turn state on advance", async () => {
         const { game, alpha, beta } = createGame({ revealMap: false, fullVisibility: false });
-        expect(alpha.last("server:map:init")!.payload.economy).toMatchObject({
-            stockpile: STARTING_STOCKPILE,
-            shipCount: 2,
-            shipCap: 3
-        });
+        const init = alpha.last("server:map:init")!.payload;
+        expect(init.economy).toMatchObject({ shipCount: 2, shipCap: 3, techs: [] });
+        expect(init.economy.locations[0].stockpile).toEqual(STARTING_STOCKPILE);
+        expect(init.groundBattles).toEqual([]);
 
         const mark = alpha.messages.length;
         game.queueMessage({ type: "client:turn:end", payload: {} }, alpha.client);
@@ -116,9 +115,9 @@ describe("Game economy messages", () => {
         expect(tiles).toBeGreaterThanOrEqual(0);
         expect(economy).toBeGreaterThan(tiles);
         expect(types.lastIndexOf("server:turn:state")).toBeGreaterThan(economy);
-        expect(alpha.last("server:economy:state")!.payload.stockpile.food).toBeGreaterThan(
-            STARTING_STOCKPILE.food
-        );
+        expect(
+            alpha.last("server:economy:state")!.payload.locations[0].stockpile.money
+        ).toBeGreaterThan(STARTING_STOCKPILE.money);
         game.destroyGame();
     });
 
@@ -128,8 +127,12 @@ describe("Game economy messages", () => {
 
         game.queueMessage(
             {
-                type: "client:planet:build",
-                payload: { planetId: home.id, item: { kind: "ship", shipType: "scout" } }
+                type: "client:location:build",
+                payload: {
+                    locationId: home.id,
+                    item: { kind: "ship", shipType: "scout" },
+                    priority: "medium"
+                }
             },
             alpha.client
         );
@@ -138,13 +141,19 @@ describe("Game economy messages", () => {
 
         game.queueMessage(
             {
-                type: "client:planet:build",
-                payload: { planetId: home.id, item: { kind: "structure", structureType: "farm" } }
+                type: "client:location:build",
+                payload: {
+                    locationId: home.id,
+                    item: { kind: "structure", structureType: "habitat" },
+                    priority: "high"
+                }
             },
             alpha.client
         );
         await vi.waitFor(() => expect(alpha.last("server:economy:state")).toBeDefined());
-        expect(alpha.last("server:economy:state")!.payload.planets[0].queue).toHaveLength(1);
+        expect(alpha.last("server:economy:state")!.payload.locations[0].orders).toMatchObject([
+            { priority: "high" }
+        ]);
         game.destroyGame();
     });
 
@@ -164,12 +173,15 @@ describe("Game economy messages", () => {
         });
 
         game.queueMessage(
-            { type: "client:planet:colonise", payload: { planetId: planet.id, shipId: colony.id } },
+            {
+                type: "client:location:colonise",
+                payload: { locationId: planet.id, shipId: colony.id }
+            },
             alpha.client
         );
         await vi.waitFor(() => expect(alpha.last("server:economy:state")).toBeDefined());
 
-        expect(alpha.last("server:economy:state")!.payload.planets).toHaveLength(2);
+        expect(alpha.last("server:economy:state")!.payload.locations).toHaveLength(2);
         expect(beta.last("server:economy:state")).toBeUndefined();
         for (const observer of [alpha, beta]) {
             const tile = observer

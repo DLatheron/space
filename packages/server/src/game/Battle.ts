@@ -1,4 +1,5 @@
 import type { AxialCoord, BattleId, BattleInfo, EntityId, SideId } from "@space/shared-data";
+import type { EconomyManager } from "./EconomyManager.js";
 import type { EntityManager } from "./EntityManager.js";
 import type { EntityOf } from "./map/types.js";
 import {
@@ -12,14 +13,24 @@ export type BattleMoveResult =
     | {
           ok: true;
           move: Extract<MoveValidation, { ok: true }>;
-          /** Battle started by this move, if it ended in a hex holding enemy ships. */
+          /** Battle started by this move, if it ended in a hex holding enemy vessels. */
           battle: BattleInfo | null;
       }
     | { ok: false; error: string };
 
 export type BattleResolveResult =
-    | { ok: true; battle: BattleInfo; loserSideId: SideId; destroyedShipIds: EntityId[] }
+    | {
+          ok: true;
+          battle: BattleInfo;
+          loserSideId: SideId;
+          /** Ships and supply ships (whose cargo is lost). */
+          destroyedShipIds: EntityId[];
+          /** Ground units lost aboard destroyed transports. */
+          destroyedUnitIds: EntityId[];
+      }
     | { ok: false; error: string };
+
+type Vessel = EntityOf<"ship"> | EntityOf<"supply_ship">;
 
 function shipsAt(entities: EntityManager, hex: AxialCoord): EntityOf<"ship">[] {
     return entities
@@ -27,24 +38,44 @@ function shipsAt(entities: EntityManager, hex: AxialCoord): EntityOf<"ship">[] {
         .filter((entity): entity is EntityOf<"ship"> => entity.kind === "ship");
 }
 
-/** Whether `hex` (true server state) holds any ship not belonging to `sideId`. */
-export function hasEnemyShips(entities: EntityManager, hex: AxialCoord, sideId: SideId): boolean {
+function vesselsAt(entities: EntityManager, hex: AxialCoord): Vessel[] {
+    return entities
+        .entitiesAt(hex.q, hex.r)
+        .filter(
+            (entity): entity is Vessel => entity.kind === "ship" || entity.kind === "supply_ship"
+        );
+}
+
+/** Whether `hex` (true server state) holds any ship not belonging to `sideId`; supply ships don't count. */
+export function hasEnemyWarships(
+    entities: EntityManager,
+    hex: AxialCoord,
+    sideId: SideId
+): boolean {
     return shipsAt(entities, hex).some((ship) => ship.sideId !== sideId);
 }
 
+/** Whether `hex` (true server state) holds any ship or supply ship not belonging to `sideId`. */
+export function hasEnemyVessels(entities: EntityManager, hex: AxialCoord, sideId: SideId): boolean {
+    return vesselsAt(entities, hex).some((vessel) => vessel.sideId !== sideId);
+}
+
 /**
- * Pending battles. A ship stepping into a hex with enemy ships stops there and
- * starts a battle, which the attacker (mover's side) resolves by naming a winner.
- * While pending, involved ships are locked and nothing may move into the hex.
- * Turns may still end; the battle simply carries over.
+ * Pending battles. A ship stepping into a hex with enemy ships or supply ships stops there
+ * and starts a battle, which the attacker (mover's side) resolves by naming a winner. A
+ * supply ship blundering into enemy ships also starts one, with the enemy as attacker.
+ * While pending, involved vessels are locked and nothing may move into the hex. Turns may
+ * still end; the battle simply carries over.
  */
 export class BattleManager {
     private readonly _entities: EntityManager;
+    private readonly _economy: EconomyManager | undefined;
     private readonly _battles = new Map<BattleId, BattleInfo>();
     private _nextId = 1;
 
-    constructor(entities: EntityManager) {
+    constructor(entities: EntityManager, economy?: EconomyManager) {
         this._entities = entities;
+        this._economy = economy;
     }
 
     get(battleId: BattleId): BattleInfo | undefined {
@@ -83,7 +114,7 @@ export class BattleManager {
 
     /**
      * Validate and apply a move. The path is cut at the first hex holding enemy
-     * ships (or an ongoing battle); ending in enemy ships starts a battle.
+     * vessels (or an ongoing battle); ending in enemy vessels starts a battle.
      */
     moveShip(
         sideId: SideId | null,
@@ -97,7 +128,7 @@ export class BattleManager {
         const move = validateShipMove(this._entities, sideId, shipId, to, {
             ...options,
             stopAt: (hex) =>
-                !!this.findAt(hex) || (!!sideId && hasEnemyShips(this._entities, hex, sideId))
+                !!this.findAt(hex) || (!!sideId && hasEnemyVessels(this._entities, hex, sideId))
         });
         if (!move.ok) return move;
         if (this.findAt(move.to)) {
@@ -108,27 +139,46 @@ export class BattleManager {
         return { ok: true, move, battle: this._startIfContested(move.ship) };
     }
 
-    private _startIfContested(attacker: EntityOf<"ship">): BattleInfo | null {
-        const ships = shipsAt(this._entities, attacker);
-        const defenderSideId = ships.find((ship) => ship.sideId !== attacker.sideId)?.sideId;
-        if (!defenderSideId) return null;
+    /**
+     * A supply ship moved into a hex holding enemy ships: the enemy attacks, and every
+     * vessel of the supply ship's side in the hex defends. Returns null if the hex is quiet.
+     */
+    startSupplyAmbush(supplyShip: EntityOf<"supply_ship">): BattleInfo | null {
+        if (this.findAt(supplyShip)) return null;
+        const attackerSideId = shipsAt(this._entities, supplyShip).find(
+            (ship) => ship.sideId !== supplyShip.sideId
+        )?.sideId;
+        if (!attackerSideId) return null;
+        return this._create(supplyShip, attackerSideId, supplyShip.sideId);
+    }
 
+    private _startIfContested(attacker: EntityOf<"ship">): BattleInfo | null {
+        const defenderSideId = vesselsAt(this._entities, attacker).find(
+            (vessel) => vessel.sideId !== attacker.sideId
+        )?.sideId;
+        if (!defenderSideId) return null;
+        return this._create(attacker, attacker.sideId, defenderSideId);
+    }
+
+    private _create(hex: AxialCoord, attackerSideId: SideId, defenderSideId: SideId): BattleInfo {
+        const vessels = vesselsAt(this._entities, hex);
         const battle: BattleInfo = {
             battleId: `battle-${this._nextId++}`,
-            q: attacker.q,
-            r: attacker.r,
-            attackerSideId: attacker.sideId,
+            q: hex.q,
+            r: hex.r,
+            attackerSideId,
             defenderSideId,
-            attackerShipIds: ships.filter((s) => s.sideId === attacker.sideId).map((s) => s.id),
-            defenderShipIds: ships.filter((s) => s.sideId === defenderSideId).map((s) => s.id)
+            attackerShipIds: vessels.filter((v) => v.sideId === attackerSideId).map((v) => v.id),
+            defenderShipIds: vessels.filter((v) => v.sideId === defenderSideId).map((v) => v.id)
         };
         this._battles.set(battle.battleId, battle);
         return battle;
     }
 
     /**
-     * Resolve a battle on behalf of `bySideId` (must be the attacker). Every ship of
-     * the losing side in the hex is removed from the entity manager.
+     * Resolve a battle on behalf of `bySideId` (must be the attacker). Every ship and supply
+     * ship of the losing side in the hex is removed: supply ship cargo is lost, crews go
+     * home and units aboard transports are destroyed.
      */
     resolve(
         battleId: BattleId,
@@ -146,12 +196,15 @@ export class BattleManager {
         }
 
         const loserSideId = winnerSideId === attackerSideId ? defenderSideId : attackerSideId;
-        const destroyedShipIds = shipsAt(this._entities, battle)
-            .filter((ship) => ship.sideId === loserSideId)
-            .map((ship) => ship.id);
+        const losers = vesselsAt(this._entities, battle).filter((v) => v.sideId === loserSideId);
+        const destroyedUnitIds =
+            this._economy?.onShipsDestroyed(
+                losers.filter((v): v is EntityOf<"ship"> => v.kind === "ship")
+            ) ?? [];
+        const destroyedShipIds = losers.map((v) => v.id);
         for (const id of destroyedShipIds) this._entities.remove(id);
         this._battles.delete(battleId);
 
-        return { ok: true, battle, loserSideId, destroyedShipIds };
+        return { ok: true, battle, loserSideId, destroyedShipIds, destroyedUnitIds };
     }
 }

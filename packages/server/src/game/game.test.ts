@@ -3,7 +3,7 @@ import {
     addResources,
     EntitySummary,
     HOME_PLANET_LEVEL,
-    incomeFor,
+    locationIncome,
     PLANET_LEVEL_MAX,
     PLANET_LEVEL_MIN,
     SHIP_TYPES,
@@ -128,52 +128,56 @@ describe("EconomyManager", () => {
         const world = economyWorld();
         expect(world.economy.build("alpha", world.home.id, structure("shipyard")).ok).toBe(true);
         advance(world.economy, STRUCTURE_TYPES.shipyard.buildTurns);
-        expect(world.economy.planetEconomy(world.home.id)?.structures).toEqual(["shipyard"]);
+        expect(
+            world.economy.locationEconomy(world.home.id)?.installations.map((i) => i.type)
+        ).toEqual(["shipyard"]);
         return world;
     }
 
-    it("starts with the starting stockpile and 2/3 ships", () => {
+    it("starts with the starting stockpile at home and 2/3 ships", () => {
         const { economy, home } = economyWorld();
         const state = economy.stateFor("alpha");
-        expect(state.stockpile).toEqual(STARTING_STOCKPILE);
         expect(state.lastIncome).toEqual(zeroResources());
         expect(state.shipCount).toBe(2);
         expect(state.shipCap).toBe(3);
-        expect(state.planets).toEqual([
-            { planetId: home.id, level: HOME_PLANET_LEVEL, structures: [], queue: [] }
+        expect(state.locations).toEqual([
+            {
+                locationId: home.id,
+                site: "planet",
+                level: HOME_PLANET_LEVEL,
+                slots: HOME_PLANET_LEVEL,
+                stockpile: STARTING_STOCKPILE,
+                installations: [],
+                orders: []
+            }
         ]);
+        expect(economy.totalStockpile("alpha")).toEqual(STARTING_STOCKPILE);
     });
 
-    it("pays the full cost when queueing and rejects planets that are not yours", () => {
+    it("places orders without paying up front and rejects locations that are not yours", () => {
         const { economy, home, betaHome } = economyWorld();
-        expect(economy.build("alpha", home.id, structure("farm")).ok).toBe(true);
-        expect(economy.stockpile("alpha")).toEqual(
-            subtractResources(STARTING_STOCKPILE, STRUCTURE_TYPES.farm.cost)
-        );
-        expect(economy.stateFor("alpha").planets[0].queue).toEqual([
-            { item: structure("farm"), turnsRemaining: 2, totalTurns: 2 }
+        const result = economy.build("alpha", home.id, structure("habitat"), "high");
+        expect(result.ok).toBe(true);
+        expect(economy.stockpile(home.id)).toEqual(STARTING_STOCKPILE);
+        expect(economy.locationEconomy(home.id)?.orders).toEqual([
+            {
+                id: result.ok ? result.order.id : "",
+                item: structure("habitat"),
+                priority: "high",
+                cost: STRUCTURE_TYPES.habitat.cost,
+                applied: zeroResources(),
+                ratePerTurn: { money: 25, materials: 50, population: 0, science: 0 }
+            }
         ]);
 
-        expect(economy.build("alpha", betaHome.id, structure("farm")).ok).toBe(false);
-        expect(economy.build(null, home.id, structure("farm")).ok).toBe(false);
-        expect(economy.build("alpha", "nope", structure("farm")).ok).toBe(false);
+        expect(economy.build("alpha", betaHome.id, structure("habitat")).ok).toBe(false);
+        expect(economy.build(null, home.id, structure("habitat")).ok).toBe(false);
+        expect(economy.build("alpha", "nope", structure("habitat")).ok).toBe(false);
     });
 
-    it("rejects unaffordable items", () => {
-        const { economy, home } = economyWorld(20);
-        // Farms cost 100 resources, so ten drain the stockpile's 1000.
-        for (let i = 0; i < 10; i++) {
-            expect(economy.build("alpha", home.id, structure("farm")).ok).toBe(true);
-        }
-        expect(economy.build("alpha", home.id, structure("farm"))).toEqual({
-            ok: false,
-            error: "Not enough resources"
-        });
-    });
-
-    it("limits structures (built and queued) to the planet level", () => {
+    it("limits structures (built and ordered) to the location's slots", () => {
         const { economy, home } = economyWorld(2);
-        expect(economy.build("alpha", home.id, structure("farm")).ok).toBe(true);
+        expect(economy.build("alpha", home.id, structure("habitat")).ok).toBe(true);
         advance(economy, 2);
         expect(economy.build("alpha", home.id, structure("mine")).ok).toBe(true);
         expect(economy.build("alpha", home.id, structure("trade_hub"))).toEqual({
@@ -192,13 +196,13 @@ describe("EconomyManager", () => {
             ok: false,
             error: "Requires Shipyard"
         });
-        // A queued (unfinished) shipyard does not count.
+        // An ordered (unfinished) shipyard does not count.
         expect(economy.build("alpha", home.id, structure("shipyard")).ok).toBe(true);
-        expect(economy.build("alpha", home.id, structure("advanced_shipyard")).ok).toBe(false);
+        expect(economy.build("alpha", home.id, structure("docks")).ok).toBe(false);
         expect(economy.build("alpha", home.id, structure("shipyard")).ok).toBe(false);
     });
 
-    it("counts queued ships towards the ship cap", () => {
+    it("counts ordered ships towards the ship cap", () => {
         const { economy, home } = withShipyard();
         expect(economy.build("alpha", home.id, ship("frigate")).ok).toBe(false);
         expect(economy.build("alpha", home.id, ship("scout")).ok).toBe(true);
@@ -209,25 +213,45 @@ describe("EconomyManager", () => {
         });
     });
 
-    it("progresses only the head of the queue and completes structures", () => {
+    it("funds orders concurrently at their per-turn rate and completes them when funded", () => {
         const { economy, home } = economyWorld();
-        economy.build("alpha", home.id, structure("farm"));
+        economy.build("alpha", home.id, structure("habitat"));
         economy.build("alpha", home.id, structure("mine"));
         advance(economy, 1);
-        expect(economy.planetEconomy(home.id)?.queue.map((e) => e.turnsRemaining)).toEqual([1, 2]);
+        expect(economy.locationEconomy(home.id)?.orders.map((o) => o.applied)).toEqual([
+            { money: 25, materials: 50, population: 0, science: 0 },
+            { money: 50, materials: 0, population: 5, science: 0 }
+        ]);
         advance(economy, 1);
-        expect(economy.planetEconomy(home.id)).toMatchObject({
-            structures: ["farm"],
-            queue: [{ item: structure("mine"), turnsRemaining: 2 }]
-        });
-        advance(economy, 2);
-        expect(economy.planetEconomy(home.id)).toMatchObject({
-            structures: ["farm", "mine"],
-            queue: []
+        expect(economy.locationEconomy(home.id)).toMatchObject({
+            installations: [
+                { type: "habitat", tier: 1, populationFrom: home.id },
+                { type: "mine", tier: 1, populationFrom: home.id }
+            ],
+            orders: []
         });
     });
 
-    it("spawns a finished ship on the planet hex with full MP", () => {
+    it("serves high priority before lower priorities when stock is short", () => {
+        const { entities, economy } = economyWorld();
+        const moon = entities.add<EntityOf<"moon">>({
+            id: "moon-a",
+            kind: "moon",
+            sideId: "alpha",
+            systemId: "sys-1",
+            q: 12,
+            r: 12
+        });
+        economy.deposit(moon.id, { ...zeroResources(), money: 30, materials: 50 });
+        economy.build("alpha", moon.id, structure("habitat"), "low");
+        economy.build("alpha", moon.id, structure("habitat"), "high");
+        economy.fundAndComplete();
+        const [low, high] = economy.locationEconomy(moon.id)!.orders;
+        expect(high.applied).toMatchObject({ money: 25, materials: 50 });
+        expect(low.applied).toMatchObject({ money: 5, materials: 0 });
+    });
+
+    it("spawns a finished ship on the location hex with full MP", () => {
         const { entities, economy, home } = withShipyard();
         economy.build("alpha", home.id, ship("scout"));
         expect(advance(economy, 1)).toEqual([]);
@@ -244,60 +268,78 @@ describe("EconomyManager", () => {
         });
         expect(entities.get(spawned.id)).toBe(spawned);
         expect(entities.entitiesAt(home.q, home.r).map((e) => e.id)).toContain(spawned.id);
+        expect(economy.shipCrewOrigin(spawned.id)).toBe(home.id);
         expect(economy.stateFor("alpha")).toMatchObject({ shipCount: 3, shipCap: 3 });
-        expect(economy.planetEconomy(home.id)?.queue).toEqual([]);
+        expect(economy.locationEconomy(home.id)?.orders).toEqual([]);
     });
 
-    it("holds a finished ship while enemy ships occupy the planet hex", () => {
+    it("holds a finished ship while enemy ships occupy the location hex", () => {
         const { entities, economy, home } = withShipyard();
         economy.build("alpha", home.id, ship("scout"));
         const enemy = entities.add(makeShip("ship-e", "beta", home.q, home.r));
         expect(advance(economy, 3)).toEqual([]);
-        expect(economy.planetEconomy(home.id)?.queue[0].turnsRemaining).toBe(0);
+        expect(economy.locationEconomy(home.id)?.orders[0].applied).toEqual(SHIP_TYPES.scout.cost);
         entities.remove(enemy.id);
         expect(advance(economy, 1)).toHaveLength(1);
     });
 
-    it("adds income at the end of the turn, including structure output", () => {
-        const { economy, home } = economyWorld();
-        economy.build("alpha", home.id, structure("farm"));
-        const afterBuild = economy.stockpile("alpha");
+    it("adds income to the local stockpile before funding", () => {
+        const { economy, home, betaHome } = economyWorld();
+        economy.build("alpha", home.id, structure("habitat"));
 
         advance(economy, 1);
-        const base = incomeFor([{ level: HOME_PLANET_LEVEL, structures: [] }]);
+        const base = locationIncome({
+            site: "planet",
+            level: HOME_PLANET_LEVEL,
+            installations: []
+        });
         expect(economy.stateFor("alpha").lastIncome).toEqual(base);
-        expect(economy.stockpile("alpha")).toEqual(addResources(afterBuild, base));
-
-        // The farm completes during turn 2's advance, after that turn's income.
-        advance(economy, 1);
-        advance(economy, 1);
-        expect(economy.stateFor("alpha").lastIncome).toEqual(
-            addResources(base, STRUCTURE_TYPES.farm.produces!)
+        expect(economy.stockpile(home.id)).toEqual(
+            subtractResources(addResources(STARTING_STOCKPILE, base), {
+                money: 25,
+                materials: 50
+            })
         );
-        expect(economy.stockpile("beta")).toEqual(
+
+        // The habitat completes during turn 2's advance, after that turn's income.
+        advance(economy, 2);
+        expect(economy.stateFor("alpha").lastIncome).toEqual(
+            addResources(base, STRUCTURE_TYPES.habitat.produces!)
+        );
+        expect(economy.stockpile(betaHome.id)).toEqual(
             addResources(STARTING_STOCKPILE, {
-                food: base.food * 3,
-                gold: base.gold * 3,
-                resources: base.resources * 3
+                money: base.money * 3,
+                materials: base.materials * 3,
+                population: base.population * 3,
+                science: base.science * 3
             })
         );
     });
 
-    it("refunds cancelled entries in full", () => {
+    it("refunds what a cancelled order had drawn into the local stockpile", () => {
         const { economy, home, betaHome } = economyWorld();
-        economy.build("alpha", home.id, structure("farm"));
-        economy.build("alpha", home.id, structure("shipyard"));
-        expect(economy.cancel("alpha", home.id, 1).ok).toBe(true);
-        expect(economy.stockpile("alpha")).toEqual(
-            subtractResources(STARTING_STOCKPILE, STRUCTURE_TYPES.farm.cost)
-        );
-        expect(economy.planetEconomy(home.id)?.queue.map((e) => e.item)).toEqual([
-            structure("farm")
-        ]);
-        expect(economy.cancel("alpha", home.id, 5).ok).toBe(false);
-        expect(economy.cancel("alpha", betaHome.id, 0).ok).toBe(false);
-        expect(economy.cancel("alpha", home.id, 0).ok).toBe(true);
-        expect(economy.stockpile("alpha")).toEqual(STARTING_STOCKPILE);
+        const habitat = economy.build("alpha", home.id, structure("habitat"));
+        const orderId = habitat.ok ? habitat.order.id : "";
+        advance(economy, 1);
+        const base = locationIncome({
+            site: "planet",
+            level: HOME_PLANET_LEVEL,
+            installations: []
+        });
+        expect(economy.cancel("alpha", home.id, "nope").ok).toBe(false);
+        expect(economy.cancel("alpha", betaHome.id, orderId).ok).toBe(false);
+        expect(economy.cancel("alpha", home.id, orderId).ok).toBe(true);
+        expect(economy.stockpile(home.id)).toEqual(addResources(STARTING_STOCKPILE, base));
+        expect(economy.locationEconomy(home.id)?.orders).toEqual([]);
+    });
+
+    it("changes an order's priority", () => {
+        const { economy, home } = economyWorld();
+        const result = economy.build("alpha", home.id, structure("habitat"));
+        const orderId = result.ok ? result.order.id : "";
+        expect(economy.setPriority("alpha", home.id, orderId, "low").ok).toBe(true);
+        expect(economy.locationEconomy(home.id)?.orders[0].priority).toBe("low");
+        expect(economy.setPriority("beta", home.id, orderId, "high").ok).toBe(false);
     });
 
     it("colonises an unowned planet with a colony ship on its hex", () => {
@@ -313,15 +355,58 @@ describe("EconomyManager", () => {
         expect(entities.get(colony.id)).toBeUndefined();
         expect(target.sideId).toBe("alpha");
         const state = economy.stateFor("alpha");
-        expect(state.planets.map((p) => p.planetId)).toEqual(["home-a", target.id]);
-        expect(state.planets[1]).toEqual({
-            planetId: target.id,
+        expect(state.locations.map((l) => l.locationId)).toEqual(["home-a", target.id]);
+        expect(state.locations[1]).toEqual({
+            locationId: target.id,
+            site: "planet",
             level: 7,
-            structures: [],
-            queue: []
+            slots: 7,
+            stockpile: { ...zeroResources(), population: SHIP_TYPES.colony_ship.cost.population },
+            installations: [],
+            orders: []
         });
         expect(state).toMatchObject({ shipCount: 2, shipCap: 3 + 1 + Math.floor(7 / 5) });
-        expect(economy.build("alpha", target.id, structure("farm")).ok).toBe(true);
+        expect(economy.build("alpha", target.id, structure("habitat")).ok).toBe(true);
+    });
+
+    it("colonises moons and mineable asteroids but not barren asteroids", () => {
+        const { entities, economy } = economyWorld();
+        const colonyAt = (id: string, q: number, r: number) =>
+            entities.add({ ...makeShip(id, "alpha", q, r), shipType: "colony_ship" as const });
+        const moon = entities.add<EntityOf<"moon">>({
+            id: "moon-free",
+            kind: "moon",
+            sideId: null,
+            systemId: "sys-1",
+            q: 12,
+            r: 5
+        });
+        const rock = entities.add<EntityOf<"large_asteroid">>({
+            id: "rock",
+            kind: "large_asteroid",
+            sideId: null,
+            systemId: "sys-1",
+            q: 13,
+            r: 5
+        });
+        const ore = entities.add<EntityOf<"large_asteroid">>({
+            id: "ore",
+            kind: "large_asteroid",
+            sideId: null,
+            systemId: "sys-1",
+            q: 14,
+            r: 5,
+            mineable: true
+        });
+        expect(economy.colonise("alpha", moon.id, colonyAt("c1", 12, 5).id).ok).toBe(true);
+        expect(economy.colonise("alpha", rock.id, colonyAt("c2", 13, 5).id).ok).toBe(false);
+        expect(economy.colonise("alpha", ore.id, colonyAt("c3", 14, 5).id).ok).toBe(true);
+        expect(economy.locationEconomy(ore.id)).toMatchObject({ site: "asteroid", slots: 2 });
+        expect(economy.build("alpha", ore.id, structure("mine")).ok).toBe(true);
+        expect(economy.build("alpha", ore.id, structure("habitat"))).toEqual({
+            ok: false,
+            error: "Can't be built on an asteroid"
+        });
     });
 
     it("rejects invalid colonise requests", () => {
@@ -353,7 +438,7 @@ describe("EconomyManager", () => {
         entities.move(colony.id, home);
         expect(economy.colonise("alpha", home.id, colony.id)).toEqual({
             ok: false,
-            error: "Planet is already owned"
+            error: "Location is already owned"
         });
         expect(target.sideId).toBeNull();
         expect(entities.get(colony.id)).toBeDefined();
@@ -361,7 +446,7 @@ describe("EconomyManager", () => {
 });
 
 describe("EconomyManager with instantBuild", () => {
-    it("completes structures and spawns ships as soon as they are ordered", () => {
+    it("funds from the stockpile and completes as soon as an order is placed", () => {
         const map = createEmptyMap({ width: 20, height: 20, hexSize: 50, seed: 1 });
         const entities = new EntityManager(map);
         const home = entities.add(makePlanet("home-a", 5, 5, HOME_PLANET_LEVEL, "alpha"));
@@ -371,12 +456,12 @@ describe("EconomyManager with instantBuild", () => {
             kind: "structure",
             structureType: "shipyard"
         });
-        expect(built).toEqual({ ok: true, completed: true });
-        expect(economy.planetEconomy(home.id)).toMatchObject({
-            structures: ["shipyard"],
-            queue: []
+        expect(built).toMatchObject({ ok: true, completed: true });
+        expect(economy.locationEconomy(home.id)).toMatchObject({
+            installations: [{ type: "shipyard" }],
+            orders: []
         });
-        expect(economy.stockpile("alpha")).toEqual(
+        expect(economy.stockpile(home.id)).toEqual(
             subtractResources(STARTING_STOCKPILE, STRUCTURE_TYPES.shipyard.cost)
         );
 
@@ -387,7 +472,7 @@ describe("EconomyManager with instantBuild", () => {
         expect(entities.get(spawned!.id)).toBeDefined();
     });
 
-    it("queues a ship instead when enemy ships occupy the planet", () => {
+    it("keeps a funded ship on order while enemy ships occupy the location", () => {
         const map = createEmptyMap({ width: 20, height: 20, hexSize: 50, seed: 1 });
         const entities = new EntityManager(map);
         const home = entities.add(makePlanet("home-a", 5, 5, HOME_PLANET_LEVEL, "alpha"));
@@ -396,8 +481,8 @@ describe("EconomyManager with instantBuild", () => {
 
         economy.build("alpha", home.id, { kind: "structure", structureType: "shipyard" });
         const result = economy.build("alpha", home.id, { kind: "ship", shipType: "scout" });
-        expect(result).toEqual({ ok: true, completed: false });
-        expect(economy.planetEconomy(home.id)?.queue).toHaveLength(1);
+        expect(result).toMatchObject({ ok: true, completed: false });
+        expect(economy.locationEconomy(home.id)?.orders).toHaveLength(1);
     });
 });
 

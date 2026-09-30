@@ -38,16 +38,26 @@
     letter-spacing: 0.06em;
 }
 
-.resource-bar__item--food .resource-bar__label {
-    color: #8fdc7a;
-}
-
-.resource-bar__item--gold .resource-bar__label {
+.resource-bar__item--money .resource-bar__label {
     color: #ffd166;
 }
 
-.resource-bar__item--resources .resource-bar__label {
+.resource-bar__item--materials .resource-bar__label {
     color: #9fb8ff;
+}
+
+.resource-bar__item--population .resource-bar__label {
+    color: #8fdc7a;
+}
+
+.resource-bar__item--science .resource-bar__label {
+    color: #c9a0ff;
+}
+
+.resource-bar__transit {
+    color: #7f93b5;
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
 }
 
 .resource-bar__value {

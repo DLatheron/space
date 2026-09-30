@@ -11,6 +11,14 @@ import type { ShipTypeDefinition } from "@space/shared-data";
 /** Drawn ship placement: world pixels plus heading in radians (screen space, 0 = east). */
 export type ShipPose = { x: number; y: number; heading: number };
 
+export type MotionSpeeds = Pick<ShipTypeDefinition, "rotationSpeed" | "moveSpeed">;
+
+/**
+ * Supply ships cover 6–10 hexes a turn, so they animate faster than warships:
+ * 180° turn 0.375s + 1 hex 0.25s.
+ */
+export const SUPPLY_SHIP_MOTION: MotionSpeeds = { rotationSpeed: 480, moveSpeed: 4 };
+
 type Segment =
     | { kind: "rotate"; at: Pixel; from: number; delta: number; duration: number }
     | { kind: "move"; from: Pixel; to: Pixel; heading: number; duration: number };
@@ -51,7 +59,7 @@ export class ShipMotion {
      * onto any running animation; a long backlog or a path that doesn't start where
      * the animation ends snaps to the end pose first.
      */
-    enqueue(path: Axial[], hexSize: number, speeds: ShipTypeDefinition, now: number) {
+    enqueue(path: Axial[], hexSize: number, speeds: MotionSpeeds, now: number) {
         if (path.length < 2) return;
         const start = axialToPixel(path[0].q, path[0].r, hexSize);
         const remaining = this._startedAt + this._totalMs - now;

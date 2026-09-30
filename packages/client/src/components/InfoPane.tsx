@@ -1,16 +1,27 @@
 import {
+    GROUND_UNIT_TYPES,
+    resourceUnits,
     SHIP_TYPES,
-    type EntityId,
+    slotsForEntity,
     type EntityKind,
     type EntitySummary
 } from "@space/shared-data";
+import type { GameActions } from "../gameActions.js";
 import { useHexWorldVersion } from "../hooks/index.js";
-import { HexWorld, sideColour, type MapFocus } from "../world/HexWorld.js";
-import { formatNumber } from "./format.js";
+import {
+    HexWorld,
+    isBuildSite,
+    isLocationEntity,
+    isTransport,
+    sideColour,
+    type MapFocus
+} from "../world/HexWorld.js";
+import { formatNumber, formatResources } from "./format.js";
 import "./InfoPane.css";
 
 const KIND_LABELS: Record<EntityKind, string> = {
     ship: "Ship",
+    supply_ship: "Supply ship",
     planet: "Planet",
     moon: "Moon",
     large_asteroid: "Large asteroid",
@@ -24,15 +35,16 @@ const KIND_LABELS: Record<EntityKind, string> = {
 type InfoPaneProps = {
     world: HexWorld;
     onEndTurn: () => void;
-    onColonise: (planetId: EntityId, shipId: EntityId) => void;
+    actions: Pick<GameActions, "colonise" | "invade">;
 };
 
-export function InfoPane({ world, onEndTurn, onColonise }: InfoPaneProps) {
+export function InfoPane({ world, onEndTurn, actions }: InfoPaneProps) {
     useHexWorldVersion(world);
 
     const turn = world.turn;
     const ownReady = world.ownSideReady;
-    const colonisable = world.colonisablePlanet;
+    const colonisable = world.colonisableLocation;
+    const invasion = world.invasionOption;
     const focus = world.mapFocus;
     const sides = Object.entries(turn?.sideReady ?? {}).sort(([a], [b]) => a.localeCompare(b));
 
@@ -61,9 +73,27 @@ export function InfoPane({ world, onEndTurn, onColonise }: InfoPaneProps) {
                     <button
                         type="button"
                         className="info-pane__colonise"
-                        onClick={() => onColonise(colonisable.planet.id, colonisable.ship.id)}
+                        onClick={() =>
+                            actions.colonise(colonisable.location.id, colonisable.ship.id)
+                        }
                     >
-                        Colonise {colonisable.planet.name ?? "planet"}
+                        Colonise{" "}
+                        {colonisable.location.name ?? KIND_LABELS[colonisable.location.kind]}
+                    </button>
+                )}
+                {invasion && (
+                    <button
+                        type="button"
+                        className="info-pane__invade"
+                        title={`Land every unit aboard ${invasion.ships.length} transport${invasion.ships.length === 1 ? "" : "s"} here`}
+                        onClick={() =>
+                            actions.invade(
+                                invasion.location.id,
+                                invasion.ships.map((s) => s.id)
+                            )
+                        }
+                    >
+                        Invade {invasion.location.name ?? KIND_LABELS[invasion.location.kind]}
                     </button>
                 )}
                 <button type="button" onClick={onEndTurn} disabled={ownReady || !turn}>
@@ -97,6 +127,11 @@ function entityTitle(entity: EntitySummary): string {
         return entity.name ?? SHIP_TYPES[entity.shipType].name;
     }
     return entity.name ?? KIND_LABELS[entity.kind];
+}
+
+function entityName(world: HexWorld, id: string): string {
+    const entity = world.findEntityById(id);
+    return entity ? entityTitle(entity) : id;
 }
 
 function FocusBody({ world, focus }: { world: HexWorld; focus: MapFocus }) {
@@ -144,9 +179,22 @@ function FocusBody({ world, focus }: { world: HexWorld; focus: MapFocus }) {
                             .filter((e) => e.id !== entity?.id)
                             .map((e) => (
                                 <li key={e.id}>
-                                    <span className="info-pane__kind">{KIND_LABELS[e.kind]}</span>
-                                    {" · "}
-                                    {entityTitle(e)}
+                                    <button
+                                        type="button"
+                                        className="info-pane__link"
+                                        title="Inspect"
+                                        onClick={() =>
+                                            e.kind === "ship" && e.sideId === world.sideId
+                                                ? world.selectShip(e.id)
+                                                : world.inspectEntity(e.id)
+                                        }
+                                    >
+                                        <span className="info-pane__kind">
+                                            {KIND_LABELS[e.kind]}
+                                        </span>
+                                        {" · "}
+                                        {entityTitle(e)}
+                                    </button>
                                 </li>
                             ))}
                     </ul>
@@ -157,7 +205,19 @@ function FocusBody({ world, focus }: { world: HexWorld; focus: MapFocus }) {
 }
 
 function EntityDetails({ world, entity }: { world: HexWorld; entity: EntitySummary }) {
-    const economy = entity.kind === "planet" ? world.planetEconomy(entity.id) : undefined;
+    const economy = isLocationEntity(entity) ? world.locationEconomy(entity.id) : undefined;
+    const garrison = isLocationEntity(entity)
+        ? economy
+            ? world.garrisonAt(entity.id).length
+            : entity.garrison?.length
+        : undefined;
+    const carried =
+        entity.kind === "ship" && isTransport(entity)
+            ? world.carriedUnitIds(entity).map((id) => world.groundUnit(id))
+            : undefined;
+    const route = entity.kind === "supply_ship" ? world.supplyRoute(entity.id) : [];
+    const routeTurns =
+        entity.kind === "supply_ship" ? Math.ceil(route.length / Math.max(1, entity.speed)) : 0;
 
     return (
         <div className="info-pane__entity">
@@ -199,6 +259,61 @@ function EntityDetails({ world, entity }: { world: HexWorld; entity: EntitySumma
                                 <dd>{formatNumber(entity.hp)}</dd>
                             </div>
                         )}
+                        <div>
+                            <dt>Tier</dt>
+                            <dd>{entity.tier ?? 1}</dd>
+                        </div>
+                        {carried && (
+                            <div>
+                                <dt>Aboard</dt>
+                                <dd>
+                                    {carried.length}/{SHIP_TYPES[entity.shipType].unitCapacity}
+                                    {carried.length > 0 &&
+                                        ` · ${carried
+                                            .map((u) =>
+                                                u ? GROUND_UNIT_TYPES[u.unitType].name : "Unit"
+                                            )
+                                            .join(", ")}`}
+                                </dd>
+                            </div>
+                        )}
+                    </>
+                )}
+                {entity.kind === "supply_ship" && (
+                    <>
+                        <div>
+                            <dt>From</dt>
+                            <dd>{entityName(world, entity.originId)}</dd>
+                        </div>
+                        <div>
+                            <dt>To</dt>
+                            <dd>{entityName(world, entity.destinationId)}</dd>
+                        </div>
+                        <div>
+                            <dt>Cargo</dt>
+                            <dd>
+                                {formatResources(entity.cargo, "Empty")}
+                                <span className="info-pane__muted-inline">
+                                    {" "}
+                                    ({formatNumber(resourceUnits(entity.cargo))}/
+                                    {formatNumber(entity.capacity)})
+                                </span>
+                            </dd>
+                        </div>
+                        <div>
+                            <dt>Speed</dt>
+                            <dd>{entity.speed} hexes/turn</dd>
+                        </div>
+                        {entity.sideId === world.sideId && (
+                            <div>
+                                <dt>Route</dt>
+                                <dd>
+                                    {route.length
+                                        ? `${route.length} hex${route.length === 1 ? "" : "es"} · ~${routeTurns} turn${routeTurns === 1 ? "" : "s"}`
+                                        : "Waiting for a clear route"}
+                                </dd>
+                            </div>
+                        )}
                     </>
                 )}
                 {entity.kind === "planet" && (
@@ -211,21 +326,33 @@ function EntityDetails({ world, entity }: { world: HexWorld; entity: EntitySumma
                             <dt>System</dt>
                             <dd className="info-pane__mono">{entity.systemId}</dd>
                         </div>
-                        {economy && (
-                            <>
-                                <div>
-                                    <dt>Structures</dt>
-                                    <dd>
-                                        {economy.structures.length}/{entity.level}
-                                    </dd>
-                                </div>
-                                <div>
-                                    <dt>Build queue</dt>
-                                    <dd>{economy.queue.length}</dd>
-                                </div>
-                            </>
-                        )}
                     </>
+                )}
+                {economy && isBuildSite(entity) && (
+                    <>
+                        <div>
+                            <dt>Installations</dt>
+                            <dd>
+                                {economy.installations.length}/{slotsForEntity(entity)}
+                            </dd>
+                        </div>
+                        <div>
+                            <dt>Orders</dt>
+                            <dd>{economy.orders.length}</dd>
+                        </div>
+                        <div>
+                            <dt>Stockpile</dt>
+                            <dd>{formatResources(economy.stockpile, "Empty")}</dd>
+                        </div>
+                    </>
+                )}
+                {garrison !== undefined && garrison > 0 && (
+                    <div>
+                        <dt>Garrison</dt>
+                        <dd>
+                            {garrison} unit{garrison === 1 ? "" : "s"}
+                        </dd>
+                    </div>
                 )}
                 {(entity.kind === "moon" || entity.kind === "large_asteroid") && (
                     <div>

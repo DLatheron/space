@@ -58,6 +58,8 @@ export type GeneratedGalaxy = {
     map: SpaceMap;
     entities: EntityManager;
     systems: StarSystem[];
+    /** Each side's home planet, which starts with `STARTING_STOCKPILE`. */
+    homePlanets: Partial<Record<SideId, EntityId>>;
 };
 
 type GenContext = {
@@ -395,8 +397,9 @@ function placeStartingFleets(
     ctx: GenContext,
     systems: StarSystem[],
     planetsBySystem: Map<SystemId, EntityOf<"planet">[]>
-): void {
+): Partial<Record<SideId, EntityId>> {
     const { entities, newId } = ctx;
+    const homes: Partial<Record<SideId, EntityId>> = {};
 
     for (const system of systems) {
         const sideId = system.homeSideId;
@@ -421,6 +424,7 @@ function placeStartingFleets(
         home.sideId = sideId;
         home.name = `${sideId.charAt(0).toUpperCase()}${sideId.slice(1)} Prime`;
         home.level = HOME_PLANET_LEVEL;
+        homes[sideId] = home.id;
 
         for (let i = 0; i < STARTING_SHIP_TYPES.length; i++) {
             const shipType = STARTING_SHIP_TYPES[i];
@@ -443,6 +447,7 @@ function placeStartingFleets(
             });
         }
     }
+    return homes;
 }
 
 /**
@@ -491,7 +496,7 @@ export function generateSpaceMap(options: {
 
     placeHyperspaceTunnels(ctx, systems);
     placeDeepSpaceHazards(ctx, systems);
-    placeStartingFleets(ctx, systems, planetsBySystem);
+    const homePlanets = placeStartingFleets(ctx, systems, planetsBySystem);
 
-    return { map, entities, systems };
+    return { map, entities, systems, homePlanets };
 }

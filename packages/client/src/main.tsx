@@ -16,7 +16,7 @@ const router = createBrowserRouter([
         element: <App />,
         children: [
             {
-                path: "planet/:planetId",
+                path: "location/:locationId",
                 element: <PlanetPage />
             }
         ]

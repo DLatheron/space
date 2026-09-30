@@ -11,7 +11,10 @@ import {
 } from "@space/shared-data";
 import type { EntityManager } from "./EntityManager.js";
 import { findTileByAxial, forEachTile, tileKey } from "./map/SpaceMap.js";
-import { entityToSummary } from "./map/types.js";
+import { entityToSummary, type Entity } from "./map/types.js";
+
+/** Supply ships see only their own and neighbouring hexes. */
+export const DEFAULT_SUPPLY_VISION_RANGE = 1;
 
 export type VisibilityDiff = {
     /** Hexes that became visible. */
@@ -76,26 +79,45 @@ export class Side {
             const key = tileKey(tile);
             this._explored.add(key);
             if (!this._visible.has(key)) {
-                this._memory.set(key, entities.entitiesAt(tile.q, tile.r).map(entityToSummary));
+                this._memory.set(
+                    key,
+                    entities.entitiesAt(tile.q, tile.r).map((e) => this.summarize(e))
+                );
             }
         });
     }
 
     /**
-     * Recompute visibility from this side's ships and planets, refresh memory of visible
-     * hexes and scrub stale sightings of entities whose position is now known.
+     * Recompute visibility from this side's ships, supply ships and owned locations, refresh
+     * memory of visible hexes and scrub stale sightings of entities whose position is now known.
      */
-    recomputeVisibility(entities: EntityManager, visionRange: number): VisibilityDiff {
+    recomputeVisibility(
+        entities: EntityManager,
+        visionRange: number,
+        supplyVisionRange = DEFAULT_SUPPLY_VISION_RANGE
+    ): VisibilityDiff {
         const { map } = entities;
         const nextVisible = new Set<HexKey>();
         const ownShips = entities.ofKind("ship").filter((ship) => ship.sideId === this.id);
+        const ownSupply = entities.ofKind("supply_ship").filter((s) => s.sideId === this.id);
 
         if (this.fullVisibility) {
             forEachTile(map, (tile) => nextVisible.add(tileKey(tile)));
         } else {
-            const ownPlanets = entities.ofKind("planet").filter((p) => p.sideId === this.id);
-            for (const source of [...ownShips, ...ownPlanets]) {
-                for (const hex of axialRange(source, visionRange)) {
+            const ownLocations = [
+                ...entities.ofKind("planet"),
+                ...entities.ofKind("moon"),
+                ...entities.ofKind("large_asteroid")
+            ].filter((l) => l.sideId === this.id);
+            const sources: [AxialCoord, number][] = [
+                ...[...ownShips, ...ownLocations].map((s): [AxialCoord, number] => [
+                    s,
+                    visionRange
+                ]),
+                ...ownSupply.map((s): [AxialCoord, number] => [s, supplyVisionRange])
+            ];
+            for (const [source, range] of sources) {
+                for (const hex of axialRange(source, range)) {
                     if (findTileByAxial(map, hex.q, hex.r)) {
                         nextVisible.add(axialKey(hex.q, hex.r));
                     }
@@ -112,11 +134,11 @@ export class Side {
             this._visible.add(key);
             this._explored.add(key);
             const { q, r } = parseAxialKey(key);
-            const summaries = entities.entitiesAt(q, r).map(entityToSummary);
+            const summaries = entities.entitiesAt(q, r).map((e) => this.summarize(e));
             this._memory.set(key, summaries);
             for (const summary of summaries) knownPositions.set(summary.id, key);
         }
-        for (const ship of ownShips) {
+        for (const ship of [...ownShips, ...ownSupply]) {
             knownPositions.set(ship.id, axialKey(ship.q, ship.r));
         }
 
@@ -164,7 +186,7 @@ export class Side {
                 q,
                 r,
                 fog: "visible",
-                entities: entities.entitiesAt(q, r).map(entityToSummary)
+                entities: entities.entitiesAt(q, r).map((e) => this.summarize(e))
             };
         }
         return { q, r, fog: "explored", entities: this._memory.get(key) ?? [] };
@@ -218,6 +240,18 @@ export class Side {
         return hexHasObstacle(this._memory.get(key) ?? []);
     }
 
+    /**
+     * Whether this side believes `hex` holds enemy ships (supply ships don't count): live
+     * contents when visible, remembered contents when explored, and none when unexplored.
+     */
+    knowsEnemyAt(entities: EntityManager, hex: AxialCoord): boolean {
+        const key = axialKey(hex.q, hex.r);
+        const known = this._visible.has(key)
+            ? entities.entitiesAt(hex.q, hex.r)
+            : (this._memory.get(key) ?? []);
+        return known.some((e) => e.kind === "ship" && e.sideId !== this.id);
+    }
+
     /** Whether every hex in `hexes` is currently visible to this side. */
     seesAll(hexes: Iterable<AxialCoord>): boolean {
         for (const hex of hexes) {
@@ -228,5 +262,14 @@ export class Side {
 
     visibleKeys(): HexKey[] {
         return Array.from(this._visible);
+    }
+
+    /** Wire snapshot as this side may see it: other sides' supply routes and reservations are hidden. */
+    summarize(entity: Entity): EntitySummary {
+        const summary = entityToSummary(entity);
+        if (summary.kind !== "supply_ship" || summary.sideId === this.id) return summary;
+        const redacted = { ...summary, reservedFor: [] };
+        delete redacted.route;
+        return redacted;
     }
 }
