@@ -11,5 +11,249 @@
     "instantBuild": false,
     "supplySpeed": 6,
     "supplyCapacity": 100,
-    "supplyVisionRange": 1
+    "supplyVisionRange": 1,
+    "economy": {
+        "stockpileCaps": {
+            "default": { "money": 100, "materials": 100, "population": 100, "science": 100 },
+            "home": { "money": 2000, "materials": 2000, "population": 500, "science": 500 }
+        },
+        "storageStructures": {
+            "vault": {
+                "cost": { "money": 50, "materials": 100, "population": 5, "science": 0 },
+                "buildTurns": 2,
+                "sites": ["planet", "moon"],
+                "slots": 1,
+                "capBonus": { "money": 200, "materials": 0, "population": 0, "science": 0 },
+                "pillageProtection": 0.5,
+                "maxTier": 3
+            },
+            "depot": {
+                "cost": { "money": 100, "materials": 50, "population": 5, "science": 0 },
+                "buildTurns": 2,
+                "sites": ["planet", "moon", "asteroid"],
+                "slots": 1,
+                "capBonus": { "money": 0, "materials": 200, "population": 0, "science": 0 },
+                "pillageProtection": 0.5,
+                "maxTier": 3
+            },
+            "archive": {
+                "cost": { "money": 100, "materials": 100, "population": 5, "science": 0 },
+                "buildTurns": 2,
+                "sites": ["planet", "moon"],
+                "slots": 1,
+                "capBonus": { "money": 0, "materials": 0, "population": 0, "science": 150 },
+                "pillageProtection": 0.5,
+                "maxTier": 3
+            },
+            "quarters": {
+                "cost": { "money": 100, "materials": 100, "population": 0, "science": 0 },
+                "buildTurns": 2,
+                "sites": ["planet", "moon"],
+                "slots": 1,
+                "capBonus": { "money": 0, "materials": 0, "population": 150, "science": 0 },
+                "pillageProtection": 0.5,
+                "maxTier": 3
+            },
+            "warehouse": {
+                "cost": { "money": 100, "materials": 150, "population": 5, "science": 0 },
+                "buildTurns": 3,
+                "sites": ["planet", "moon", "asteroid"],
+                "slots": 1,
+                "capBonus": { "money": 75, "materials": 75, "population": 50, "science": 50 },
+                "pillageProtection": 0.2,
+                "maxTier": 3
+            }
+        },
+        "buildSlots": {
+            "base": { "ships": 0, "installations": 1, "groundUnits": 0, "research": 0 },
+            "structures": {
+                "shipyard": { "ships": 1 },
+                "advanced_shipyard": { "ships": 1 },
+                "barracks": { "groundUnits": 1 },
+                "science_academy": { "research": 1 }
+            }
+        },
+        "startingStockpile": {
+            "money": 1000,
+            "materials": 1000,
+            "population": 200,
+            "science": 100
+        },
+        "startingShips": ["scout", "frigate"],
+        "planetBaseIncomePerLevel": { "money": 5, "materials": 5, "population": 2, "science": 1 },
+        "structureTierOutput": [1, 1.5, 2],
+        "enhancementCostFactor": { "2": 0.5, "3": 1 },
+        "structures": {
+            "habitat": {
+                "cost": { "money": 50, "materials": 100, "population": 0, "science": 0 },
+                "buildTurns": 2,
+                "sites": ["planet", "moon"],
+                "requires": [],
+                "requiresTech": null,
+                "produces": { "money": 0, "materials": 0, "population": 10, "science": 0 },
+                "shipCapBonus": 0,
+                "unique": false,
+                "slots": 1,
+                "maxTier": 3
+            },
+            "mine": {
+                "cost": { "money": 100, "materials": 0, "population": 10, "science": 0 },
+                "buildTurns": 2,
+                "sites": ["planet", "moon", "asteroid"],
+                "requires": [],
+                "requiresTech": null,
+                "produces": { "money": 0, "materials": 40, "population": 0, "science": 0 },
+                "shipCapBonus": 0,
+                "unique": false,
+                "slots": 1,
+                "maxTier": 3
+            },
+            "trade_hub": {
+                "cost": { "money": 0, "materials": 100, "population": 10, "science": 0 },
+                "buildTurns": 2,
+                "sites": ["planet", "moon"],
+                "requires": [],
+                "requiresTech": null,
+                "produces": { "money": 40, "materials": 0, "population": 0, "science": 0 },
+                "shipCapBonus": 0,
+                "unique": false,
+                "slots": 1,
+                "maxTier": 3
+            },
+            "shipyard": {
+                "cost": { "money": 150, "materials": 200, "population": 20, "science": 0 },
+                "buildTurns": 3,
+                "sites": ["planet"],
+                "requires": [],
+                "requiresTech": null,
+                "produces": { "money": 0, "materials": 0, "population": 0, "science": 0 },
+                "shipCapBonus": 0,
+                "unique": true,
+                "slots": 1,
+                "maxTier": 1
+            },
+            "advanced_shipyard": {
+                "cost": { "money": 250, "materials": 300, "population": 30, "science": 0 },
+                "buildTurns": 4,
+                "sites": ["planet"],
+                "requires": ["shipyard"],
+                "requiresTech": "advanced_shipyard",
+                "produces": { "money": 0, "materials": 0, "population": 0, "science": 0 },
+                "shipCapBonus": 0,
+                "unique": true,
+                "slots": 1,
+                "maxTier": 1
+            },
+            "docks": {
+                "cost": { "money": 100, "materials": 150, "population": 10, "science": 0 },
+                "buildTurns": 2,
+                "sites": ["planet"],
+                "requires": ["shipyard"],
+                "requiresTech": null,
+                "produces": { "money": 0, "materials": 0, "population": 0, "science": 0 },
+                "shipCapBonus": 1,
+                "unique": false,
+                "slots": 1,
+                "maxTier": 1
+            },
+            "science_academy": {
+                "cost": { "money": 200, "materials": 150, "population": 20, "science": 0 },
+                "buildTurns": 3,
+                "sites": ["planet"],
+                "requires": [],
+                "requiresTech": null,
+                "produces": { "money": 0, "materials": 0, "population": 0, "science": 20 },
+                "shipCapBonus": 0,
+                "unique": true,
+                "slots": 1,
+                "maxTier": 3
+            },
+            "barracks": {
+                "cost": { "money": 100, "materials": 150, "population": 10, "science": 0 },
+                "buildTurns": 2,
+                "sites": ["planet", "moon"],
+                "requires": [],
+                "requiresTech": "ground_forces",
+                "produces": { "money": 0, "materials": 0, "population": 0, "science": 0 },
+                "shipCapBonus": 0,
+                "unique": true,
+                "slots": 1,
+                "maxTier": 1
+            }
+        },
+        "ships": {
+            "scout": {
+                "cost": { "money": 100, "materials": 100, "population": 5, "science": 0 },
+                "buildTurns": 2,
+                "maxMovementPoints": 5,
+                "hp": 6,
+                "requires": ["shipyard"],
+                "requiresTech": null,
+                "maxTier": 3,
+                "unitCapacity": 0,
+                "canColonise": false
+            },
+            "frigate": {
+                "cost": { "money": 200, "materials": 300, "population": 15, "science": 0 },
+                "buildTurns": 3,
+                "maxMovementPoints": 3,
+                "hp": 12,
+                "requires": ["advanced_shipyard"],
+                "requiresTech": null,
+                "maxTier": 3,
+                "unitCapacity": 0,
+                "canColonise": false
+            },
+            "colony_ship": {
+                "cost": { "money": 200, "materials": 200, "population": 50, "science": 0 },
+                "buildTurns": 3,
+                "maxMovementPoints": 2,
+                "hp": 4,
+                "requires": ["shipyard"],
+                "requiresTech": null,
+                "maxTier": 1,
+                "unitCapacity": 0,
+                "canColonise": true
+            },
+            "transport": {
+                "cost": { "money": 100, "materials": 150, "population": 5, "science": 0 },
+                "buildTurns": 2,
+                "maxMovementPoints": 3,
+                "hp": 8,
+                "requires": ["shipyard"],
+                "requiresTech": "transports",
+                "maxTier": 3,
+                "unitCapacity": 4,
+                "canColonise": false
+            }
+        },
+        "shipTiers": {
+            "hpMultiplier": [1, 1.5, 2],
+            "movementBonus": [0, 0, 1]
+        },
+        "groundUnits": {
+            "infantry": {
+                "cost": { "money": 50, "materials": 30, "population": 20, "science": 0 },
+                "buildTurns": 2,
+                "attack": 2,
+                "defence": 3,
+                "requires": ["barracks"],
+                "requiresTech": "ground_forces",
+                "maxTier": 3
+            },
+            "armour": {
+                "cost": { "money": 120, "materials": 150, "population": 10, "science": 0 },
+                "buildTurns": 3,
+                "attack": 5,
+                "defence": 4,
+                "requires": ["barracks"],
+                "requiresTech": "ground_forces",
+                "maxTier": 3
+            }
+        },
+        "groundUnitTiers": {
+            "attackBonus": [0, 1, 2],
+            "defenceBonus": [0, 1, 2]
+        }
+    }
 }

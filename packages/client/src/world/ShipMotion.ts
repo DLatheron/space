@@ -6,12 +6,12 @@ import {
     type Axial,
     type Pixel
 } from "@space/maths";
-import type { ShipTypeDefinition } from "@space/shared-data";
+import type { ShipTypeInfo } from "@space/shared-data";
 
 /** Drawn ship placement: world pixels plus heading in radians (screen space, 0 = east). */
 export type ShipPose = { x: number; y: number; heading: number };
 
-export type MotionSpeeds = Pick<ShipTypeDefinition, "rotationSpeed" | "moveSpeed">;
+export type MotionSpeeds = Pick<ShipTypeInfo, "rotationSpeed" | "moveSpeed">;
 
 /**
  * Supply ships cover 6–10 hexes a turn, so they animate faster than warships:

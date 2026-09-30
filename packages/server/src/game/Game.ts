@@ -96,7 +96,8 @@ export class Game {
             height: config.mapHeight,
             hexSize: config.hexPointToPoint / 2,
             seed,
-            sideIds: DEFAULT_SIDE_IDS
+            sideIds: DEFAULT_SIDE_IDS,
+            balance: config.economy
         });
         this._map = galaxy.map;
         this._entities = galaxy.entities;
@@ -107,6 +108,7 @@ export class Game {
         });
         this._economy = new EconomyManager(this._entities, this._sides.keys(), {
             instantBuild: config.instantBuild,
+            balance: config.economy,
             research,
             homes: galaxy.homePlanets
         });
@@ -421,7 +423,7 @@ export class Game {
             }
             for (const arrival of supply.arrivals) {
                 touched.push(axialKey(arrival.at.q, arrival.at.r));
-                removed.push(arrival.supplyShipId);
+                if (!arrival.waiting) removed.push(arrival.supplyShipId);
             }
         }
         // Ship hexes (spawns included) are resent so clients see restored MP.
@@ -671,7 +673,8 @@ export class Game {
                 turn: this._turns.state(),
                 battles: this._battles.involving(side.id),
                 groundBattles: this._ground.involving(side.id),
-                economy: this._economy.stateFor(side.id)
+                economy: this._economy.stateFor(side.id),
+                balance: this._economy.balance
             }
         });
     }

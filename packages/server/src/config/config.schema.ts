@@ -1,8 +1,439 @@
 import { LogLevel } from "@space/misc";
+import {
+    BuildSlots,
+    ShipType,
+    StructureSite,
+    StructureType,
+    TechId,
+    type EconomyBalance,
+    type GroundUnitBalance,
+    type Resources,
+    type ShipBalance,
+    type StorageStructureBalance,
+    type StructureBalance
+} from "@space/shared-data";
 import { readFileSync } from "fs";
 import z from "zod";
 
-const Config = z
+/** Each resource may be given on its own; the rest take their defaults. */
+function resources(defaults: Resources) {
+    return z
+        .object({
+            money: z.number().min(0).default(defaults.money),
+            materials: z.number().min(0).default(defaults.materials),
+            population: z.number().min(0).default(defaults.population),
+            science: z.number().min(0).default(defaults.science)
+        })
+        .strict()
+        .prefault({});
+}
+
+function storageStructure(defaults: StorageStructureBalance) {
+    return z
+        .object({
+            cost: resources(defaults.cost),
+            buildTurns: z.int().positive().default(defaults.buildTurns),
+            sites: z
+                .array(StructureSite)
+                .min(1)
+                .default(() => [...defaults.sites]),
+            /** Structure slots it occupies. */
+            slots: z.int().min(0).default(defaults.slots),
+            /** Cap increase at tier 1; tiers 2 and 3 give 1.5x and 2x. */
+            capBonus: resources(defaults.capBonus),
+            /** Share of the stockpile protected from pillage (0-1). Stored for ground-war pillage; not used yet. */
+            pillageProtection: z.number().min(0).max(1).default(defaults.pillageProtection),
+            /** Highest enhancement tier (1-3); 1 means it can't be upgraded. */
+            maxTier: z.int().min(1).max(3).default(defaults.maxTier)
+        })
+        .strict()
+        .prefault({});
+}
+
+const maxTier = (defaultTier: number) => z.int().min(1).max(3).default(defaultTier);
+const requires = (defaults: StructureType[]) => z.array(StructureType).default(() => [...defaults]);
+/** `null` means no tech is needed. */
+const requiresTech = (defaultTech: TechId | null) => TechId.nullable().default(defaultTech);
+/** Tier 1, 2 and 3 values; replaced as a whole. */
+function perTier(value: z.ZodNumber, [t1, t2, t3]: [number, number, number]) {
+    const defaults = (): [number, number, number] => [t1, t2, t3];
+    return z.tuple([value, value, value]).default(defaults);
+}
+
+function structure(defaults: StructureBalance) {
+    return z
+        .object({
+            cost: resources(defaults.cost),
+            buildTurns: z.int().positive().default(defaults.buildTurns),
+            sites: z
+                .array(StructureSite)
+                .min(1)
+                .default(() => [...defaults.sites]),
+            /** Structures that must already be built at the same location. */
+            requires: requires(defaults.requires),
+            requiresTech: requiresTech(defaults.requiresTech),
+            /** Per-turn output at tier 1, scaled by `structureTierOutput`. */
+            produces: resources(defaults.produces),
+            /** Added to the side's ship cap per installation. */
+            shipCapBonus: z.int().min(0).default(defaults.shipCapBonus),
+            /** At most one per location. */
+            unique: z.boolean().default(defaults.unique),
+            /** Structure slots it occupies. */
+            slots: z.int().min(0).default(defaults.slots),
+            maxTier: maxTier(defaults.maxTier)
+        })
+        .strict()
+        .prefault({});
+}
+
+function ship(defaults: ShipBalance) {
+    return z
+        .object({
+            /** `population` is the crew, returned home when the ship is lost. */
+            cost: resources(defaults.cost),
+            buildTurns: z.int().positive().default(defaults.buildTurns),
+            /** At tier 1; `shipTiers.movementBonus` adds to it. */
+            maxMovementPoints: z.int().min(0).default(defaults.maxMovementPoints),
+            /** At tier 1; `shipTiers.hpMultiplier` scales it. */
+            hp: z.int().positive().default(defaults.hp),
+            /** Structures the building planet needs. */
+            requires: requires(defaults.requires),
+            requiresTech: requiresTech(defaults.requiresTech),
+            maxTier: maxTier(defaults.maxTier),
+            /** Ground units it can carry; 0 for none. */
+            unitCapacity: z.int().min(0).default(defaults.unitCapacity),
+            canColonise: z.boolean().default(defaults.canColonise)
+        })
+        .strict()
+        .prefault({});
+}
+
+function groundUnit(defaults: GroundUnitBalance) {
+    return z
+        .object({
+            cost: resources(defaults.cost),
+            buildTurns: z.int().positive().default(defaults.buildTurns),
+            /** At tier 1; `groundUnitTiers.attackBonus` adds to it. */
+            attack: z.int().min(0).default(defaults.attack),
+            /** At tier 1; `groundUnitTiers.defenceBonus` adds to it. */
+            defence: z.int().min(0).default(defaults.defence),
+            /** Structures the training location needs. */
+            requires: requires(defaults.requires),
+            requiresTech: requiresTech(defaults.requiresTech),
+            maxTier: maxTier(defaults.maxTier)
+        })
+        .strict()
+        .prefault({});
+}
+
+const NO_RESOURCES: Resources = { money: 0, materials: 0, population: 0, science: 0 };
+
+const STRUCTURE_DEFAULTS = {
+    requires: [],
+    requiresTech: null,
+    produces: NO_RESOURCES,
+    shipCapBonus: 0,
+    unique: false,
+    slots: 1
+} satisfies Partial<StructureBalance>;
+
+const SHIP_DEFAULTS = {
+    requires: ["shipyard"],
+    requiresTech: null,
+    unitCapacity: 0,
+    canColonise: false
+} satisfies Partial<ShipBalance>;
+
+const DEFAULT_STRUCTURE_BUILD_SLOTS: EconomyBalance["buildSlots"]["structures"] = {
+    shipyard: { ships: 1 },
+    advanced_shipyard: { ships: 1 },
+    barracks: { groundUnits: 1 },
+    science_academy: { research: 1 }
+};
+
+/** Economy balance; sent to clients in `server:map:init`. */
+export const EconomyBalanceConfig = z
+    .object({
+        /** Local stockpile at each side's home planet at game start (clamped to the home cap). */
+        startingStockpile: resources({
+            money: 1000,
+            materials: 1000,
+            population: 200,
+            science: 100
+        }),
+        /** Ships each side starts with next to its home planet. */
+        startingShips: z.array(ShipType).default((): ShipType[] => ["scout", "frigate"]),
+        /** Per-turn income per planet level at every owned planet (not moons or asteroids). */
+        planetBaseIncomePerLevel: resources({ money: 5, materials: 5, population: 2, science: 1 }),
+        /** Installation output and storage cap bonus multiplier at tiers 1, 2 and 3. */
+        structureTierOutput: perTier(z.number().min(0), [1, 1.5, 2]),
+        /** Enhancement cost as a fraction of the target's base cost (never population), by tier reached. */
+        enhancementCostFactor: z
+            .object({
+                "2": z.number().min(0).default(0.5),
+                "3": z.number().min(0).default(1)
+            })
+            .strict()
+            .prefault({}),
+        /** Installations other than storage (see `storageStructures`). */
+        structures: z
+            .object({
+                habitat: structure({
+                    ...STRUCTURE_DEFAULTS,
+                    cost: { money: 50, materials: 100, population: 0, science: 0 },
+                    buildTurns: 2,
+                    sites: ["planet", "moon"],
+                    produces: { ...NO_RESOURCES, population: 10 },
+                    maxTier: 3
+                }),
+                mine: structure({
+                    ...STRUCTURE_DEFAULTS,
+                    cost: { money: 100, materials: 0, population: 10, science: 0 },
+                    buildTurns: 2,
+                    sites: ["planet", "moon", "asteroid"],
+                    produces: { ...NO_RESOURCES, materials: 40 },
+                    maxTier: 3
+                }),
+                trade_hub: structure({
+                    ...STRUCTURE_DEFAULTS,
+                    cost: { money: 0, materials: 100, population: 10, science: 0 },
+                    buildTurns: 2,
+                    sites: ["planet", "moon"],
+                    produces: { ...NO_RESOURCES, money: 40 },
+                    maxTier: 3
+                }),
+                shipyard: structure({
+                    ...STRUCTURE_DEFAULTS,
+                    cost: { money: 150, materials: 200, population: 20, science: 0 },
+                    buildTurns: 3,
+                    sites: ["planet"],
+                    unique: true,
+                    maxTier: 1
+                }),
+                advanced_shipyard: structure({
+                    ...STRUCTURE_DEFAULTS,
+                    cost: { money: 250, materials: 300, population: 30, science: 0 },
+                    buildTurns: 4,
+                    sites: ["planet"],
+                    requires: ["shipyard"],
+                    requiresTech: "advanced_shipyard",
+                    unique: true,
+                    maxTier: 1
+                }),
+                docks: structure({
+                    ...STRUCTURE_DEFAULTS,
+                    cost: { money: 100, materials: 150, population: 10, science: 0 },
+                    buildTurns: 2,
+                    sites: ["planet"],
+                    requires: ["shipyard"],
+                    shipCapBonus: 1,
+                    maxTier: 1
+                }),
+                science_academy: structure({
+                    ...STRUCTURE_DEFAULTS,
+                    cost: { money: 200, materials: 150, population: 20, science: 0 },
+                    buildTurns: 3,
+                    sites: ["planet"],
+                    produces: { ...NO_RESOURCES, science: 20 },
+                    unique: true,
+                    maxTier: 3
+                }),
+                barracks: structure({
+                    ...STRUCTURE_DEFAULTS,
+                    cost: { money: 100, materials: 150, population: 10, science: 0 },
+                    buildTurns: 2,
+                    sites: ["planet", "moon"],
+                    requiresTech: "ground_forces",
+                    unique: true,
+                    maxTier: 1
+                })
+            })
+            .strict()
+            .prefault({}),
+        ships: z
+            .object({
+                scout: ship({
+                    ...SHIP_DEFAULTS,
+                    cost: { money: 100, materials: 100, population: 5, science: 0 },
+                    buildTurns: 2,
+                    maxMovementPoints: 5,
+                    hp: 6,
+                    maxTier: 3
+                }),
+                frigate: ship({
+                    ...SHIP_DEFAULTS,
+                    cost: { money: 200, materials: 300, population: 15, science: 0 },
+                    buildTurns: 3,
+                    maxMovementPoints: 3,
+                    hp: 12,
+                    requires: ["advanced_shipyard"],
+                    maxTier: 3
+                }),
+                colony_ship: ship({
+                    ...SHIP_DEFAULTS,
+                    cost: { money: 200, materials: 200, population: 50, science: 0 },
+                    buildTurns: 3,
+                    maxMovementPoints: 2,
+                    hp: 4,
+                    maxTier: 1,
+                    canColonise: true
+                }),
+                transport: ship({
+                    ...SHIP_DEFAULTS,
+                    cost: { money: 100, materials: 150, population: 5, science: 0 },
+                    buildTurns: 2,
+                    maxMovementPoints: 3,
+                    hp: 8,
+                    requiresTech: "transports",
+                    maxTier: 3,
+                    unitCapacity: 4
+                })
+            })
+            .strict()
+            .prefault({}),
+        /** Ship stat changes at tiers 1, 2 and 3: hp is multiplied (rounded up), movement added. */
+        shipTiers: z
+            .object({
+                hpMultiplier: perTier(z.number().positive(), [1, 1.5, 2]),
+                movementBonus: perTier(z.int(), [0, 0, 1])
+            })
+            .strict()
+            .prefault({}),
+        groundUnits: z
+            .object({
+                infantry: groundUnit({
+                    cost: { money: 50, materials: 30, population: 20, science: 0 },
+                    buildTurns: 2,
+                    attack: 2,
+                    defence: 3,
+                    requires: ["barracks"],
+                    requiresTech: "ground_forces",
+                    maxTier: 3
+                }),
+                armour: groundUnit({
+                    cost: { money: 120, materials: 150, population: 10, science: 0 },
+                    buildTurns: 3,
+                    attack: 5,
+                    defence: 4,
+                    requires: ["barracks"],
+                    requiresTech: "ground_forces",
+                    maxTier: 3
+                })
+            })
+            .strict()
+            .prefault({}),
+        /** Added to ground unit attack and defence at tiers 1, 2 and 3. */
+        groundUnitTiers: z
+            .object({
+                attackBonus: perTier(z.int(), [0, 1, 2]),
+                defenceBonus: perTier(z.int(), [0, 1, 2])
+            })
+            .strict()
+            .prefault({}),
+        stockpileCaps: z
+            .object({
+                /** Per-resource cap on every location's stockpile, before storage installations. */
+                default: resources({ money: 100, materials: 50, population: 50, science: 50 }),
+                /**
+                 * Base cap at each side's home planet. It should hold the starting stockpile
+                 * (1000 money, 1000 materials, 200 population, 100 science); anything over
+                 * it is clamped away at game start.
+                 */
+                home: resources({ money: 2000, materials: 2000, population: 500, science: 500 })
+            })
+            .strict()
+            .prefault({}),
+        /** Storage installations that raise stockpile caps. */
+        storageStructures: z
+            .object({
+                vault: storageStructure({
+                    cost: { money: 50, materials: 100, population: 5, science: 0 },
+                    buildTurns: 2,
+                    sites: ["planet", "moon"],
+                    slots: 1,
+                    capBonus: { ...NO_RESOURCES, money: 200 },
+                    pillageProtection: 0.5,
+                    maxTier: 3
+                }),
+                depot: storageStructure({
+                    cost: { money: 100, materials: 50, population: 5, science: 0 },
+                    buildTurns: 2,
+                    sites: ["planet", "moon", "asteroid"],
+                    slots: 1,
+                    capBonus: { ...NO_RESOURCES, materials: 200 },
+                    pillageProtection: 0.5,
+                    maxTier: 3
+                }),
+                archive: storageStructure({
+                    cost: { money: 100, materials: 100, population: 5, science: 0 },
+                    buildTurns: 2,
+                    sites: ["planet", "moon"],
+                    slots: 1,
+                    capBonus: { ...NO_RESOURCES, science: 150 },
+                    pillageProtection: 0.5,
+                    maxTier: 3
+                }),
+                quarters: storageStructure({
+                    cost: { money: 100, materials: 100, population: 0, science: 0 },
+                    buildTurns: 2,
+                    sites: ["planet", "moon"],
+                    slots: 1,
+                    capBonus: { ...NO_RESOURCES, population: 150 },
+                    pillageProtection: 0.5,
+                    maxTier: 3
+                }),
+                warehouse: storageStructure({
+                    cost: { money: 100, materials: 150, population: 5, science: 0 },
+                    buildTurns: 3,
+                    sites: ["planet", "moon", "asteroid"],
+                    slots: 1,
+                    capBonus: { money: 75, materials: 75, population: 50, science: 50 },
+                    pillageProtection: 0.2,
+                    maxTier: 3
+                })
+            })
+            .strict()
+            .prefault({}),
+        /**
+         * Orders each location runs at once per category (ships, installations, groundUnits,
+         * research). Orders over the limit wait unfunded, with no supply demand, until a slot
+         * frees up; active orders are picked by priority, then age.
+         */
+        buildSlots: z
+            .object({
+                base: z
+                    .object({
+                        ships: z.int().min(0).default(0),
+                        installations: z.int().min(0).default(1),
+                        groundUnits: z.int().min(0).default(0),
+                        research: z.int().min(0).default(0)
+                    })
+                    .strict()
+                    .prefault({}),
+                /**
+                 * Slots added per built installation of a type. Merged over the defaults
+                 * (Shipyard +1 ship, Advanced Shipyard +1 ship, Barracks +1 ground unit,
+                 * Science Academy +1 research); set a category to 0 to remove one.
+                 */
+                structures: z
+                    .partialRecord(StructureType, BuildSlots.partial().strict())
+                    .default({})
+                    .transform((overrides) => {
+                        const merged = { ...DEFAULT_STRUCTURE_BUILD_SLOTS };
+                        for (const [type, slots] of Object.entries(overrides)) {
+                            const key = type as StructureType;
+                            merged[key] = { ...merged[key], ...slots };
+                        }
+                        return merged;
+                    })
+            })
+            .strict()
+            .prefault({})
+    })
+    .strict()
+    .prefault({}) satisfies z.ZodType<EconomyBalance, unknown>;
+
+export const Config = z
     .object({
         port: z.int().min(1024).max(65534).optional().default(3000),
         highlanderGameMode: z.boolean().optional().default(true),
@@ -23,6 +454,7 @@ const Config = z
         supplyCapacity: z.int().positive().optional().default(100),
         /** How far a supply ship sees. */
         supplyVisionRange: z.int().nonnegative().optional().default(1),
+        economy: EconomyBalanceConfig,
         logLevels: z
             .object({
                 gameManager: LogLevel.optional(),
@@ -37,7 +469,12 @@ const Config = z
             })
     })
     .strict();
-type Config = z.infer<typeof Config>;
+export type Config = z.infer<typeof Config>;
+
+/** The economy balance with every value at its default. */
+export function defaultEconomyBalance(): EconomyBalance {
+    return EconomyBalanceConfig.parse(undefined);
+}
 
 function loadConfig(configFile = `${import.meta.dirname}/../../config/config.json`) {
     const fileContents = readFileSync(configFile, "utf-8");

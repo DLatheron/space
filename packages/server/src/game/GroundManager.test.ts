@@ -1,10 +1,5 @@
-import {
-    GROUND_UNIT_TYPES,
-    SHIP_TYPES,
-    zeroResources,
-    type Resources,
-    type ShipType
-} from "@space/shared-data";
+import { zeroResources, type Resources, type ShipType } from "@space/shared-data";
+import { defaultEconomyBalance } from "../config/config.schema.js";
 import { BattleManager } from "./Battle.js";
 import { EconomyManager } from "./EconomyManager.js";
 import { EntityManager } from "./EntityManager.js";
@@ -13,6 +8,7 @@ import { createEmptyMap } from "./map/SpaceMap.js";
 import type { EntityOf } from "./map/types.js";
 import { SupplyManager } from "./SupplyManager.js";
 
+const DEFAULTS = defaultEconomyBalance();
 const res = (partial: Partial<Resources>): Resources => ({ ...zeroResources(), ...partial });
 
 function makeShip(
@@ -31,8 +27,8 @@ function makeShip(
         q,
         r,
         facing: 0,
-        movementPoints: SHIP_TYPES[shipType].maxMovementPoints,
-        maxMovementPoints: SHIP_TYPES[shipType].maxMovementPoints,
+        movementPoints: DEFAULTS.ships[shipType].maxMovementPoints,
+        maxMovementPoints: DEFAULTS.ships[shipType].maxMovementPoints,
         ...(shipType === "transport" ? { carriedUnitIds: [] } : {})
     });
 }
@@ -90,7 +86,7 @@ describe("GroundManager transports", () => {
     it("loads garrisoned units up to the transport's capacity and unloads them", () => {
         const { ground, home, transport, infantry, unitsAt } = groundWorld();
         const ids = Array.from({ length: 5 }, () => infantry("alpha", home.id).id);
-        expect(SHIP_TYPES.transport.unitCapacity).toBe(4);
+        expect(DEFAULTS.ships.transport.unitCapacity).toBe(4);
         expect(ground.load("alpha", transport.id, ids)).toEqual({
             ok: false,
             error: "Not enough room aboard"
@@ -200,7 +196,7 @@ describe("GroundManager transports", () => {
         expect(economy.takeReleased()).toEqual([
             {
                 sideId: "alpha",
-                amount: SHIP_TYPES.transport.cost.population,
+                amount: DEFAULTS.ships.transport.cost.population,
                 // Added after the economy was set up, so no recorded crew origin.
                 homeId: undefined,
                 from: { q: 7, r: 5 }
@@ -359,7 +355,7 @@ describe("GroundManager invasion", () => {
         const before = economy.stockpile(betaHome.id).population;
         expect(supply.returnPopulation()).toEqual([]);
         expect(economy.stockpile(betaHome.id).population).toBe(
-            before + GROUND_UNIT_TYPES.infantry.cost.population
+            before + DEFAULTS.groundUnits.infantry.cost.population
         );
     });
 
@@ -384,7 +380,7 @@ describe("GroundManager invasion", () => {
         const before = economy.stockpile(home.id).population;
         supply.returnPopulation();
         expect(economy.stockpile(home.id).population).toBe(
-            before + 2 * GROUND_UNIT_TYPES.infantry.cost.population
+            before + 2 * DEFAULTS.groundUnits.infantry.cost.population
         );
     });
 });

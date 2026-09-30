@@ -6,6 +6,10 @@ import {
     orderDemands,
     RESOURCE_KEYS,
     resourceUnits,
+    locationIncome,
+    stockpileCap,
+    storageRoom,
+    subtractClamped,
     sumResources,
     surplusStock,
     zeroResources,
@@ -57,8 +61,11 @@ export type SupplyArrival = {
     supplyShipId: EntityId;
     sideId: SideId;
     locationId: EntityId;
+    /** What was unloaded this turn. */
     cargo: Resources;
     at: AxialCoord;
+    /** The stockpile was full: the ship stays at the destination with the rest of its cargo. */
+    waiting: boolean;
 };
 
 export type SupplyMoveResult = {
@@ -100,6 +107,25 @@ export function packReservations(reservations: CargoReservation[], capacity: num
     }
     if (room < capacity) loads.push(current);
     return loads;
+}
+
+/** Reservations less `delivered`, taken from the first reservations first; empty ones are dropped. */
+export function releaseReservations(
+    reservations: CargoReservation[],
+    delivered: Resources
+): CargoReservation[] {
+    const left = { ...delivered };
+    const result: CargoReservation[] = [];
+    for (const reservation of reservations) {
+        const amount = { ...reservation.amount };
+        for (const k of RESOURCE_KEYS) {
+            const take = Math.min(amount[k], left[k]);
+            amount[k] -= take;
+            left[k] -= take;
+        }
+        if (resourceUnits(amount) > 0) result.push({ orderId: reservation.orderId, amount });
+    }
+    return result;
 }
 
 /**
@@ -155,7 +181,8 @@ export class SupplyManager {
      * before a pending battle and in the first hex holding enemy ships (starting a battle).
      * A ship with no route waits. A ship whose destination was lost heads for the nearest
      * owned location instead (its reservations are dropped). Ships reaching their
-     * destination unload into its stockpile and are removed. `only` limits the pass to
+     * destination unload what fits under its stockpile cap and are removed once empty;
+     * otherwise they wait there and try again each turn. `only` limits the pass to
      * those ships (used to give ships launched this turn their first move).
      */
     move(only?: Iterable<EntityId>): SupplyMoveResult {
@@ -203,15 +230,29 @@ export class SupplyManager {
             }
 
             if (!ambushed && this._isAt(ship, destination)) {
-                this._economy.deposit(destination.id, ship.cargo);
-                this._entities.remove(ship.id);
-                result.arrivals.push({
-                    supplyShipId: ship.id,
-                    sideId: ship.sideId,
-                    locationId: destination.id,
-                    cargo: { ...ship.cargo },
-                    at: { q: ship.q, r: ship.r }
-                });
+                const accepted = this._economy.deposit(destination.id, ship.cargo);
+                const remaining = subtractClamped(ship.cargo, accepted);
+                const waiting = resourceUnits(remaining) > 0;
+                if (waiting) {
+                    ship.cargo = remaining;
+                    ship.reservedFor = releaseReservations(ship.reservedFor, accepted);
+                    ship.route = [];
+                    ship.waiting = true;
+                } else {
+                    this._entities.remove(ship.id);
+                }
+                if (resourceUnits(accepted) > 0 || !waiting) {
+                    result.arrivals.push({
+                        supplyShipId: ship.id,
+                        sideId: ship.sideId,
+                        locationId: destination.id,
+                        cargo: accepted,
+                        at: { q: ship.q, r: ship.r },
+                        waiting
+                    });
+                }
+            } else if (ship.waiting) {
+                ship.waiting = undefined;
             }
         }
         return result;
@@ -243,7 +284,7 @@ export class SupplyManager {
             }
             const cargo = { ...zeroResources(), population: release.amount };
             if (launch.id === home.id) {
-                this._economy.deposit(home.id, cargo);
+                this._economy.depositUncapped(home.id, cargo);
                 continue;
             }
             const loads = packReservations(
@@ -259,10 +300,12 @@ export class SupplyManager {
     }
 
     /**
-     * Step 7. For each side, every order's outstanding demand (remaining need less the
-     * destination's stockpile and in-flight cargo) is served in priority order from the
-     * nearest source by route length. A source only offers stock its own orders won't need.
-     * Cargo is reserved for the order, taken from the source and packed into ships.
+     * Step 7. For each side, every active order's outstanding demand (remaining need less
+     * the destination's stockpile and in-flight cargo) is served in priority order from the
+     * nearest source by route length. A source only offers stock its own active orders won't
+     * need. A destination is sent no more than fits under its cap after its stockpile,
+     * in-flight cargo and one turn of its own production. Cargo is reserved for the order,
+     * taken from the source and packed into ships.
      */
     dispatch(): EntityOf<"supply_ship">[] {
         const dispatched: EntityOf<"supply_ship">[] = [];
@@ -280,17 +323,23 @@ export class SupplyManager {
         const locations = this._economy.ownedLocations(sideId);
         const byId = new Map(locations.map((l) => [l.id, l]));
         const available = new Map<EntityId, Resources>();
+        const room = new Map<EntityId, Resources>();
         const demands: (OrderDemand & { locationId: EntityId })[] = [];
         for (const location of locations) {
             const economy = this._economy.locationEconomy(location.id)!;
+            const orders = this._economy.activeOrders(location.id);
+            const inFlight = this.inFlightTo(location.id);
             if (!knowledge.isHostile(location)) {
-                available.set(location.id, surplusStock(economy.stockpile, economy.orders));
+                available.set(location.id, surplusStock(economy.stockpile, orders));
             }
-            for (const demand of orderDemands(
+            const balance = this._economy.balance;
+            const expected = sumResources([
                 economy.stockpile,
-                economy.orders,
-                this.inFlightTo(location.id)
-            )) {
+                inFlight,
+                locationIncome(economy, balance)
+            ]);
+            room.set(location.id, storageRoom(expected, stockpileCap(economy, balance)));
+            for (const demand of orderDemands(economy.stockpile, orders, inFlight)) {
                 demands.push({ ...demand, locationId: location.id });
             }
         }
@@ -312,8 +361,9 @@ export class SupplyManager {
         >();
         for (const demand of demands) {
             const dest = byId.get(demand.locationId)!;
+            const destRoom = room.get(dest.id)!;
             for (const k of RESOURCE_KEYS) {
-                let need = demand.amount[k];
+                let need = Math.min(demand.amount[k], destRoom[k]);
                 if (need <= 0) continue;
                 const sources = [...available.keys()]
                     .filter((id) => id !== dest.id && available.get(id)![k] > 0)
@@ -324,6 +374,7 @@ export class SupplyManager {
                     const stock = available.get(source.id)!;
                     const take = Math.min(need, stock[k]);
                     stock[k] -= take;
+                    destRoom[k] -= take;
                     need -= take;
                     const key = `${source.id}|${dest.id}`;
                     let shipment = shipments.get(key);

@@ -73,7 +73,7 @@ export const ENHANCEMENT_TIER_MAX = 3;
 export const EnhancementTier = z.number().int().min(ENHANCEMENT_TIER_MIN).max(ENHANCEMENT_TIER_MAX);
 export type EnhancementTier = z.infer<typeof EnhancementTier>;
 
-/** Ship class; stats and animation speeds live in `SHIP_TYPES`. */
+/** Ship class; stats live in `EconomyBalance.ships`, names and animation in `SHIP_TYPE_INFO`. */
 export const ShipType = z.enum(["scout", "frigate", "colony_ship", "transport"]);
 export type ShipType = z.infer<typeof ShipType>;
 
@@ -123,7 +123,9 @@ export const SupplyShipEntity = EntityBase.extend({
     /** Maximum total units of cargo (all resource types together). */
     capacity: z.number().int().min(0),
     /** Planned hexes ahead, excluding the current hex; only sent to the owning side. */
-    route: z.array(AxialCoord).optional()
+    route: z.array(AxialCoord).optional(),
+    /** At its destination, waiting for stockpile room to unload the rest of its cargo. */
+    waiting: z.boolean().optional()
 });
 export type SupplyShipEntity = z.infer<typeof SupplyShipEntity>;
 

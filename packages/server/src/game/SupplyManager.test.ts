@@ -1,13 +1,13 @@
 import { axialKey, axialRange, offsetToAxial } from "@space/maths";
 import {
     addResources,
-    SHIP_TYPES,
-    STARTING_STOCKPILE,
     zeroResources,
     type AxialCoord,
     type BuildItem,
+    type EconomyBalance,
     type Resources
 } from "@space/shared-data";
+import { defaultEconomyBalance } from "../config/config.schema.js";
 import { BattleManager } from "./Battle.js";
 import { EconomyManager, type BuildResult } from "./EconomyManager.js";
 import { EntityManager } from "./EntityManager.js";
@@ -17,11 +17,26 @@ import { Side } from "./Side.js";
 import { SupplyManager, type SupplyKnowledge } from "./SupplyManager.js";
 import { TurnManager } from "./TurnManager.js";
 
+const DEFAULTS = defaultEconomyBalance();
 const res = (partial: Partial<Resources>): Resources => ({ ...zeroResources(), ...partial });
 const habitat: BuildItem = { kind: "structure", structureType: "habitat" };
 const mine: BuildItem = { kind: "structure", structureType: "mine" };
 const orderId = (result: BuildResult) => (result.ok ? result.order.id : "");
 const hex = (q: number, r: number): AxialCoord => ({ q, r });
+
+/** No stockpile caps or concurrency limits, for tests about supply itself. */
+function unlimitedBalance(): EconomyBalance {
+    const balance = defaultEconomyBalance();
+    const lots = { money: 1e9, materials: 1e9, population: 1e9, science: 1e9 };
+    return {
+        ...balance,
+        stockpileCaps: { default: lots, home: lots },
+        buildSlots: {
+            ...balance.buildSlots,
+            base: { ships: 99, installations: 99, groundUnits: 99, research: 99 }
+        }
+    };
+}
 
 function makeMoon(
     entities: EntityManager,
@@ -79,10 +94,13 @@ function makeSupplyShip(
 }
 
 /** Moons have no base income, so stockpiles only change through orders and supply. */
-function supplyWorld(knowledge?: (sideId: string) => SupplyKnowledge) {
+function supplyWorld(
+    knowledge?: (sideId: string) => SupplyKnowledge,
+    balance: EconomyBalance = unlimitedBalance()
+) {
     const map = createEmptyMap({ width: 30, height: 30, hexSize: 50, seed: 1 });
     const entities = new EntityManager(map);
-    const economy = new EconomyManager(entities, ["alpha", "beta"]);
+    const economy = new EconomyManager(entities, ["alpha", "beta"], { balance });
     const battles = new BattleManager(entities, economy);
     const supply = new SupplyManager(entities, economy, { battles, knowledge });
     const turns = new TurnManager(["alpha", "beta"], entities, economy, supply);
@@ -236,6 +254,83 @@ describe("SupplyManager dispatch", () => {
     });
 });
 
+describe("SupplyManager with stockpile caps and build limits", () => {
+    const limitedWorld = () => supplyWorld(undefined, defaultEconomyBalance());
+
+    it("sends no more than fits under the destination's cap, counting cargo in flight", () => {
+        const { entities, economy, supply } = limitedWorld();
+        const source = makeMoon(entities, "source", 0, 10);
+        const dest = makeMoon(entities, "dest", 10, 10);
+        economy.depositUncapped(source.id, res({ money: 1000, materials: 1000 }));
+        economy.deposit(dest.id, res({ materials: 20 }));
+        const order = orderId(economy.build("alpha", dest.id, habitat));
+
+        // Habitat needs 50 money and 100 materials; the moon holds 100 money and 50 materials.
+        const [ship] = supply.dispatch();
+        expect(ship.cargo).toEqual(res({ money: 50, materials: 30 }));
+        expect(ship.reservedFor).toEqual([
+            { orderId: order, amount: res({ money: 50, materials: 30 }) }
+        ]);
+        expect(supply.dispatch()).toEqual([]);
+    });
+
+    it("sends nothing for orders waiting on a build slot", () => {
+        const { entities, economy, supply } = limitedWorld();
+        const source = makeMoon(entities, "source", 0, 10);
+        const dest = makeMoon(entities, "dest", 10, 10);
+        economy.depositUncapped(source.id, res({ money: 1000, materials: 1000, population: 100 }));
+        const first = orderId(economy.build("alpha", dest.id, habitat));
+        const waiting = orderId(economy.build("alpha", dest.id, mine));
+        expect(economy.activeOrders(dest.id).map((o) => o.id)).toEqual([first]);
+        const reserved = supply.dispatch().flatMap((s) => s.reservedFor.map((r) => r.orderId));
+        expect(reserved).toContain(first);
+        expect(reserved).not.toContain(waiting);
+    });
+
+    it("keeps a ship waiting at a full destination, unloading what fits each turn", () => {
+        const { entities, economy, supply } = limitedWorld();
+        const source = makeMoon(entities, "source", 0, 10);
+        const dest = makeMoon(entities, "dest", 10, 10);
+        economy.deposit(dest.id, res({ money: 60 }));
+        const ship = makeSupplyShip(
+            entities,
+            "late",
+            hex(10, 10),
+            source.id,
+            dest.id,
+            res({ money: 80 })
+        );
+        ship.reservedFor = [{ orderId: "o1", amount: res({ money: 80 }) }];
+
+        const first = supply.move();
+        expect(first.arrivals).toEqual([
+            {
+                supplyShipId: ship.id,
+                sideId: "alpha",
+                locationId: dest.id,
+                cargo: res({ money: 40 }),
+                at: hex(10, 10),
+                waiting: true
+            }
+        ]);
+        expect(economy.stockpile(dest.id)).toEqual(res({ money: 100 }));
+        expect(entities.get(ship.id)).toBe(ship);
+        expect(ship).toMatchObject({ cargo: res({ money: 40 }), waiting: true });
+        expect(ship.reservedFor).toEqual([{ orderId: "o1", amount: res({ money: 40 }) }]);
+        expect(supply.inFlightTo(dest.id)).toEqual(res({ money: 40 }));
+
+        // Still full: nothing unloads and nothing is reported.
+        expect(supply.move().arrivals).toEqual([]);
+        expect(ship.cargo).toEqual(res({ money: 40 }));
+
+        economy.withdraw(dest.id, res({ money: 70 }));
+        const last = supply.move();
+        expect(last.arrivals).toMatchObject([{ cargo: res({ money: 40 }), waiting: false }]);
+        expect(entities.get(ship.id)).toBeUndefined();
+        expect(economy.stockpile(dest.id)).toEqual(res({ money: 70 }));
+    });
+});
+
 describe("SupplyManager movement", () => {
     it("moves 6 hexes a turn along its route, then unloads at the destination", () => {
         const { entities, economy, supply } = supplyWorld();
@@ -265,7 +360,8 @@ describe("SupplyManager movement", () => {
                 sideId: "alpha",
                 locationId: dest.id,
                 cargo: res({ money: 50 }),
-                at: hex(15, 10)
+                at: hex(15, 10),
+                waiting: false
             }
         ]);
         expect(entities.get(ship.id)).toBeUndefined();
@@ -403,7 +499,9 @@ describe("SupplyManager movement", () => {
         entities.remove(enemy.id);
         expect(side.knowsEnemyAt(entities, hex(10, 10))).toBe(true);
 
-        const economy = new EconomyManager(entities, ["alpha", "beta"]);
+        const economy = new EconomyManager(entities, ["alpha", "beta"], {
+            balance: unlimitedBalance()
+        });
         const supply = new SupplyManager(entities, economy, {
             knowledge: () => ({
                 isObstacle: (h) => side.knowsObstacleAt(entities, h),
@@ -515,7 +613,9 @@ describe("SupplyManager population returns", () => {
         });
         const outpost = makeMoon(entities, "outpost", 15, 12);
         const frigate = makeWarship(entities, "frigate", "alpha", frigateAt.q, frigateAt.r);
-        const economy = new EconomyManager(entities, ["alpha", "beta"]);
+        const economy = new EconomyManager(entities, ["alpha", "beta"], {
+            balance: unlimitedBalance()
+        });
         const battles = new BattleManager(entities, economy);
         const supply = new SupplyManager(entities, economy, { battles });
         const destroyFrigate = () => {
@@ -527,7 +627,7 @@ describe("SupplyManager population returns", () => {
         };
         return { entities, economy, supply, home, outpost, frigate, destroyFrigate };
     }
-    const crew = SHIP_TYPES.frigate.cost.population;
+    const crew = DEFAULTS.ships.frigate.cost.population;
 
     it("ships a destroyed ship's crew home from the nearest owned location", () => {
         const world = populationWorld(hex(14, 10));
@@ -547,7 +647,7 @@ describe("SupplyManager population returns", () => {
         for (let turn = 0; turn < 3 && entities.get(ship.id); turn++) supply.move();
         expect(entities.get(ship.id)).toBeUndefined();
         expect(economy.stockpile(home.id)).toEqual(
-            addResources(STARTING_STOCKPILE, { population: crew })
+            addResources(DEFAULTS.startingStockpile, { population: crew })
         );
     });
 
@@ -556,7 +656,7 @@ describe("SupplyManager population returns", () => {
         world.destroyFrigate();
         expect(world.supply.returnPopulation()).toEqual([]);
         expect(world.economy.stockpile(world.home.id)).toEqual(
-            addResources(STARTING_STOCKPILE, { population: crew })
+            addResources(DEFAULTS.startingStockpile, { population: crew })
         );
     });
 

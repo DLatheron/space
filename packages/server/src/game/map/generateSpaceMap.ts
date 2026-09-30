@@ -10,12 +10,14 @@ import {
     HOME_PLANET_LEVEL,
     PLANET_LEVEL_MAX,
     PLANET_LEVEL_MIN,
-    SHIP_TYPES,
+    SHIP_TYPE_INFO,
+    shipStats,
+    type EconomyBalance,
     type EntityId,
-    type ShipType,
     type SideId,
     type SystemId
 } from "@space/shared-data";
+import { defaultEconomyBalance } from "../../config/config.schema.js";
 import { EntityManager } from "../EntityManager.js";
 import { createEmptyMap, findTileByAxial, type SpaceMap } from "./SpaceMap.js";
 import type { EntityOf, MapTile } from "./types.js";
@@ -41,8 +43,6 @@ const SYSTEM_NAMES = [
     "Achernar"
 ];
 
-const STARTING_SHIP_TYPES: readonly ShipType[] = ["scout", "frigate"];
-
 /** Hexes kept clear of system centres along the map edge. */
 const EDGE_MARGIN = 5;
 const SYSTEM_RADIUS = 5;
@@ -58,7 +58,7 @@ export type GeneratedGalaxy = {
     map: SpaceMap;
     entities: EntityManager;
     systems: StarSystem[];
-    /** Each side's home planet, which starts with `STARTING_STOCKPILE`. */
+    /** Each side's home planet, which starts with the balance's `startingStockpile`. */
     homePlanets: Partial<Record<SideId, EntityId>>;
 };
 
@@ -396,7 +396,8 @@ function placeHyperspaceTunnels(ctx: GenContext, systems: StarSystem[]): void {
 function placeStartingFleets(
     ctx: GenContext,
     systems: StarSystem[],
-    planetsBySystem: Map<SystemId, EntityOf<"planet">[]>
+    planetsBySystem: Map<SystemId, EntityOf<"planet">[]>,
+    balance: EconomyBalance
 ): Partial<Record<SideId, EntityId>> {
     const { entities, newId } = ctx;
     const homes: Partial<Record<SideId, EntityId>> = {};
@@ -426,24 +427,26 @@ function placeStartingFleets(
         home.level = HOME_PLANET_LEVEL;
         homes[sideId] = home.id;
 
-        for (let i = 0; i < STARTING_SHIP_TYPES.length; i++) {
-            const shipType = STARTING_SHIP_TYPES[i];
-            const template = SHIP_TYPES[shipType];
+        for (let i = 0; i < balance.startingShips.length; i++) {
+            const shipType = balance.startingShips[i];
+            const info = SHIP_TYPE_INFO[shipType];
+            const stats = shipStats(shipType, 1, balance);
             const tile = pickEmptyFrom(ctx, ring(home, 1)) ?? pickEmptyFrom(ctx, ring(home, 2));
             if (!tile) break;
             entities.add({
                 id: newId("ship"),
                 kind: "ship",
                 shipType,
-                name: `${sideId}-${template.name.toLowerCase()}-${i + 1}`,
+                name: `${sideId}-${info.name.toLowerCase()}-${i + 1}`,
                 q: tile.q,
                 r: tile.r,
                 facing: axialDirectionTowards(home, tile),
                 sideId,
-                movementPoints: template.maxMovementPoints,
-                maxMovementPoints: template.maxMovementPoints,
-                hp: template.hp,
-                scale: template.scale
+                movementPoints: stats.maxMovementPoints,
+                maxMovementPoints: stats.maxMovementPoints,
+                hp: stats.hp,
+                scale: info.scale,
+                ...(balance.ships[shipType].unitCapacity ? { carriedUnitIds: [] } : {})
             });
         }
     }
@@ -461,8 +464,11 @@ export function generateSpaceMap(options: {
     hexSize: number;
     seed: number;
     sideIds: SideId[];
+    /** Starting fleet and ship stats; defaults to the config schema's defaults. */
+    balance?: EconomyBalance;
 }): GeneratedGalaxy {
     const { width, height, hexSize, seed, sideIds } = options;
+    const balance = options.balance ?? defaultEconomyBalance();
     const rng = createSeededRng(seed);
     const map = createEmptyMap({ width, height, hexSize, seed });
     const entities = new EntityManager(map);
@@ -496,7 +502,7 @@ export function generateSpaceMap(options: {
 
     placeHyperspaceTunnels(ctx, systems);
     placeDeepSpaceHazards(ctx, systems);
-    const homePlanets = placeStartingFleets(ctx, systems, planetsBySystem);
+    const homePlanets = placeStartingFleets(ctx, systems, planetsBySystem, balance);
 
     return { map, entities, systems, homePlanets };
 }

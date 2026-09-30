@@ -6,20 +6,22 @@ import {
     countQueuedShips,
     createBuildOrder,
     DEFAULT_BUILD_PRIORITY,
+    depositCapped,
     enhancementTargetId,
     fundOrders,
-    GROUND_UNIT_TYPES,
     isFullyFunded,
     locationIncome,
     minResources,
+    partitionOrders,
     remainingNeed,
-    SHIP_TYPES,
+    SHIP_TYPE_INFO,
     shipCapFor,
+    shipDef,
     shipStats,
     siteForEntity,
     slotsForEntity,
-    STARTING_STOCKPILE,
-    STRUCTURE_TYPES,
+    stockpileCap,
+    structureDef,
     subtractResources,
     sumResources,
     zeroResources,
@@ -27,6 +29,7 @@ import {
     type BuildItem,
     type BuildOrder,
     type BuildPriority,
+    type EconomyBalance,
     type EconomyState,
     type EnhancementTarget,
     type EntityId,
@@ -40,6 +43,7 @@ import {
     type SideId,
     type TechId
 } from "@space/shared-data";
+import { defaultEconomyBalance } from "../config/config.schema.js";
 import { hasEnemyWarships } from "./Battle.js";
 import type { EntityManager } from "./EntityManager.js";
 import { GroundUnitRegistry, isLocationEntity } from "./GroundUnits.js";
@@ -64,8 +68,10 @@ export type EconomyOptions = {
     instantBuild?: boolean;
     research?: ResearchManager;
     units?: GroundUnitRegistry;
-    /** Home planet per side, given `STARTING_STOCKPILE`; defaults to each side's first owned planet. */
+    /** Home planet per side, given the starting stockpile; defaults to each side's first owned planet. */
     homes?: Partial<Record<SideId, EntityId>>;
+    /** Costs, stats, stockpile caps and concurrency limits; defaults to the config schema's defaults. */
+    balance?: EconomyBalance;
 };
 
 export type ColoniseResult =
@@ -95,6 +101,8 @@ export type ReleasedPopulation = {
 };
 
 type LocationRecord = {
+    /** A side's starting planet (home stockpile caps), whoever owns it now. */
+    home: boolean;
     stockpile: Resources;
     installations: Installation[];
     orders: BuildOrder[];
@@ -114,6 +122,7 @@ export class EconomyManager {
     /** Where each ship's crew population was borrowed from. */
     private readonly _crewFrom = new Map<EntityId, EntityId>();
     private readonly _instantBuild: boolean;
+    private readonly _balance: EconomyBalance;
     private readonly _research: ResearchManager;
     private readonly _units: GroundUnitRegistry;
     private _released: ReleasedPopulation[] = [];
@@ -125,6 +134,7 @@ export class EconomyManager {
         this._entities = entities;
         this._sideIds = [...sideIds];
         this._instantBuild = options.instantBuild ?? false;
+        this._balance = options.balance ?? defaultEconomyBalance();
         this._research = options.research ?? new ResearchManager();
         this._units = options.units ?? new GroundUnitRegistry(entities);
         for (const sideId of this._sideIds) {
@@ -134,7 +144,9 @@ export class EconomyManager {
             const homeId = options.homes?.[sideId] ?? owned.find((l) => l.kind === "planet")?.id;
             const home = homeId ? this.locationEntity(homeId) : undefined;
             if (home?.sideId === sideId) {
-                this._record(home.id).stockpile = { ...STARTING_STOCKPILE };
+                const record = this._record(home.id);
+                record.home = true;
+                record.stockpile = minResources(this._balance.startingStockpile, this._cap(record));
                 for (const ship of entities.ofKind("ship")) {
                     if (ship.sideId === sideId) this._crewFrom.set(ship.id, home.id);
                 }
@@ -152,6 +164,10 @@ export class EconomyManager {
 
     get instantBuild(): boolean {
         return this._instantBuild;
+    }
+
+    get balance(): EconomyBalance {
+        return this._balance;
     }
 
     get sideIds(): readonly SideId[] {
@@ -183,6 +199,16 @@ export class EconomyManager {
         return { ...(this._locations.get(locationId)?.stockpile ?? zeroResources()) };
     }
 
+    /** Most of each resource the location's stockpile holds (see `stockpileCap`). */
+    stockpileCap(locationId: EntityId): Resources {
+        return this._cap(this._record(locationId));
+    }
+
+    /** Orders funded and generating supply demand; the rest wait for a concurrency slot. */
+    activeOrders(locationId: EntityId): BuildOrder[] {
+        return partitionOrders(this._record(locationId), this._balance).active;
+    }
+
     /** Every owned location's stockpile added together. */
     totalStockpile(sideId: SideId): Resources {
         return sumResources(this.ownedLocations(sideId).map((l) => this.stockpile(l.id)));
@@ -195,7 +221,7 @@ export class EconomyManager {
     }
 
     shipCap(sideId: SideId): number {
-        return shipCapFor(this._economies(sideId));
+        return shipCapFor(this._economies(sideId), this._balance);
     }
 
     shipCrewOrigin(shipId: EntityId): EntityId | undefined {
@@ -207,7 +233,7 @@ export class EconomyManager {
         return {
             lastIncome: { ...(this._lastIncome.get(sideId) ?? zeroResources()) },
             shipCount: this.shipCount(sideId),
-            shipCap: shipCapFor(locations),
+            shipCap: shipCapFor(locations, this._balance),
             locations,
             techs: this._research.techs(sideId),
             supplyShips: this._entities
@@ -252,7 +278,8 @@ export class EconomyManager {
                 shipCap: this.shipCap(side),
                 techs: this._research.techs(side),
                 researching: this._researching(side),
-                targetTier: target.tier
+                targetTier: target.tier,
+                balance: this._balance
             },
             this._view(location),
             item
@@ -260,10 +287,18 @@ export class EconomyManager {
         if (!check.ok) return { ok: false, error: check.reason };
 
         const record = this._record(location.id);
-        const order = createBuildOrder(`order-${this._nextOrderSeq++}`, item, priority);
+        const order = createBuildOrder(
+            `order-${this._nextOrderSeq++}`,
+            item,
+            this._balance,
+            priority
+        );
         record.orders.push(order);
 
-        if (!this._instantBuild) return { ok: true, order: { ...order }, completed: false };
+        const active = this.activeOrders(location.id).some((o) => o.id === order.id);
+        if (!this._instantBuild || !active) {
+            return { ok: true, order: { ...order }, completed: false };
+        }
 
         this._fundFromAnywhere(side, location, order);
         if (!isFullyFunded(order)) return { ok: true, order: { ...order }, completed: false };
@@ -322,7 +357,7 @@ export class EconomyManager {
         const ship = this._entities.getOfKind(shipId, "ship");
         if (!ship) return { ok: false, error: `Unknown ship ${shipId}` };
         if (ship.sideId !== sideId) return { ok: false, error: `Ship ${shipId} is not yours` };
-        const def = SHIP_TYPES[ship.shipType];
+        const def = shipDef(ship.shipType, this._balance);
         if (!def.canColonise) return { ok: false, error: `${def.name} cannot colonise` };
         if (ship.q !== location.q || ship.r !== location.r) {
             return { ok: false, error: "Ship is not at the location" };
@@ -336,22 +371,35 @@ export class EconomyManager {
         this._entities.remove(ship.id);
         this._crewFrom.delete(ship.id);
         location.sideId = sideId;
-        this._locations.set(location.id, {
-            stockpile: { ...zeroResources(), population: def.cost.population },
+        const record: LocationRecord = {
+            home: this._locations.get(location.id)?.home ?? false,
+            stockpile: zeroResources(),
             installations: [],
             orders: []
-        });
+        };
+        record.stockpile = minResources(
+            { ...zeroResources(), population: def.cost.population },
+            this._cap(record)
+        );
+        this._locations.set(location.id, record);
         return { ok: true, location, consumedShipId: ship.id };
     }
 
-    /** Step 1: planet base income and installation output go into each local stockpile. */
+    /**
+     * Step 1: planet base income and installation output go into each local stockpile;
+     * whatever doesn't fit under its cap is lost.
+     */
     produce(): void {
         for (const sideId of this._sideIds) {
             let total = zeroResources();
             for (const location of this.ownedLocations(sideId)) {
-                const income = locationIncome(this._view(location));
+                const income = locationIncome(this._view(location), this._balance);
                 const record = this._record(location.id);
-                record.stockpile = addResources(record.stockpile, income);
+                record.stockpile = depositCapped(
+                    record.stockpile,
+                    income,
+                    this._cap(record)
+                ).stockpile;
                 total = addResources(total, income);
             }
             this._lastIncome.set(sideId, total);
@@ -359,17 +407,20 @@ export class EconomyManager {
     }
 
     /**
-     * Steps 4 and 5: every order draws from its local stockpile (see `fundOrders`), then
-     * fully funded orders complete. A finished ship waits while enemy warships hold its hex.
+     * Steps 4 and 5: every active order draws from its local stockpile (see `fundOrders`),
+     * then fully funded orders complete. A finished ship waits while enemy warships hold its hex.
      */
     fundAndComplete(): EconomyAdvance {
         const result: EconomyAdvance = { completed: [], spawnedShips: [], spawnedUnits: [] };
         for (const sideId of this._sideIds) {
             for (const location of this.ownedLocations(sideId)) {
                 const record = this._record(location.id);
-                const funded = fundOrders(record.stockpile, record.orders);
+                const funded = fundOrders(record.stockpile, this.activeOrders(location.id));
                 record.stockpile = funded.stockpile;
-                record.orders = funded.orders;
+                const applied = new Map(funded.orders.map((o) => [o.id, o.applied]));
+                for (const order of record.orders) {
+                    order.applied = applied.get(order.id) ?? order.applied;
+                }
 
                 for (const order of [...record.orders]) {
                     if (!isFullyFunded(order)) continue;
@@ -396,8 +447,16 @@ export class EconomyManager {
         return this.fundAndComplete();
     }
 
-    /** Add delivered cargo to a location's stockpile. */
-    deposit(locationId: EntityId, resources: Resources): void {
+    /** Add delivered cargo to a location's stockpile, up to its cap; returns what was taken in. */
+    deposit(locationId: EntityId, resources: Resources): Resources {
+        const record = this._record(locationId);
+        const deposit = depositCapped(record.stockpile, resources, this._cap(record));
+        record.stockpile = deposit.stockpile;
+        return deposit.accepted;
+    }
+
+    /** Add to a location's stockpile ignoring its cap (population returning home, refunds). */
+    depositUncapped(locationId: EntityId, resources: Resources): void {
         const record = this._record(locationId);
         record.stockpile = addResources(record.stockpile, resources);
     }
@@ -441,7 +500,7 @@ export class EconomyManager {
             }
             this.releasePopulation({
                 sideId: ship.sideId,
-                amount: SHIP_TYPES[ship.shipType].cost.population,
+                amount: this._balance.ships[ship.shipType].cost.population,
                 homeId: this._crewFrom.get(ship.id),
                 from: { q: ship.q, r: ship.r }
             });
@@ -458,7 +517,7 @@ export class EconomyManager {
             if (!unit) continue;
             this.releasePopulation({
                 sideId: unit.sideId,
-                amount: GROUND_UNIT_TYPES[unit.unitType].cost.population,
+                amount: this._balance.groundUnits[unit.unitType].cost.population,
                 homeId: unit.populationFrom,
                 from
             });
@@ -504,7 +563,7 @@ export class EconomyManager {
         record.installations = record.installations.filter((i) => i.id !== installationId);
         this.releasePopulation({
             sideId: owned.location.sideId!,
-            amount: STRUCTURE_TYPES[installation.type].cost.population,
+            amount: structureDef(installation.type, this._balance).cost.population,
             homeId: installation.populationFrom,
             from: { q: owned.location.q, r: owned.location.r }
         });
@@ -579,7 +638,9 @@ export class EconomyManager {
             case "ship": {
                 if (hasEnemyWarships(this._entities, location, sideId)) return { done: false };
                 const ship = this._spawnShip(location, sideId, item.shipType);
-                if (borrowedPopulation(item) > 0) this._crewFrom.set(ship.id, location.id);
+                if (borrowedPopulation(item, this._balance) > 0) {
+                    this._crewFrom.set(ship.id, location.id);
+                }
                 return { done: true, ship };
             }
             case "groundUnit": {
@@ -607,8 +668,8 @@ export class EconomyManager {
             case "ship": {
                 const ship = this._entities.getOfKind(target.shipId, "ship");
                 if (!ship) return;
-                const before = shipStats(ship.shipType, ship.tier ?? 1);
-                const after = shipStats(ship.shipType, tier);
+                const before = shipStats(ship.shipType, ship.tier ?? 1, this._balance);
+                const after = shipStats(ship.shipType, tier, this._balance);
                 ship.tier = tier;
                 ship.hp = (ship.hp ?? before.hp) + (after.hp - before.hp);
                 ship.movementPoints += after.maxMovementPoints - ship.maxMovementPoints;
@@ -677,8 +738,8 @@ export class EconomyManager {
         sideId: SideId,
         shipType: ShipType
     ): EntityOf<"ship"> {
-        const template = SHIP_TYPES[shipType];
-        const stats = shipStats(shipType, 1);
+        const info = SHIP_TYPE_INFO[shipType];
+        const stats = shipStats(shipType, 1, this._balance);
         let id: EntityId;
         do {
             id = `ship-built-${this._nextShipSeq++}`;
@@ -699,7 +760,7 @@ export class EconomyManager {
             id,
             kind: "ship",
             shipType,
-            name: `${template.name} ${number}`,
+            name: `${info.name} ${number}`,
             q: location.q,
             r: location.r,
             facing: sun ? axialDirectionTowards(sun, location) : 0,
@@ -707,8 +768,8 @@ export class EconomyManager {
             movementPoints: stats.maxMovementPoints,
             maxMovementPoints: stats.maxMovementPoints,
             hp: stats.hp,
-            scale: template.scale,
-            ...(template.unitCapacity ? { carriedUnitIds: [] } : {})
+            scale: info.scale,
+            ...(this._balance.ships[shipType].unitCapacity ? { carriedUnitIds: [] } : {})
         });
     }
 
@@ -730,10 +791,14 @@ export class EconomyManager {
     private _record(locationId: EntityId): LocationRecord {
         let record = this._locations.get(locationId);
         if (!record) {
-            record = { stockpile: zeroResources(), installations: [], orders: [] };
+            record = { home: false, stockpile: zeroResources(), installations: [], orders: [] };
             this._locations.set(locationId, record);
         }
         return record;
+    }
+
+    private _cap(record: LocationRecord): Resources {
+        return stockpileCap(record, this._balance);
     }
 
     private _view(location: LocationEntity): LocationEconomy {
@@ -743,6 +808,7 @@ export class EconomyManager {
             site: siteForEntity(location) ?? "asteroid",
             level: location.kind === "planet" ? location.level : 0,
             slots: slotsForEntity(location),
+            ...(record.home ? { home: true } : {}),
             stockpile: { ...record.stockpile },
             installations: record.installations.map((i) => ({ ...i })),
             orders: record.orders.map((o) => ({

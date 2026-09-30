@@ -25,7 +25,10 @@ const mockConfig = vi.hoisted(() => ({
     logLevels: {}
 }));
 
-vi.mock("../config/config.schema.js", () => ({ config: mockConfig }));
+vi.mock("../config/config.schema.js", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("../config/config.schema.js")>()),
+    config: mockConfig
+}));
 
 type MessageOf<T extends ServerToClientMessage["type"]> = Extract<
     ServerToClientMessage,
@@ -225,7 +228,7 @@ describe("Game supply ship messages", () => {
         const home = planet("home-a", "alpha", 2, 10);
         const dest = planet("dest-a", "alpha", destAt.q, destAt.r);
         planet("home-b", "beta", 5, 25);
-        game.economy.deposit(home.id, res({ money: 1000, metal: 1000 }));
+        game.economy.deposit(home.id, res({ money: 1000, materials: 1000 }));
         const ordered = game.economy.build(
             "alpha",
             dest.id,

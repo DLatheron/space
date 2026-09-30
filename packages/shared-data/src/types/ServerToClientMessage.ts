@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { EconomyState } from "./Economy.js";
+import { EconomyBalance, EconomyState } from "./Economy.js";
 import { GroundBattleInfo } from "./GroundUnitTypes.js";
 import {
     AxialCoord,
@@ -52,7 +52,9 @@ export const ServerToClientMessage = z.discriminatedUnion("type", [
             battles: z.array(BattleInfo),
             /** Pending ground battles involving the receiving side. */
             groundBattles: z.array(GroundBattleInfo),
-            economy: EconomyState
+            economy: EconomyState,
+            /** Server-configured caps, storage structures and concurrency limits. */
+            balance: EconomyBalance
         })
     }),
     z.object({

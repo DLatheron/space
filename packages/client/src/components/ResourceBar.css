@@ -71,6 +71,17 @@
     color: #ff9f6b;
 }
 
+.resource-bar__cap {
+    margin-left: -0.3rem;
+    color: #7f93b5;
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.resource-bar__item--full .resource-bar__cap {
+    color: #ff9f6b;
+}
+
 .resource-bar__delta {
     position: absolute;
     left: 50%;

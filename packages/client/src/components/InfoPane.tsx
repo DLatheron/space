@@ -1,7 +1,7 @@
 import {
-    GROUND_UNIT_TYPES,
+    GROUND_UNIT_TYPE_INFO,
     resourceUnits,
-    SHIP_TYPES,
+    SHIP_TYPE_INFO,
     slotsForEntity,
     type EntityKind,
     type EntitySummary
@@ -124,7 +124,7 @@ function focusTitle(focus: MapFocus): string {
 
 function entityTitle(entity: EntitySummary): string {
     if (entity.kind === "ship") {
-        return entity.name ?? SHIP_TYPES[entity.shipType].name;
+        return entity.name ?? SHIP_TYPE_INFO[entity.shipType].name;
     }
     return entity.name ?? KIND_LABELS[entity.kind];
 }
@@ -212,7 +212,7 @@ function EntityDetails({ world, entity }: { world: HexWorld; entity: EntitySumma
             : entity.garrison?.length
         : undefined;
     const carried =
-        entity.kind === "ship" && isTransport(entity)
+        entity.kind === "ship" && isTransport(entity, world.balance)
             ? world.carriedUnitIds(entity).map((id) => world.groundUnit(id))
             : undefined;
     const route = entity.kind === "supply_ship" ? world.supplyRoute(entity.id) : [];
@@ -245,7 +245,7 @@ function EntityDetails({ world, entity }: { world: HexWorld; entity: EntitySumma
                     <>
                         <div>
                             <dt>Class</dt>
-                            <dd>{SHIP_TYPES[entity.shipType].name}</dd>
+                            <dd>{SHIP_TYPE_INFO[entity.shipType].name}</dd>
                         </div>
                         <div>
                             <dt>Movement</dt>
@@ -267,11 +267,12 @@ function EntityDetails({ world, entity }: { world: HexWorld; entity: EntitySumma
                             <div>
                                 <dt>Aboard</dt>
                                 <dd>
-                                    {carried.length}/{SHIP_TYPES[entity.shipType].unitCapacity}
+                                    {carried.length}/
+                                    {world.balance?.ships[entity.shipType].unitCapacity}
                                     {carried.length > 0 &&
                                         ` · ${carried
                                             .map((u) =>
-                                                u ? GROUND_UNIT_TYPES[u.unitType].name : "Unit"
+                                                u ? GROUND_UNIT_TYPE_INFO[u.unitType].name : "Unit"
                                             )
                                             .join(", ")}`}
                                 </dd>

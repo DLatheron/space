@@ -16,14 +16,19 @@ import {
     hexHasObstacle,
     MOVE_COST_PER_HEX,
     PLANET_LEVEL_MAX,
-    SHIP_TYPES,
+    RESOURCE_KEYS,
+    SHIP_TYPE_INFO,
     siteForEntity,
+    stockpileCap,
     sumResources,
+    zeroResources,
     type AxialCoord,
     type BattleId,
     type BattleInfo,
     type BuildContext,
+    type EconomyBalance,
     type EconomyState,
+    type ResourceKey,
     type EntityId,
     type EntityOfKind,
     type EntitySummary,
@@ -100,7 +105,7 @@ function isMobile(entity: EntitySummary): entity is MobileEntity {
 }
 
 function motionSpeeds(entity: MobileEntity): MotionSpeeds {
-    return entity.kind === "ship" ? SHIP_TYPES[entity.shipType] : SUPPLY_SHIP_MOTION;
+    return entity.kind === "ship" ? SHIP_TYPE_INFO[entity.shipType] : SUPPLY_SHIP_MOTION;
 }
 
 export function isLocationEntity(entity: EntitySummary): entity is LocationEntity {
@@ -112,8 +117,12 @@ export function isBuildSite(entity: EntitySummary): entity is LocationEntity {
     return isLocationEntity(entity) && siteForEntity(entity) !== undefined;
 }
 
-export function isTransport(ship: ShipEntity): boolean {
-    return (SHIP_TYPES[ship.shipType].unitCapacity ?? 0) > 0;
+export function isTransport(ship: ShipEntity, balance: EconomyBalance | null): boolean {
+    return (balance?.ships[ship.shipType].unitCapacity ?? 0) > 0;
+}
+
+export function canColonise(ship: ShipEntity, balance: EconomyBalance | null): boolean {
+    return balance?.ships[ship.shipType].canColonise ?? false;
 }
 
 export type HexClickAction =
@@ -211,6 +220,8 @@ export class HexWorld {
     hoveredHex: Axial | null = null;
     /** Our side's private economy; `null` until the first map init. */
     economy: EconomyState | null = null;
+    /** Server-configured caps and build limits; `null` until the first map init. */
+    balance: EconomyBalance | null = null;
 
     private readonly _tiles = new Map<HexKey, ClientTile>();
     private readonly _visible = new Set<HexKey>();
@@ -260,6 +271,7 @@ export class HexWorld {
         battles: BattleInfo[];
         groundBattles: GroundBattleInfo[];
         economy: EconomyState;
+        balance: EconomyBalance;
     }) {
         this.width = payload.width;
         this.height = payload.height;
@@ -267,6 +279,7 @@ export class HexWorld {
         this.sideId = payload.sideId;
         this.turn = payload.turn;
         this.economy = payload.economy;
+        this.balance = payload.balance;
         this.selectedShipId = null;
         this.inspectedEntityId = null;
         this.hoveredHex = null;
@@ -545,7 +558,7 @@ export class HexWorld {
 
     /** Inputs for `canBuild`; `shipCount` already includes ships on order. */
     get buildContext(): BuildContext | null {
-        if (!this.economy) return null;
+        if (!this.economy || !this.balance) return null;
         const { shipCount, shipCap, techs, locations } = this.economy;
         const researching: TechId[] = [];
         for (const location of locations) {
@@ -553,12 +566,33 @@ export class HexWorld {
                 if (order.item.kind === "research") researching.push(order.item.techId);
             }
         }
-        return { shipCount, shipCap, techs, researching };
+        return { shipCount, shipCap, techs, researching, balance: this.balance };
     }
 
     /** Stock held across every location we own. */
     get sideStockpile(): Resources {
         return sumResources(this.economy?.locations.map((l) => l.stockpile) ?? []);
+    }
+
+    /** Stockpile caps of every location we own, added together. */
+    get sideStockpileCap(): Resources {
+        const balance = this.balance;
+        if (!balance) return zeroResources();
+        return sumResources(this.economy?.locations.map((l) => stockpileCap(l, balance)) ?? []);
+    }
+
+    /** How many of our locations are at or over their cap, per resource. */
+    get fullLocations(): Record<ResourceKey, number> {
+        const counts = { money: 0, materials: 0, population: 0, science: 0 };
+        const balance = this.balance;
+        if (!balance) return counts;
+        for (const location of this.economy?.locations ?? []) {
+            const cap = stockpileCap(location, balance);
+            for (const key of RESOURCE_KEYS) {
+                if (location.stockpile[key] >= cap[key]) counts[key]++;
+            }
+        }
+        return counts;
     }
 
     /** Cargo aboard our supply ships. */
@@ -607,12 +641,12 @@ export class HexWorld {
 
     /** Our ships on `hex` that can colonise. */
     colonyShipsAt(q: number, r: number): ShipEntity[] {
-        return this.ownShipsAt(q, r).filter((s) => !!SHIP_TYPES[s.shipType].canColonise);
+        return this.ownShipsAt(q, r).filter((s) => canColonise(s, this.balance));
     }
 
     /** Our transports on `hex`. */
     transportsAt(q: number, r: number): ShipEntity[] {
-        return this.ownShipsAt(q, r).filter(isTransport);
+        return this.ownShipsAt(q, r).filter((s) => isTransport(s, this.balance));
     }
 
     /** Units a transport carries, per its entity (falls back to our economy's unit list). */
@@ -623,7 +657,7 @@ export class HexWorld {
     /** Unowned build site the selected colony ship is sitting on, if it could colonise it. */
     get colonisableLocation(): { ship: ShipEntity; location: LocationEntity } | undefined {
         const ship = this.selectedShip;
-        if (!ship || ship.sideId !== this.sideId || !SHIP_TYPES[ship.shipType].canColonise) {
+        if (!ship || ship.sideId !== this.sideId || !canColonise(ship, this.balance)) {
             return undefined;
         }
         const location = this.entitiesAt(ship.q, ship.r).find(
@@ -649,7 +683,9 @@ export class HexWorld {
     /** Invasion the selected transport could launch from its hex. */
     get invasionOption(): { location: LocationEntity; ships: ShipEntity[] } | undefined {
         const ship = this.selectedShip;
-        if (!ship || ship.sideId !== this.sideId || !isTransport(ship)) return undefined;
+        if (!ship || ship.sideId !== this.sideId || !isTransport(ship, this.balance)) {
+            return undefined;
+        }
         return this.invasionAt(ship.q, ship.r);
     }
 
@@ -1031,7 +1067,15 @@ export class HexWorld {
         const drawn = new Set<EntityId>();
         for (const { entity, pose, fullColour } of deferred) {
             const center = this.worldToScreen(pose, canvas);
-            drawEntityPlaceholder(context, center, size, entity, fullColour, pose.heading);
+            drawEntityPlaceholder(
+                context,
+                center,
+                size,
+                entity,
+                this.balance,
+                fullColour,
+                pose.heading
+            );
             drawn.add(entity.id);
         }
         for (const id of this._framePoses.keys()) {
@@ -1060,7 +1104,7 @@ export class HexWorld {
                 return false;
             }
             const center = this.worldToScreen(pose, canvas);
-            drawEntityPlaceholder(ctx, center, size, entity, true, pose.heading);
+            drawEntityPlaceholder(ctx, center, size, entity, this.balance, true, pose.heading);
             return true;
         });
     }
@@ -1099,7 +1143,7 @@ export class HexWorld {
                 deferred.push({ entity, pose, fullColour });
                 continue;
             }
-            drawEntityPlaceholder(ctx, center, size, entity, fullColour);
+            drawEntityPlaceholder(ctx, center, size, entity, this.balance, fullColour);
         }
     }
 
@@ -1190,6 +1234,7 @@ function drawEntityPlaceholder(
     center: Pixel,
     hexSize: number,
     entity: EntitySummary,
+    balance: EconomyBalance | null,
     fullColour: boolean,
     /** Ship heading override (radians); defaults to the entity's facing. */
     heading?: number
@@ -1364,7 +1409,7 @@ function drawEntityPlaceholder(
             ctx.translate(center.x, center.y);
             ctx.rotate(heading ?? axialDirectionAngle(entity.facing));
             ctx.fillStyle = sideColour(entity.sideId, "#d0d0d0");
-            if (SHIP_TYPES[entity.shipType].canColonise) {
+            if (canColonise(entity, balance)) {
                 drawColonyPod(ctx, scale, hexSize);
                 break;
             }
@@ -1383,7 +1428,7 @@ function drawEntityPlaceholder(
             ctx.beginPath();
             ctx.arc(scale * 0.45, 0, Math.max(1, scale * 0.12), 0, Math.PI * 2);
             ctx.fill();
-            if (isTransport(entity) && entity.carriedUnitIds?.length) {
+            if (isTransport(entity, balance) && entity.carriedUnitIds?.length) {
                 ctx.fillStyle = "#ffd166";
                 ctx.fillRect(-scale * 0.4, -scale * 0.18, scale * 0.36, scale * 0.36);
             }

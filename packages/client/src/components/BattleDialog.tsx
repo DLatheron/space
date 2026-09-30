@@ -1,9 +1,10 @@
 import type { ReactNode } from "react";
 import {
-    GROUND_UNIT_TYPES,
+    GROUND_UNIT_TYPE_INFO,
     groundUnitStats,
-    SHIP_TYPES,
+    SHIP_TYPE_INFO,
     type BattleId,
+    type EconomyBalance,
     type EntityId,
     type GroundUnitSummary,
     type SideId
@@ -29,7 +30,7 @@ function ShipList({ world, shipIds }: { world: HexWorld; shipIds: EntityId[] }) 
                 const entity = world.findEntityById(id);
                 const kind =
                     entity?.kind === "ship"
-                        ? SHIP_TYPES[entity.shipType].name
+                        ? SHIP_TYPE_INFO[entity.shipType].name
                         : entity?.kind === "supply_ship"
                           ? "Supply ship"
                           : undefined;
@@ -44,11 +45,11 @@ function ShipList({ world, shipIds }: { world: HexWorld; shipIds: EntityId[] }) 
     );
 }
 
-function UnitList({ units }: { units: GroundUnitSummary[] }) {
+function UnitList({ units, balance }: { units: GroundUnitSummary[]; balance: EconomyBalance }) {
     let attack = 0;
     let defence = 0;
     for (const unit of units) {
-        const stats = groundUnitStats(unit.unitType, unit.tier);
+        const stats = groundUnitStats(unit.unitType, unit.tier, balance);
         attack += stats.attack;
         defence += stats.defence;
     }
@@ -59,10 +60,10 @@ function UnitList({ units }: { units: GroundUnitSummary[] }) {
             </p>
             <ul className="battle-dialog__ships">
                 {units.map((unit) => {
-                    const stats = groundUnitStats(unit.unitType, unit.tier);
+                    const stats = groundUnitStats(unit.unitType, unit.tier, balance);
                     return (
                         <li key={unit.id}>
-                            {GROUND_UNIT_TYPES[unit.unitType].name}
+                            {GROUND_UNIT_TYPE_INFO[unit.unitType].name}
                             <span className="battle-dialog__muted">
                                 {" "}
                                 · T{unit.tier} · {stats.attack}/{stats.defence}
@@ -157,7 +158,8 @@ export function BattleDialog({ world, onResolve, onResolveGround }: BattleDialog
     }
 
     const ground = world.groundBattleToResolve;
-    if (ground) {
+    const balance = world.balance;
+    if (ground && balance) {
         const locationName = world.findEntityById(ground.locationId)?.name ?? "the location";
         return (
             <BattlePanel
@@ -166,12 +168,12 @@ export function BattleDialog({ world, onResolve, onResolveGround }: BattleDialog
                     {
                         sideId: ground.attackerSideId,
                         role: "Invader",
-                        content: <UnitList units={ground.attackerUnits} />
+                        content: <UnitList units={ground.attackerUnits} balance={balance} />
                     },
                     {
                         sideId: ground.defenderSideId,
                         role: "Garrison",
-                        content: <UnitList units={ground.defenderUnits} />
+                        content: <UnitList units={ground.defenderUnits} balance={balance} />
                     }
                 ]}
                 note={`Choose the victor. The losing side's units are destroyed; if the invaders win they capture ${locationName}.`}

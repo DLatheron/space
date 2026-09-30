@@ -1,5 +1,6 @@
 import { axialRange } from "@space/maths";
-import { STARTING_STOCKPILE, type ServerToClientMessage } from "@space/shared-data";
+import { type EconomyBalance, type ServerToClientMessage } from "@space/shared-data";
+import { defaultEconomyBalance, EconomyBalanceConfig } from "../config/config.schema.js";
 import type { Client } from "./Client.js";
 import { Game } from "./Game.js";
 import type { EntityOf } from "./map/types.js";
@@ -15,10 +16,16 @@ const mockConfig = vi.hoisted(() => ({
     mapSeed: 7,
     revealMap: false,
     fullVisibility: false,
+    economy: undefined as EconomyBalance | undefined,
     logLevels: {}
 }));
 
-vi.mock("../config/config.schema.js", () => ({ config: mockConfig }));
+const DEFAULTS = defaultEconomyBalance();
+
+vi.mock("../config/config.schema.js", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("../config/config.schema.js")>()),
+    config: mockConfig
+}));
 
 type MessageOf<T extends ServerToClientMessage["type"]> = Extract<
     ServerToClientMessage,
@@ -37,8 +44,12 @@ function connect(game: Game, id: string) {
     return { client, messages, last };
 }
 
-function createGame(flags: { revealMap: boolean; fullVisibility: boolean }) {
-    Object.assign(mockConfig, flags);
+function createGame(flags: {
+    revealMap: boolean;
+    fullVisibility: boolean;
+    economy?: EconomyBalance;
+}) {
+    Object.assign(mockConfig, { economy: undefined }, flags);
     const game = new Game("owner");
     const alpha = connect(game, "client-alpha");
     const beta = connect(game, "client-beta");
@@ -101,8 +112,9 @@ describe("Game economy messages", () => {
         const { game, alpha, beta } = createGame({ revealMap: false, fullVisibility: false });
         const init = alpha.last("server:map:init")!.payload;
         expect(init.economy).toMatchObject({ shipCount: 2, shipCap: 3, techs: [] });
-        expect(init.economy.locations[0].stockpile).toEqual(STARTING_STOCKPILE);
+        expect(init.economy.locations[0].stockpile).toEqual(DEFAULTS.startingStockpile);
         expect(init.groundBattles).toEqual([]);
+        expect(init.balance).toEqual(defaultEconomyBalance());
 
         const mark = alpha.messages.length;
         game.queueMessage({ type: "client:turn:end", payload: {} }, alpha.client);
@@ -117,7 +129,7 @@ describe("Game economy messages", () => {
         expect(types.lastIndexOf("server:turn:state")).toBeGreaterThan(economy);
         expect(
             alpha.last("server:economy:state")!.payload.locations[0].stockpile.money
-        ).toBeGreaterThan(STARTING_STOCKPILE.money);
+        ).toBeGreaterThan(DEFAULTS.startingStockpile.money);
         game.destroyGame();
     });
 
@@ -154,6 +166,68 @@ describe("Game economy messages", () => {
         expect(alpha.last("server:economy:state")!.payload.locations[0].orders).toMatchObject([
             { priority: "high" }
         ]);
+        game.destroyGame();
+    });
+
+    it("uses ship, structure and starting values from the economy config", async () => {
+        const economy = EconomyBalanceConfig.parse({
+            startingShips: ["scout", "colony_ship"],
+            planetBaseIncomePerLevel: { money: 0, materials: 0, population: 0, science: 0 },
+            structures: {
+                trade_hub: { cost: { materials: 30, population: 0 }, buildTurns: 1 },
+                habitat: { produces: { population: 0, money: 77 } }
+            },
+            ships: { colony_ship: { hp: 9, maxMovementPoints: 4 } }
+        });
+        const { game, alpha, beta } = createGame({
+            revealMap: false,
+            fullVisibility: false,
+            economy
+        });
+        const init = alpha.last("server:map:init")!.payload;
+        expect(init.balance).toEqual(economy);
+        const fleet = game.entities.ofKind("ship").filter((s) => s.sideId === "alpha");
+        expect(fleet.map((s) => s.shipType).sort()).toEqual(["colony_ship", "scout"]);
+        expect(fleet.find((s) => s.shipType === "colony_ship")).toMatchObject({
+            hp: 9,
+            maxMovementPoints: 4
+        });
+
+        const home = game.entities.ofKind("planet").find((p) => p.sideId === "alpha")!;
+        const trade = game.economy.build("alpha", home.id, {
+            kind: "structure",
+            structureType: "trade_hub"
+        });
+        expect(trade.ok && trade.order.cost).toEqual({
+            money: 0,
+            materials: 30,
+            population: 0,
+            science: 0
+        });
+        expect(trade.ok && trade.order.ratePerTurn.materials).toBe(30);
+        game.economy.build("alpha", home.id, { kind: "structure", structureType: "habitat" });
+
+        const endTurn = async (turn: number) => {
+            game.queueMessage({ type: "client:turn:end", payload: {} }, alpha.client);
+            game.queueMessage({ type: "client:turn:end", payload: {} }, beta.client);
+            await vi.waitFor(() =>
+                expect(alpha.last("server:turn:state")?.payload.turn).toBe(turn)
+            );
+        };
+        await endTurn(2);
+        expect(game.economy.locationEconomy(home.id)!.installations.map((i) => i.type)).toEqual([
+            "trade_hub"
+        ]);
+        // Installations run one at a time: the habitat takes its default 2 turns after the hub.
+        await endTurn(3);
+        await endTurn(4);
+        await endTurn(5);
+        expect(game.economy.stateFor("alpha").lastIncome).toEqual({
+            money: 40 + 77,
+            materials: 0,
+            population: 0,
+            science: 0
+        });
         game.destroyGame();
     });
 

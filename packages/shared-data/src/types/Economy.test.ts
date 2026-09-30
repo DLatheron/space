@@ -3,9 +3,11 @@ import {
     buildItemCost,
     buildItemName,
     buildItemTurns,
+    buildSlots,
     canBuild,
     countQueuedShips,
     createBuildOrder,
+    depositCapped,
     fundOrders,
     groundUnitStats,
     HOME_PLANET_LEVEL,
@@ -16,6 +18,7 @@ import {
     maxEnhancementTierFor,
     orderDemands,
     packCargo,
+    partitionOrders,
     ratePerTurn,
     resourceUnits,
     shipCapFor,
@@ -23,7 +26,9 @@ import {
     siteForEntity,
     slotsForEntity,
     slotsUsed,
-    STARTING_STOCKPILE,
+    stockpileCap,
+    storageRoom,
+    structureDef,
     structureOutput,
     supplyCapacityFor,
     supplySpeedFor,
@@ -34,14 +39,174 @@ import {
     type BuildItem,
     type BuildOrder,
     type BuildPriority,
+    type EconomyBalance,
     type Installation,
     type LocationEconomy,
-    type Resources
+    type Resources,
+    type ShipBalance,
+    type StorageStructureBalance,
+    type StructureBalance
 } from "../index.js";
 
 function res(money = 0, materials = 0, population = 0, science = 0): Resources {
     return { money, materials, population, science };
 }
+
+function storage(capBonus: Resources, pillageProtection = 0.5): StorageStructureBalance {
+    return {
+        cost: res(100, 50, 5),
+        buildTurns: 2,
+        sites: ["planet", "moon"],
+        slots: 1,
+        capBonus,
+        pillageProtection,
+        maxTier: 3
+    };
+}
+
+function structure(overrides: Partial<StructureBalance>): StructureBalance {
+    return {
+        cost: res(100, 150, 10),
+        buildTurns: 2,
+        sites: ["planet"],
+        requires: [],
+        requiresTech: null,
+        produces: res(),
+        shipCapBonus: 0,
+        unique: false,
+        slots: 1,
+        maxTier: 1,
+        ...overrides
+    };
+}
+
+function ship(overrides: Partial<ShipBalance>): ShipBalance {
+    return {
+        cost: res(100, 100, 5),
+        buildTurns: 2,
+        maxMovementPoints: 3,
+        hp: 6,
+        requires: ["shipyard"],
+        requiresTech: null,
+        maxTier: 3,
+        unitCapacity: 0,
+        canColonise: false,
+        ...overrides
+    };
+}
+
+const STARTING_STOCKPILE = res(1000, 1000, 200, 100);
+
+const balance: EconomyBalance = {
+    startingStockpile: STARTING_STOCKPILE,
+    startingShips: ["scout", "frigate"],
+    planetBaseIncomePerLevel: res(5, 5, 2, 1),
+    structureTierOutput: [1, 1.5, 2],
+    enhancementCostFactor: { "2": 0.5, "3": 1 },
+    structures: {
+        habitat: structure({
+            cost: res(50, 100),
+            sites: ["planet", "moon"],
+            produces: res(0, 0, 10),
+            maxTier: 3
+        }),
+        mine: structure({
+            cost: res(100, 0, 10),
+            sites: ["planet", "moon", "asteroid"],
+            produces: res(0, 40),
+            maxTier: 3
+        }),
+        trade_hub: structure({
+            cost: res(0, 100, 10),
+            sites: ["planet", "moon"],
+            produces: res(40),
+            maxTier: 3
+        }),
+        shipyard: structure({ cost: res(150, 200, 20), buildTurns: 3, unique: true }),
+        advanced_shipyard: structure({
+            cost: res(250, 300, 30),
+            buildTurns: 4,
+            requires: ["shipyard"],
+            requiresTech: "advanced_shipyard",
+            unique: true
+        }),
+        docks: structure({ requires: ["shipyard"], shipCapBonus: 1 }),
+        science_academy: structure({
+            cost: res(200, 150, 20),
+            buildTurns: 3,
+            produces: res(0, 0, 0, 20),
+            unique: true,
+            maxTier: 3
+        }),
+        barracks: structure({
+            sites: ["planet", "moon"],
+            requiresTech: "ground_forces",
+            unique: true
+        })
+    },
+    ships: {
+        scout: ship({ maxMovementPoints: 5 }),
+        frigate: ship({
+            cost: res(200, 300, 15),
+            buildTurns: 3,
+            hp: 12,
+            requires: ["advanced_shipyard"]
+        }),
+        colony_ship: ship({
+            cost: res(200, 200, 50),
+            buildTurns: 3,
+            maxMovementPoints: 2,
+            hp: 4,
+            maxTier: 1,
+            canColonise: true
+        }),
+        transport: ship({
+            cost: res(100, 150, 5),
+            hp: 8,
+            requiresTech: "transports",
+            unitCapacity: 4
+        })
+    },
+    shipTiers: { hpMultiplier: [1, 1.5, 2], movementBonus: [0, 0, 1] },
+    groundUnits: {
+        infantry: {
+            cost: res(50, 30, 20),
+            buildTurns: 2,
+            attack: 2,
+            defence: 3,
+            requires: ["barracks"],
+            requiresTech: "ground_forces",
+            maxTier: 3
+        },
+        armour: {
+            cost: res(120, 150, 10),
+            buildTurns: 3,
+            attack: 5,
+            defence: 4,
+            requires: ["barracks"],
+            requiresTech: "ground_forces",
+            maxTier: 3
+        }
+    },
+    groundUnitTiers: { attackBonus: [0, 1, 2], defenceBonus: [0, 1, 2] },
+    stockpileCaps: { default: res(100, 50, 50, 50), home: res(2000, 2000, 500, 500) },
+    storageStructures: {
+        vault: storage(res(200)),
+        depot: storage(res(0, 200)),
+        archive: storage(res(0, 0, 0, 150)),
+        quarters: storage(res(0, 0, 150)),
+        warehouse: { ...storage(res(75, 75, 50, 50), 0.2), slots: 2 }
+    },
+    buildSlots: {
+        base: { ships: 0, installations: 1, groundUnits: 0, research: 0 },
+        structures: {
+            shipyard: { ships: 1 },
+            advanced_shipyard: { ships: 1 },
+            barracks: { groundUnits: 1 },
+            science_academy: { research: 1 }
+        }
+    }
+};
 
 let nextId = 0;
 function inst(type: Installation["type"], tier = 1): Installation {
@@ -62,7 +227,7 @@ function location(overrides: Partial<LocationEconomy> = {}): LocationEconomy {
 }
 
 function ctx(overrides: Partial<BuildContext> = {}): BuildContext {
-    return { shipCount: 2, shipCap: 3, techs: [], ...overrides };
+    return { shipCount: 2, shipCap: 3, techs: [], balance, ...overrides };
 }
 
 /** Order with a hand-picked cost and build time (money only unless given). */
@@ -98,7 +263,7 @@ describe("ratePerTurn", () => {
 
 describe("createBuildOrder", () => {
     it("fills cost and rate from the item, defaulting to medium priority", () => {
-        const o = createBuildOrder("o1", mine);
+        const o = createBuildOrder("o1", mine, balance);
         expect(o).toEqual({
             id: "o1",
             item: mine,
@@ -107,7 +272,7 @@ describe("createBuildOrder", () => {
             applied: zeroResources(),
             ratePerTurn: res(50, 0, 5, 0)
         });
-        expect(createBuildOrder("o2", scout, "high").priority).toBe("high");
+        expect(createBuildOrder("o2", scout, balance, "high").priority).toBe("high");
     });
 });
 
@@ -316,25 +481,75 @@ describe("buildItem helpers", () => {
         expect(buildItemName(research)).toBe("Ground Forces");
         expect(buildItemName(infantry)).toBe("Infantry");
         expect(buildItemName(upgrade)).toBe("Frigate tier 2");
-        expect(buildItemTurns(upgrade)).toBe(3);
-        expect(buildItemCost(upgrade)).toEqual(res(100, 150, 0, 0));
-        expect(buildItemCost({ ...upgrade, tier: 3 } as BuildItem)).toEqual(res(200, 300, 0, 0));
+        expect(buildItemTurns(upgrade, balance)).toBe(3);
+        expect(buildItemCost(upgrade, balance)).toEqual(res(100, 150, 0, 0));
+        expect(buildItemCost({ ...upgrade, tier: 3 } as BuildItem, balance)).toEqual(
+            res(200, 300, 0, 0)
+        );
     });
 
     it("borrows population only for things that exist afterwards", () => {
-        expect(borrowedPopulation(mine)).toBe(10);
-        expect(borrowedPopulation({ kind: "groundUnit", unitType: "infantry" })).toBe(20);
-        expect(borrowedPopulation({ kind: "research", techId: "transports" })).toBe(0);
+        expect(borrowedPopulation(mine, balance)).toBe(10);
+        expect(borrowedPopulation({ kind: "groundUnit", unitType: "infantry" }, balance)).toBe(20);
+        expect(borrowedPopulation({ kind: "research", techId: "transports" }, balance)).toBe(0);
     });
 });
 
 describe("tier stats", () => {
     it("scales structure output, ship stats and ground unit stats", () => {
-        expect(structureOutput("mine", 1)).toEqual(res(0, 40));
-        expect(structureOutput("mine", 3)).toEqual(res(0, 80));
-        expect(shipStats("frigate", 2)).toEqual({ hp: 18, maxMovementPoints: 3 });
-        expect(shipStats("frigate", 3)).toEqual({ hp: 24, maxMovementPoints: 4 });
-        expect(groundUnitStats("armour", 3)).toEqual({ attack: 7, defence: 6 });
+        expect(structureOutput("mine", 1, balance)).toEqual(res(0, 40));
+        expect(structureOutput("mine", 3, balance)).toEqual(res(0, 80));
+        expect(shipStats("frigate", 2, balance)).toEqual({ hp: 18, maxMovementPoints: 3 });
+        expect(shipStats("frigate", 3, balance)).toEqual({ hp: 24, maxMovementPoints: 4 });
+        expect(groundUnitStats("armour", 3, balance)).toEqual({ attack: 7, defence: 6 });
+    });
+
+    it("takes tier multipliers and bonuses from the balance", () => {
+        const custom: EconomyBalance = {
+            ...balance,
+            structureTierOutput: [1, 3, 5],
+            shipTiers: { hpMultiplier: [1, 1, 3], movementBonus: [0, 2, 2] },
+            groundUnitTiers: { attackBonus: [0, 0, 4], defenceBonus: [0, 5, 5] },
+            enhancementCostFactor: { "2": 0.25, "3": 2 }
+        };
+        expect(structureOutput("mine", 2, custom)).toEqual(res(0, 120));
+        expect(shipStats("frigate", 2, custom)).toEqual({ hp: 12, maxMovementPoints: 5 });
+        expect(shipStats("frigate", 3, custom)).toEqual({ hp: 36, maxMovementPoints: 5 });
+        expect(groundUnitStats("armour", 3, custom)).toEqual({ attack: 9, defence: 9 });
+        const upgrade: BuildItem = {
+            kind: "enhancement",
+            target: { kind: "ship", shipId: "s1", shipType: "frigate" },
+            tier: 2
+        };
+        expect(buildItemCost(upgrade, custom)).toEqual(res(50, 75, 0, 0));
+        expect(buildItemCost({ ...upgrade, tier: 3 } as BuildItem, custom)).toEqual(
+            res(400, 600, 0, 0)
+        );
+    });
+});
+
+describe("structureDef", () => {
+    it("merges balance stats and derives what a structure unlocks", () => {
+        expect(structureDef("shipyard", balance)).toMatchObject({
+            name: "Shipyard",
+            cost: res(150, 200, 20),
+            unique: true,
+            unlocksShips: ["scout", "colony_ship", "transport"],
+            unlocksGroundUnits: []
+        });
+        expect(structureDef("barracks", balance).unlocksGroundUnits).toEqual([
+            "infantry",
+            "armour"
+        ]);
+        const moved: EconomyBalance = {
+            ...balance,
+            ships: {
+                ...balance.ships,
+                frigate: { ...balance.ships.frigate, requires: ["shipyard"] }
+            }
+        };
+        expect(structureDef("shipyard", moved).unlocksShips).toContain("frigate");
+        expect(structureDef("advanced_shipyard", moved).unlocksShips).toEqual([]);
     });
 });
 
@@ -366,36 +581,53 @@ describe("location entities", () => {
 
 describe("shipCapFor", () => {
     it("gives a level-10 home planet a cap of 3", () => {
-        expect(shipCapFor([location()])).toBe(3);
+        expect(shipCapFor([location()], balance)).toBe(3);
     });
 
     it("adds 1 per Docks, sums across planets and ignores moons' level", () => {
-        expect(shipCapFor([location({ installations: [inst("shipyard"), inst("docks")] })])).toBe(
-            4
-        );
-        expect(shipCapFor([location(), location({ level: 4 }), location({ level: 20 })])).toBe(
-            3 + 1 + 5
-        );
-        expect(shipCapFor([location({ site: "moon", level: 0, slots: 3 })])).toBe(0);
+        const docked = location({ installations: [inst("shipyard"), inst("docks")] });
+        expect(shipCapFor([docked], balance)).toBe(4);
+        expect(
+            shipCapFor([location(), location({ level: 4 }), location({ level: 20 })], balance)
+        ).toBe(3 + 1 + 5);
+        expect(shipCapFor([location({ site: "moon", level: 0, slots: 3 })], balance)).toBe(0);
+    });
+
+    it("takes the Docks bonus from the balance", () => {
+        const bigDocks: EconomyBalance = {
+            ...balance,
+            structures: {
+                ...balance.structures,
+                docks: { ...balance.structures.docks, shipCapBonus: 3 }
+            }
+        };
+        const docked = location({ installations: [inst("shipyard"), inst("docks")] });
+        expect(shipCapFor([docked], bigDocks)).toBe(6);
     });
 });
 
 describe("incomeFor", () => {
     it("scales planet base income by level and adds tiered installation output", () => {
-        expect(incomeFor([location()])).toEqual(res(50, 50, 20, 10));
+        expect(incomeFor([location()], balance)).toEqual(res(50, 50, 20, 10));
         expect(
-            incomeFor([
-                location({
-                    installations: [
-                        inst("mine"),
-                        inst("mine", 2),
-                        inst("habitat"),
-                        inst("shipyard")
-                    ]
-                }),
-                location({ level: 1 })
-            ])
+            incomeFor(
+                [
+                    location({
+                        installations: [
+                            inst("mine"),
+                            inst("mine", 2),
+                            inst("habitat"),
+                            inst("shipyard")
+                        ]
+                    }),
+                    location({ level: 1 })
+                ],
+                balance
+            )
         ).toEqual(res(55, 50 + 40 + 60 + 5, 20 + 10 + 2, 11));
+        expect(
+            incomeFor([location()], { ...balance, planetBaseIncomePerLevel: res(1, 2, 3, 4) })
+        ).toEqual(res(10, 20, 30, 40));
     });
 
     it("gives moons and asteroids no base income", () => {
@@ -405,7 +637,7 @@ describe("incomeFor", () => {
             slots: 2,
             installations: [inst("mine")]
         });
-        expect(locationIncome(asteroid)).toEqual(res(0, 40));
+        expect(locationIncome(asteroid, balance)).toEqual(res(0, 40));
     });
 });
 
@@ -413,10 +645,12 @@ describe("slotsUsed / countQueuedShips", () => {
     it("counts installations and ordered structures, and ordered ships", () => {
         const p = location({
             installations: [inst("mine")],
-            orders: [createBuildOrder("a", mine), createBuildOrder("b", scout)]
+            orders: [createBuildOrder("a", mine, balance), createBuildOrder("b", scout, balance)]
         });
-        expect(slotsUsed(p)).toBe(2);
-        expect(countQueuedShips([p, location({ orders: [createBuildOrder("c", scout)] })])).toBe(2);
+        expect(slotsUsed(p, balance)).toBe(2);
+        expect(
+            countQueuedShips([p, location({ orders: [createBuildOrder("c", scout, balance)] })])
+        ).toBe(2);
     });
 });
 
@@ -442,7 +676,7 @@ describe("canBuild", () => {
         const p = location({
             slots: 2,
             installations: [inst("mine")],
-            orders: [createBuildOrder("a", mine)]
+            orders: [createBuildOrder("a", mine, balance)]
         });
         expect(canBuild(ctx(), p, mine)).toEqual({ ok: false, reason: "No free structure slots" });
     });
@@ -454,7 +688,7 @@ describe("canBuild", () => {
             ok: false,
             reason: "Requires Shipyard"
         });
-        const ordered = location({ orders: [createBuildOrder("a", shipyard)] });
+        const ordered = location({ orders: [createBuildOrder("a", shipyard, balance)] });
         expect(canBuild(ctx(), ordered, docks)).toEqual({ ok: false, reason: "Requires Shipyard" });
         expect(canBuild(ctx(), location({ installations: [inst("shipyard")] }), docks)).toEqual({
             ok: true
@@ -626,12 +860,158 @@ describe("canBuild", () => {
             });
             const pending = location({
                 installations: [mineInst],
-                orders: [createBuildOrder("u", upgradeMine(2))]
+                orders: [createBuildOrder("u", upgradeMine(2), balance)]
             });
             expect(canBuild(techs, pending, upgradeMine(2))).toEqual({
                 ok: false,
                 reason: "Already being upgraded"
             });
         });
+    });
+
+    describe("storage structures and build slots", () => {
+        const vault: BuildItem = { kind: "structure", structureType: "vault" };
+        const warehouse: BuildItem = { kind: "structure", structureType: "warehouse" };
+
+        it("takes sites and slot use from the balance", () => {
+            const asteroid = location({ site: "asteroid", level: 0, slots: 2 });
+            expect(canBuild(ctx(), asteroid, vault)).toEqual({
+                ok: false,
+                reason: "Can't be built on an asteroid"
+            });
+            const oneFree = location({ slots: 2, installations: [inst("mine")] });
+            expect(canBuild(ctx(), oneFree, vault)).toEqual({ ok: true });
+            expect(canBuild(ctx(), oneFree, warehouse)).toEqual({
+                ok: false,
+                reason: "No free structure slots"
+            });
+            expect(slotsUsed(location({ installations: [inst("warehouse")] }), balance)).toBe(2);
+        });
+
+        it("rejects a category the location has no build slots for", () => {
+            const noYardSlots: EconomyBalance = {
+                ...balance,
+                buildSlots: { ...balance.buildSlots, structures: {} }
+            };
+            const yard = location({ installations: [inst("shipyard")] });
+            expect(canBuild(ctx({ balance: noYardSlots }), yard, scout)).toEqual({
+                ok: false,
+                reason: "No ship build slots here"
+            });
+            expect(canBuild(ctx(), yard, scout)).toEqual({ ok: true });
+        });
+    });
+});
+
+describe("stockpile caps", () => {
+    it("uses the default or home base cap plus tiered storage bonuses", () => {
+        expect(stockpileCap(location(), balance)).toEqual(res(100, 50, 50, 50));
+        expect(stockpileCap(location({ home: true }), balance)).toEqual(res(2000, 2000, 500, 500));
+        const stored = location({
+            installations: [inst("vault", 2), inst("depot"), inst("warehouse", 3), inst("mine")]
+        });
+        // Vault T2: 200 * 1.5; Warehouse T3: 2x its bonus.
+        expect(stockpileCap(stored, balance)).toEqual(
+            res(100 + 300 + 150, 50 + 200 + 150, 150, 150)
+        );
+    });
+
+    it("exposes pillage protection per storage structure", () => {
+        expect(structureDef("vault", balance).pillageProtection).toBe(0.5);
+        expect(structureDef("warehouse", balance).pillageProtection).toBe(0.2);
+        expect(structureDef("mine", balance).pillageProtection).toBeUndefined();
+    });
+
+    it("costs storage structures from the balance", () => {
+        const vault: BuildItem = { kind: "structure", structureType: "vault" };
+        expect(buildItemCost(vault, balance)).toEqual(res(100, 50, 5));
+        expect(buildItemTurns(vault, balance)).toBe(2);
+        expect(buildItemName(vault)).toBe("Vault");
+    });
+
+    it("deposits only what fits and keeps an existing excess", () => {
+        expect(depositCapped(res(80, 40), res(50, 50), res(100, 50))).toEqual({
+            stockpile: res(100, 50),
+            accepted: res(20, 10),
+            overflow: res(30, 40)
+        });
+        expect(depositCapped(res(150), res(10), res(100)).stockpile).toEqual(res(150));
+        expect(storageRoom(res(150, 10), res(100, 50))).toEqual(res(0, 40));
+    });
+});
+
+describe("buildSlots / partitionOrders", () => {
+    const ids = (orders: readonly BuildOrder[]) => orders.map((o) => o.id);
+
+    it("gives 1 ship slot per Shipyard and another for an Advanced Shipyard", () => {
+        expect(buildSlots(location(), balance)).toEqual({
+            ships: 0,
+            installations: 1,
+            groundUnits: 0,
+            research: 0
+        });
+        const yards = location({ installations: [inst("shipyard"), inst("advanced_shipyard")] });
+        expect(buildSlots(yards, balance).ships).toBe(2);
+    });
+
+    it("activates orders within each category by priority, then age", () => {
+        const p = location({
+            installations: [inst("shipyard")],
+            orders: [
+                createBuildOrder("s1", scout, balance),
+                createBuildOrder("m1", mine, balance),
+                createBuildOrder("s2", scout, balance, "high"),
+                createBuildOrder("m2", mine, balance),
+                createBuildOrder("s3", scout, balance)
+            ]
+        });
+        const { active, waiting } = partitionOrders(p, balance);
+        expect(ids(active)).toEqual(["m1", "s2"]);
+        expect(ids(waiting)).toEqual(["s1", "m2", "s3"]);
+    });
+
+    it("lets two ships build at once with an Advanced Shipyard", () => {
+        const p = location({
+            installations: [inst("shipyard"), inst("advanced_shipyard")],
+            orders: [
+                createBuildOrder("s1", scout, balance),
+                createBuildOrder("s2", scout, balance),
+                createBuildOrder("s3", scout, balance)
+            ]
+        });
+        expect(ids(partitionOrders(p, balance).active)).toEqual(["s1", "s2"]);
+    });
+
+    it("counts installation upgrades as installations and never limits ship upgrades", () => {
+        const mineInst = inst("mine");
+        const upgradeMine = createBuildOrder(
+            "u1",
+            {
+                kind: "enhancement",
+                target: {
+                    kind: "installation",
+                    installationId: mineInst.id,
+                    structureType: "mine"
+                },
+                tier: 2
+            },
+            balance
+        );
+        const upgradeShip = createBuildOrder(
+            "u2",
+            {
+                kind: "enhancement",
+                target: { kind: "ship", shipId: "s1", shipType: "scout" },
+                tier: 2
+            },
+            balance
+        );
+        const p = location({
+            installations: [mineInst],
+            orders: [upgradeMine, createBuildOrder("m1", mine, balance), upgradeShip]
+        });
+        const { active, waiting } = partitionOrders(p, balance);
+        expect(ids(active)).toEqual(["u1", "u2"]);
+        expect(ids(waiting)).toEqual(["m1"]);
     });
 });

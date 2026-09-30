@@ -1,5 +1,5 @@
 import {
-    SHIP_TYPES,
+    shipDef,
     type BattleId,
     type EntityId,
     type GroundBattleInfo,
@@ -81,7 +81,8 @@ export class GroundManager {
         if (!transport.ok) return transport;
         const { ship } = transport;
         const carried = ship.carriedUnitIds ?? [];
-        if (carried.length + unitIds.length > (SHIP_TYPES[ship.shipType].unitCapacity ?? 0)) {
+        const capacity = this._economy.balance.ships[ship.shipType].unitCapacity;
+        if (carried.length + unitIds.length > capacity) {
             return { ok: false, error: "Not enough room aboard" };
         }
         for (const unitId of unitIds) {
@@ -244,8 +245,9 @@ export class GroundManager {
         if (!sideId) return { ok: false, error: "You are not assigned to a side" };
         const ship = this._entities.getOfKind(shipId, "ship");
         if (!ship || ship.sideId !== sideId) return { ok: false, error: `Unknown ship ${shipId}` };
-        if (!SHIP_TYPES[ship.shipType].unitCapacity) {
-            return { ok: false, error: `${SHIP_TYPES[ship.shipType].name} cannot carry units` };
+        const def = shipDef(ship.shipType, this._economy.balance);
+        if (!def.unitCapacity) {
+            return { ok: false, error: `${def.name} cannot carry units` };
         }
         if (this._battles?.findByShip(shipId)) {
             return { ok: false, error: `Ship ${shipId} is locked in battle` };

@@ -1,35 +1,45 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
 import { useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import {
-    addResources,
+    BUILD_CATEGORIES,
+    buildCategory,
     buildItemCost,
     buildItemName,
     buildItemTurns,
+    buildSlots,
     canBuild,
     DEFAULT_BUILD_PRIORITY,
+    depositCapped,
     fundOrders,
-    GROUND_UNIT_TYPES,
+    GROUND_UNIT_TYPE_INFO,
+    groundUnitDef,
     groundUnitStats,
     GroundUnitType,
     isFullyFunded,
     locationIncome,
+    partitionOrders,
     RESOURCE_KEYS,
-    SHIP_TYPES,
+    shipDef,
     ShipType,
     siteForEntity,
     slotsForEntity,
     slotsUsed,
+    stockpileCap,
+    structureCapBonus,
+    structureDef,
+    STRUCTURE_INFO,
     structureOutput,
-    STRUCTURE_TYPES,
     StructureType,
     sumResources,
     TECHS,
     TechId,
     zeroResources,
+    type BuildCategory,
     type BuildContext,
     type BuildItem,
     type BuildOrder,
     type BuildPriority,
+    type EconomyBalance,
     type EntityId,
     type GroundUnit,
     type LocationEconomy,
@@ -109,27 +119,51 @@ function locationKindLabel(location: LocationEntity): string {
     return site ? SITE_LABELS[site] : "Asteroid";
 }
 
+const CATEGORY_LABELS: Record<BuildCategory, string> = {
+    ships: "Ships",
+    installations: "Installations",
+    groundUnits: "Ground units",
+    research: "Research"
+};
+
 function outputSummary(output: Partial<Resources>): string[] {
     return RESOURCE_KEYS.filter((key) => output[key]).map(
         (key) => `+${formatNumber(output[key] ?? 0)} ${RESOURCE_SHORT_LABELS[key]}/turn`
     );
 }
 
-function itemSummary(item: BuildItem): string {
+function capSummary(bonus: Resources): string[] {
+    return RESOURCE_KEYS.filter((key) => bonus[key]).map(
+        (key) => `+${formatNumber(bonus[key])} ${RESOURCE_SHORT_LABELS[key]} cap`
+    );
+}
+
+function itemSummary(item: BuildItem, balance: EconomyBalance): string {
     switch (item.kind) {
         case "ship": {
-            const def = SHIP_TYPES[item.shipType];
+            const def = balance.ships[item.shipType];
             const parts = [`MP ${def.maxMovementPoints}`, `HP ${def.hp}`];
             if (def.canColonise) parts.push("Can colonise");
             if (def.unitCapacity) parts.push(`Carries ${def.unitCapacity} units`);
             return parts.join(" · ");
         }
         case "structure": {
-            const def = STRUCTURE_TYPES[item.structureType];
-            return [def.description, ...outputSummary(def.produces ?? {})].join(" ");
+            const def = structureDef(item.structureType, balance);
+            const parts = [
+                def.description,
+                ...outputSummary(def.produces ?? {}),
+                ...capSummary(structureCapBonus(item.structureType, 1, balance))
+            ];
+            if (def.pillageProtection) {
+                parts.push(`${Math.round(def.pillageProtection * 100)}% pillage protection`);
+            }
+            if (def.slots !== undefined && def.slots !== 1) {
+                parts.push(`Uses ${def.slots} slots`);
+            }
+            return parts.join(" ");
         }
         case "groundUnit": {
-            const def = GROUND_UNIT_TYPES[item.unitType];
+            const def = groundUnitDef(item.unitType, balance);
             return `${def.description} Attack ${def.attack} · Defence ${def.defence}`;
         }
         case "research":
@@ -230,15 +264,15 @@ type OptionProps = {
 function BuildOption({ item, context, economy, onBuild, label = "Build" }: OptionProps) {
     const check = canBuild(context, economy, item);
     const reason = check.ok ? undefined : check.reason;
-    const summary = itemSummary(item);
-    const turns = buildItemTurns(item);
+    const summary = itemSummary(item, context.balance);
+    const turns = buildItemTurns(item, context.balance);
     return (
         <li className="planet-page__option">
             <div className="planet-page__option-main">
                 <strong>{buildItemName(item)}</strong>
                 {summary && <span className="planet-page__muted">{summary}</span>}
                 <span className="planet-page__option-meta">
-                    <CostList cost={buildItemCost(item)} />
+                    <CostList cost={buildItemCost(item, context.balance)} />
                     <span className="planet-page__turns">
                         {turns} turn{turns === 1 ? "" : "s"} min
                     </span>
@@ -271,7 +305,7 @@ function UpgradeButton({
 }) {
     if (item.kind !== "enhancement") return null;
     const check = canBuild(context, economy, item);
-    const cost = formatResources(buildItemCost(item), "free");
+    const cost = formatResources(buildItemCost(item, context.balance), "free");
     return (
         <button
             type="button"
@@ -285,9 +319,9 @@ function UpgradeButton({
     );
 }
 
-function unitLabel(unit: GroundUnit): string {
-    const stats = groundUnitStats(unit.unitType, unit.tier);
-    return `${GROUND_UNIT_TYPES[unit.unitType].name} T${unit.tier} · ${stats.attack}/${stats.defence}`;
+function unitLabel(unit: GroundUnit, balance: EconomyBalance): string {
+    const stats = groundUnitStats(unit.unitType, unit.tier, balance);
+    return `${GROUND_UNIT_TYPE_INFO[unit.unitType].name} T${unit.tier} · ${stats.attack}/${stats.defence}`;
 }
 
 type OwnLocationProps = {
@@ -303,34 +337,47 @@ function OwnLocationPanel({ world, location, economy, context, actions }: OwnLoc
     const locationId = location.id;
     const onBuild = (item: BuildItem) => actions.build(locationId, item, newPriority);
 
-    const used = slotsUsed(economy);
-    const income = locationIncome(economy);
+    const balance = context.balance;
+    const used = slotsUsed(economy, balance);
+    const income = locationIncome(economy, balance);
+    const cap = stockpileCap(economy, balance);
     const supplyShips = world.economy?.supplyShips ?? [];
     const inbound = supplyShips.filter((s) => s.destinationId === locationId);
+    const waitingShips = inbound.filter((s) => s.waiting);
     const inboundCargo = sumResources(inbound.map((s) => s.cargo));
     const arrivingCargo = sumResources(
         inbound
-            .filter((s) => s.route && s.route.length > 0 && s.route.length <= s.speed)
+            .filter(
+                (s) => s.waiting || (s.route && s.route.length > 0 && s.route.length <= s.speed)
+            )
             .map((s) => s.cargo)
     );
-    // End of turn adds production and arrivals to the stockpile before funding.
-    const preview = fundOrders(
-        addResources(addResources(economy.stockpile, income), arrivingCargo),
-        economy.orders
-    );
+    // End of turn adds production (excess lost) then arrivals (up to the cap) before funding.
+    const produced = depositCapped(economy.stockpile, income, cap).stockpile;
+    const { active, waiting } = partitionOrders(economy, balance);
+    const waitingIds = new Set(waiting.map((o) => o.id));
+    const preview = fundOrders(depositCapped(produced, arrivingCargo, cap).stockpile, active);
+    const previewById = new Map(preview.orders.map((o) => [o.id, o]));
+    const slots = buildSlots(economy, balance);
+    const slotSummary = BUILD_CATEGORIES.filter((c) => slots[c] > 0)
+        .map((c) => {
+            const running = active.filter((o) => buildCategory(o.item) === c).length;
+            return `${CATEGORY_LABELS[c]} ${running}/${slots[c]}`;
+        })
+        .join(" · ");
 
     const garrison = world.garrisonAt(locationId);
     const shipsHere = world.ownShipsAt(location.q, location.r);
-    const transports = shipsHere.filter(isTransport);
-    const hasAcademy = economy.installations.some((i) => STRUCTURE_TYPES[i.type].enablesResearch);
+    const transports = shipsHere.filter((s) => isTransport(s, balance));
+    const hasAcademy = economy.installations.some((i) => STRUCTURE_INFO[i.type].enablesResearch);
     const trainsUnits = economy.installations.some(
-        (i) => STRUCTURE_TYPES[i.type].unlocksGroundUnits?.length
+        (i) => structureDef(i.type, balance).unlocksGroundUnits?.length
     );
     const techs = world.economy?.techs ?? [];
     const pendingGround = world.groundBattleAt(locationId);
 
     const roomOn = (ship: ShipEntity) =>
-        (SHIP_TYPES[ship.shipType].unitCapacity ?? 0) - world.carriedUnitIds(ship).length;
+        balance.ships[ship.shipType].unitCapacity - world.carriedUnitIds(ship).length;
 
     return (
         <>
@@ -343,29 +390,51 @@ function OwnLocationPanel({ world, location, economy, context, actions }: OwnLoc
 
             <section className="planet-page__section">
                 <h3>
-                    Stockpile <span className="planet-page__muted">held here</span>
+                    Stockpile{" "}
+                    <span className="planet-page__muted">
+                        held here / cap{economy.home ? " (home planet)" : ""}
+                    </span>
                 </h3>
                 <ul className="planet-page__stockpile">
-                    {RESOURCE_KEYS.map((key) => (
-                        <li key={key} className="planet-page__stock">
-                            <span
-                                className={`planet-page__stock-label planet-page__cost-item--${key}`}
+                    {RESOURCE_KEYS.map((key) => {
+                        const full = economy.stockpile[key] >= cap[key];
+                        return (
+                            <li
+                                key={key}
+                                className={`planet-page__stock${full ? " planet-page__stock--full" : ""}`}
+                                title={
+                                    full
+                                        ? "Full: production over the cap is lost and supply ships wait to unload"
+                                        : undefined
+                                }
                             >
-                                {RESOURCE_LABELS[key]}
-                            </span>
-                            <strong>{formatNumber(economy.stockpile[key])}</strong>
-                            <span className="planet-page__muted">
-                                {income[key] > 0 && `+${formatNumber(income[key])}/turn`}
-                                {inboundCargo[key] > 0 &&
-                                    ` · ${formatNumber(inboundCargo[key])} inbound`}
-                            </span>
-                        </li>
-                    ))}
+                                <span
+                                    className={`planet-page__stock-label planet-page__cost-item--${key}`}
+                                >
+                                    {RESOURCE_LABELS[key]}
+                                    {full && <span className="planet-page__full"> Full</span>}
+                                </span>
+                                <span>
+                                    <strong>{formatNumber(economy.stockpile[key])}</strong>
+                                    <span className="planet-page__cap">
+                                        /{formatNumber(cap[key])}
+                                    </span>
+                                </span>
+                                <span className="planet-page__muted">
+                                    {income[key] > 0 && `+${formatNumber(income[key])}/turn`}
+                                    {inboundCargo[key] > 0 &&
+                                        ` · ${formatNumber(inboundCargo[key])} inbound`}
+                                </span>
+                            </li>
+                        );
+                    })}
                 </ul>
                 {inbound.length > 0 && (
                     <p className="planet-page__muted">
                         {inbound.length} supply ship{inbound.length === 1 ? "" : "s"} on the way;{" "}
                         {formatResources(arrivingCargo, "none")} arriving next turn.
+                        {waitingShips.length > 0 &&
+                            ` ${waitingShips.length} waiting here for room to unload.`}
                     </p>
                 )}
             </section>
@@ -394,8 +463,11 @@ function OwnLocationPanel({ world, location, economy, context, actions }: OwnLoc
                 {economy.installations.length ? (
                     <ul className="planet-page__list">
                         {economy.installations.map((inst) => {
-                            const def = STRUCTURE_TYPES[inst.type];
-                            const output = outputSummary(structureOutput(inst.type, inst.tier));
+                            const def = structureDef(inst.type, balance);
+                            const output = [
+                                ...outputSummary(structureOutput(inst.type, inst.tier, balance)),
+                                ...capSummary(structureCapBonus(inst.type, inst.tier, balance))
+                            ];
                             return (
                                 <li key={inst.id} className="planet-page__row">
                                     <span>
@@ -440,20 +512,32 @@ function OwnLocationPanel({ world, location, economy, context, actions }: OwnLoc
                         funded from the stockpile by priority
                     </span>
                 </h3>
+                {slotSummary && (
+                    <p className="planet-page__muted">
+                        Building at once: {slotSummary}. Extra orders wait, unfunded, by priority
+                        then age.
+                    </p>
+                )}
                 {economy.orders.length ? (
                     <ol className="planet-page__queue">
-                        {preview.orders.map((next, index) => {
-                            const order = economy.orders[index];
+                        {economy.orders.map((order) => {
+                            const queued = waitingIds.has(order.id);
+                            const next = previewById.get(order.id) ?? order;
                             const draw = preview.drawn[order.id] ?? zeroResources();
-                            const status = isFullyFunded(order)
-                                ? "Fully funded · completes at end of turn"
-                                : isFullyFunded(next)
-                                  ? "Completes at end of turn"
-                                  : RESOURCE_KEYS.some((k) => draw[k] > 0)
-                                    ? "Funding"
-                                    : "Waiting for resources";
+                            const status = queued
+                                ? "Queued · waiting for a build slot"
+                                : isFullyFunded(order)
+                                  ? "Fully funded · completes at end of turn"
+                                  : isFullyFunded(next)
+                                    ? "Completes at end of turn"
+                                    : RESOURCE_KEYS.some((k) => draw[k] > 0)
+                                      ? "Funding"
+                                      : "Waiting for resources";
                             return (
-                                <li key={order.id} className="planet-page__queue-entry">
+                                <li
+                                    key={order.id}
+                                    className={`planet-page__queue-entry${queued ? " planet-page__queue-entry--queued" : ""}`}
+                                >
                                     <div className="planet-page__queue-main">
                                         <span className="planet-page__order-head">
                                             <span>
@@ -515,7 +599,7 @@ function OwnLocationPanel({ world, location, economy, context, actions }: OwnLoc
                     <ul className="planet-page__list">
                         {garrison.map((unit) => (
                             <li key={unit.id} className="planet-page__row">
-                                <span>{unitLabel(unit)}</span>
+                                <span>{unitLabel(unit, balance)}</span>
                                 <span className="planet-page__row-actions">
                                     {transports.map((ship) => (
                                         <button
@@ -533,7 +617,7 @@ function OwnLocationPanel({ world, location, economy, context, actions }: OwnLoc
                                             {transports.length > 1 && ` → ${ship.name ?? ship.id}`}
                                         </button>
                                     ))}
-                                    {unit.tier < GROUND_UNIT_TYPES[unit.unitType].maxTier && (
+                                    {unit.tier < balance.groundUnits[unit.unitType].maxTier && (
                                         <UpgradeButton
                                             item={{
                                                 kind: "enhancement",
@@ -569,8 +653,8 @@ function OwnLocationPanel({ world, location, economy, context, actions }: OwnLoc
                     <ul className="planet-page__list">
                         {shipsHere.map((ship) => {
                             const tier = ship.tier ?? 1;
-                            const def = SHIP_TYPES[ship.shipType];
-                            const aboard = isTransport(ship)
+                            const def = shipDef(ship.shipType, balance);
+                            const aboard = isTransport(ship, balance)
                                 ? world.carriedUnitIds(ship).map((id) => ({
                                       id,
                                       unit: world.groundUnit(id)
@@ -617,11 +701,13 @@ function OwnLocationPanel({ world, location, economy, context, actions }: OwnLoc
                                             )}
                                         </span>
                                     </div>
-                                    {isTransport(ship) && (
+                                    {isTransport(ship, balance) && (
                                         <ul className="planet-page__aboard">
                                             {aboard.map(({ id, unit }) => (
                                                 <li key={id} className="planet-page__row">
-                                                    <span>{unit ? unitLabel(unit) : id}</span>
+                                                    <span>
+                                                        {unit ? unitLabel(unit, balance) : id}
+                                                    </span>
                                                     <button
                                                         type="button"
                                                         title="Land into this garrison"
@@ -691,7 +777,7 @@ function OwnLocationPanel({ world, location, economy, context, actions }: OwnLoc
                     {STRUCTURE_ITEMS.filter(
                         (item) =>
                             item.kind === "structure" &&
-                            STRUCTURE_TYPES[item.structureType].sites.includes(economy.site)
+                            structureDef(item.structureType, balance).sites.includes(economy.site)
                     ).map((item) => (
                         <BuildOption
                             key={itemKey(item)}
@@ -704,7 +790,7 @@ function OwnLocationPanel({ world, location, economy, context, actions }: OwnLoc
                 </ul>
             </section>
 
-            {STRUCTURE_TYPES.barracks.sites.includes(economy.site) && (
+            {structureDef("barracks", balance).sites.includes(economy.site) && (
                 <section className="planet-page__section">
                     <h3>Train ground units</h3>
                     {!trainsUnits && (
@@ -866,8 +952,18 @@ export function PlanetPage() {
         return () => window.removeEventListener("keydown", onKeyDown);
     }, [back]);
 
+    // Only a press that starts and ends on the backdrop closes, so a drag out of the panel doesn't.
+    const pressedBackdrop = useRef(false);
+    const onBackdropMouseDown = (e: MouseEvent) => {
+        pressedBackdrop.current = e.target === e.currentTarget;
+    };
+    const onBackdropClick = (e: MouseEvent) => {
+        if (pressedBackdrop.current && e.target === e.currentTarget) back();
+        pressedBackdrop.current = false;
+    };
+
     return (
-        <div className="planet-page">
+        <div className="planet-page" onMouseDown={onBackdropMouseDown} onClick={onBackdropClick}>
             <section className="planet-page__panel">
                 <header className="planet-page__header">
                     <h2>

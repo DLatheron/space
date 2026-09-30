@@ -1,58 +1,42 @@
 import { z } from "zod";
-import type { StructureType } from "./Economy.js";
+import type { EconomyBalance, GroundUnitBalance } from "./Economy.js";
 import { BattleId, EnhancementTier, EntityId, SideId } from "./PrimitiveTypes.js";
-import type { Resources } from "./Resources.js";
-import type { TechId } from "./Tech.js";
 
 export const GroundUnitType = z.enum(["infantry", "armour"]);
 export type GroundUnitType = z.infer<typeof GroundUnitType>;
 
-export type GroundUnitTypeDefinition = {
+/** Presentation fields; gameplay stats come from `EconomyBalance.groundUnits` (see `groundUnitDef`). */
+export type GroundUnitTypeInfo = {
     name: string;
     description: string;
-    /** `cost.population` is borrowed and returns home when the unit is disbanded or destroyed. */
-    cost: Resources;
-    buildTurns: number;
-    attack: number;
-    defence: number;
-    /** Structures that must be built at the location training this unit. */
-    requires: StructureType[];
-    requiresTech?: TechId;
-    maxTier: number;
 };
 
-export const GROUND_UNIT_TYPES: Record<GroundUnitType, GroundUnitTypeDefinition> = {
-    infantry: {
-        name: "Infantry",
-        description: "Cheap troops, best at holding ground.",
-        cost: { money: 50, materials: 30, population: 20, science: 0 },
-        buildTurns: 2,
-        attack: 2,
-        defence: 3,
-        requires: ["barracks"],
-        requiresTech: "ground_forces",
-        maxTier: 3
-    },
-    armour: {
-        name: "Armour",
-        description: "Heavy vehicles that spearhead invasions.",
-        cost: { money: 120, materials: 150, population: 10, science: 0 },
-        buildTurns: 3,
-        attack: 5,
-        defence: 4,
-        requires: ["barracks"],
-        requiresTech: "ground_forces",
-        maxTier: 3
-    }
+export type GroundUnitTypeDefinition = GroundUnitTypeInfo & GroundUnitBalance;
+
+export const GROUND_UNIT_TYPE_INFO: Record<GroundUnitType, GroundUnitTypeInfo> = {
+    infantry: { name: "Infantry", description: "Cheap troops, best at holding ground." },
+    armour: { name: "Armour", description: "Heavy vehicles that spearhead invasions." }
 };
 
-/** Each tier above 1 adds 1 attack and 1 defence. */
+export function groundUnitDef(
+    unitType: GroundUnitType,
+    balance: EconomyBalance
+): GroundUnitTypeDefinition {
+    return { ...GROUND_UNIT_TYPE_INFO[unitType], ...balance.groundUnits[unitType] };
+}
+
+/** Tier-boosted attack and defence (see `EconomyBalance.groundUnitTiers`). */
 export function groundUnitStats(
     unitType: GroundUnitType,
-    tier: number
+    tier: number,
+    balance: EconomyBalance
 ): { attack: number; defence: number } {
-    const def = GROUND_UNIT_TYPES[unitType];
-    return { attack: def.attack + (tier - 1), defence: def.defence + (tier - 1) };
+    const def = balance.groundUnits[unitType];
+    const index = Math.min(Math.max(tier, 1), 3) - 1;
+    return {
+        attack: def.attack + balance.groundUnitTiers.attackBonus[index],
+        defence: def.defence + balance.groundUnitTiers.defenceBonus[index]
+    };
 }
 
 export const GroundUnitLocation = z.discriminatedUnion("kind", [

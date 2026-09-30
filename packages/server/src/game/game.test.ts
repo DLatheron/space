@@ -6,15 +6,14 @@ import {
     locationIncome,
     PLANET_LEVEL_MAX,
     PLANET_LEVEL_MIN,
-    SHIP_TYPES,
-    STARTING_STOCKPILE,
-    STRUCTURE_TYPES,
     subtractResources,
     zeroResources,
     type BuildItem,
+    type EconomyBalance,
     type ShipType,
     type StructureType
 } from "@space/shared-data";
+import { defaultEconomyBalance } from "../config/config.schema.js";
 import { BattleManager } from "./Battle.js";
 import { EconomyManager } from "./EconomyManager.js";
 import { EntityManager } from "./EntityManager.js";
@@ -24,6 +23,22 @@ import type { EntityOf } from "./map/types.js";
 import { moveShip, validateShipMove } from "./moveShip.js";
 import { Side } from "./Side.js";
 import { TurnManager } from "./TurnManager.js";
+
+const DEFAULTS = defaultEconomyBalance();
+
+/** No stockpile caps or concurrency limits, for tests about funding itself. */
+function unlimitedBalance(): EconomyBalance {
+    const balance = defaultEconomyBalance();
+    const lots = { money: 1e9, materials: 1e9, population: 1e9, science: 1e9 };
+    return {
+        ...balance,
+        stockpileCaps: { default: lots, home: lots },
+        buildSlots: {
+            ...balance.buildSlots,
+            base: { ships: 99, installations: 99, groundUnits: 99, research: 99 }
+        }
+    };
+}
 
 function makeShip(id: string, sideId: string, q: number, r: number, mp = 3): EntityOf<"ship"> {
     return {
@@ -81,7 +96,7 @@ describe("generateSpaceMap", () => {
         }
         expect(entities.ofKind("hyperspace_tunnel").every((t) => !t.active)).toBe(true);
         for (const ship of entities.ofKind("ship")) {
-            expect(ship.maxMovementPoints).toBe(SHIP_TYPES[ship.shipType].maxMovementPoints);
+            expect(ship.maxMovementPoints).toBe(DEFAULTS.ships[ship.shipType].maxMovementPoints);
         }
     });
 
@@ -108,7 +123,9 @@ describe("EconomyManager", () => {
         entities.add(makeShip("ship-a2", "alpha", 5, 6));
         const betaHome = entities.add(makePlanet("home-b", 8, 13, HOME_PLANET_LEVEL, "beta"));
         entities.add(makeShip("ship-b2", "beta", 8, 14));
-        const economy = new EconomyManager(entities, ["alpha", "beta"]);
+        const economy = new EconomyManager(entities, ["alpha", "beta"], {
+            balance: unlimitedBalance()
+        });
         return { ...world, home, betaHome, economy };
     }
 
@@ -127,7 +144,7 @@ describe("EconomyManager", () => {
     function withShipyard() {
         const world = economyWorld();
         expect(world.economy.build("alpha", world.home.id, structure("shipyard")).ok).toBe(true);
-        advance(world.economy, STRUCTURE_TYPES.shipyard.buildTurns);
+        advance(world.economy, DEFAULTS.structures.shipyard.buildTurns);
         expect(
             world.economy.locationEconomy(world.home.id)?.installations.map((i) => i.type)
         ).toEqual(["shipyard"]);
@@ -146,25 +163,26 @@ describe("EconomyManager", () => {
                 site: "planet",
                 level: HOME_PLANET_LEVEL,
                 slots: HOME_PLANET_LEVEL,
-                stockpile: STARTING_STOCKPILE,
+                home: true,
+                stockpile: DEFAULTS.startingStockpile,
                 installations: [],
                 orders: []
             }
         ]);
-        expect(economy.totalStockpile("alpha")).toEqual(STARTING_STOCKPILE);
+        expect(economy.totalStockpile("alpha")).toEqual(DEFAULTS.startingStockpile);
     });
 
     it("places orders without paying up front and rejects locations that are not yours", () => {
         const { economy, home, betaHome } = economyWorld();
         const result = economy.build("alpha", home.id, structure("habitat"), "high");
         expect(result.ok).toBe(true);
-        expect(economy.stockpile(home.id)).toEqual(STARTING_STOCKPILE);
+        expect(economy.stockpile(home.id)).toEqual(DEFAULTS.startingStockpile);
         expect(economy.locationEconomy(home.id)?.orders).toEqual([
             {
                 id: result.ok ? result.order.id : "",
                 item: structure("habitat"),
                 priority: "high",
-                cost: STRUCTURE_TYPES.habitat.cost,
+                cost: DEFAULTS.structures.habitat.cost,
                 applied: zeroResources(),
                 ratePerTurn: { money: 25, materials: 50, population: 0, science: 0 }
             }
@@ -263,8 +281,8 @@ describe("EconomyManager", () => {
             name: "Scout 1",
             q: home.q,
             r: home.r,
-            movementPoints: SHIP_TYPES.scout.maxMovementPoints,
-            maxMovementPoints: SHIP_TYPES.scout.maxMovementPoints
+            movementPoints: DEFAULTS.ships.scout.maxMovementPoints,
+            maxMovementPoints: DEFAULTS.ships.scout.maxMovementPoints
         });
         expect(entities.get(spawned.id)).toBe(spawned);
         expect(entities.entitiesAt(home.q, home.r).map((e) => e.id)).toContain(spawned.id);
@@ -278,7 +296,9 @@ describe("EconomyManager", () => {
         economy.build("alpha", home.id, ship("scout"));
         const enemy = entities.add(makeShip("ship-e", "beta", home.q, home.r));
         expect(advance(economy, 3)).toEqual([]);
-        expect(economy.locationEconomy(home.id)?.orders[0].applied).toEqual(SHIP_TYPES.scout.cost);
+        expect(economy.locationEconomy(home.id)?.orders[0].applied).toEqual(
+            DEFAULTS.ships.scout.cost
+        );
         entities.remove(enemy.id);
         expect(advance(economy, 1)).toHaveLength(1);
     });
@@ -288,14 +308,13 @@ describe("EconomyManager", () => {
         economy.build("alpha", home.id, structure("habitat"));
 
         advance(economy, 1);
-        const base = locationIncome({
-            site: "planet",
-            level: HOME_PLANET_LEVEL,
-            installations: []
-        });
+        const base = locationIncome(
+            { site: "planet", level: HOME_PLANET_LEVEL, installations: [] },
+            DEFAULTS
+        );
         expect(economy.stateFor("alpha").lastIncome).toEqual(base);
         expect(economy.stockpile(home.id)).toEqual(
-            subtractResources(addResources(STARTING_STOCKPILE, base), {
+            subtractResources(addResources(DEFAULTS.startingStockpile, base), {
                 money: 25,
                 materials: 50
             })
@@ -304,10 +323,10 @@ describe("EconomyManager", () => {
         // The habitat completes during turn 2's advance, after that turn's income.
         advance(economy, 2);
         expect(economy.stateFor("alpha").lastIncome).toEqual(
-            addResources(base, STRUCTURE_TYPES.habitat.produces!)
+            addResources(base, DEFAULTS.structures.habitat.produces)
         );
         expect(economy.stockpile(betaHome.id)).toEqual(
-            addResources(STARTING_STOCKPILE, {
+            addResources(DEFAULTS.startingStockpile, {
                 money: base.money * 3,
                 materials: base.materials * 3,
                 population: base.population * 3,
@@ -321,15 +340,14 @@ describe("EconomyManager", () => {
         const habitat = economy.build("alpha", home.id, structure("habitat"));
         const orderId = habitat.ok ? habitat.order.id : "";
         advance(economy, 1);
-        const base = locationIncome({
-            site: "planet",
-            level: HOME_PLANET_LEVEL,
-            installations: []
-        });
+        const base = locationIncome(
+            { site: "planet", level: HOME_PLANET_LEVEL, installations: [] },
+            DEFAULTS
+        );
         expect(economy.cancel("alpha", home.id, "nope").ok).toBe(false);
         expect(economy.cancel("alpha", betaHome.id, orderId).ok).toBe(false);
         expect(economy.cancel("alpha", home.id, orderId).ok).toBe(true);
-        expect(economy.stockpile(home.id)).toEqual(addResources(STARTING_STOCKPILE, base));
+        expect(economy.stockpile(home.id)).toEqual(addResources(DEFAULTS.startingStockpile, base));
         expect(economy.locationEconomy(home.id)?.orders).toEqual([]);
     });
 
@@ -361,7 +379,10 @@ describe("EconomyManager", () => {
             site: "planet",
             level: 7,
             slots: 7,
-            stockpile: { ...zeroResources(), population: SHIP_TYPES.colony_ship.cost.population },
+            stockpile: {
+                ...zeroResources(),
+                population: DEFAULTS.ships.colony_ship.cost.population
+            },
             installations: [],
             orders: []
         });
@@ -462,7 +483,7 @@ describe("EconomyManager with instantBuild", () => {
             orders: []
         });
         expect(economy.stockpile(home.id)).toEqual(
-            subtractResources(STARTING_STOCKPILE, STRUCTURE_TYPES.shipyard.cost)
+            subtractResources(DEFAULTS.startingStockpile, DEFAULTS.structures.shipyard.cost)
         );
 
         const result = economy.build("alpha", home.id, { kind: "ship", shipType: "scout" });
@@ -495,7 +516,7 @@ describe("TurnManager with an economy", () => {
         const turns = new TurnManager(["alpha", "beta"], entities, economy);
 
         economy.build("alpha", home.id, { kind: "structure", structureType: "shipyard" });
-        for (let i = 0; i < STRUCTURE_TYPES.shipyard.buildTurns; i++) {
+        for (let i = 0; i < DEFAULTS.structures.shipyard.buildTurns; i++) {
             turns.endTurn("alpha");
             turns.endTurn("beta");
         }
@@ -507,7 +528,7 @@ describe("TurnManager with an economy", () => {
         expect(result.advanced).toBe(true);
         expect(result.economy?.spawnedShips).toHaveLength(1);
         expect(result.economy?.spawnedShips[0].movementPoints).toBe(
-            SHIP_TYPES.scout.maxMovementPoints
+            DEFAULTS.ships.scout.maxMovementPoints
         );
     });
 });

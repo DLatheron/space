@@ -73,6 +73,8 @@ export function ResourceBar({ world }: ResourceBarProps) {
 
     const atCap = economy.shipCount >= economy.shipCap;
     const stockpile = world.sideStockpile;
+    const cap = world.sideStockpileCap;
+    const full = world.fullLocations;
     const transit = world.cargoInTransit;
     const supplyShips = economy.supplyShips.length;
 
@@ -81,14 +83,19 @@ export function ResourceBar({ world }: ResourceBarProps) {
             <div className="resource-bar__inner">
                 {RESOURCE_KEYS.map((key) => {
                     const income = economy.lastIncome[key];
+                    const fullNote =
+                        full[key] > 0
+                            ? `; ${full[key]} location${full[key] === 1 ? " is" : "s are"} full`
+                            : "";
                     return (
                         <div
                             key={key}
-                            className={`resource-bar__item resource-bar__item--${key}`}
-                            title={`${RESOURCE_LABELS[key]}: ${formatNumber(stockpile[key])} across all locations, ${formatNumber(transit[key])} in transit (last income ${formatDelta(income)})`}
+                            className={`resource-bar__item resource-bar__item--${key}${full[key] > 0 ? " resource-bar__item--full" : ""}`}
+                            title={`${RESOURCE_LABELS[key]}: ${formatNumber(stockpile[key])} of ${formatNumber(cap[key])} storage across all locations${fullNote}, ${formatNumber(transit[key])} in transit (last income ${formatDelta(income)})`}
                         >
                             <span className="resource-bar__label">{RESOURCE_LABELS[key]}</span>
                             <AnimatedNumber value={stockpile[key]} />
+                            <span className="resource-bar__cap">/{formatNumber(cap[key])}</span>
                             {transit[key] > 0 && (
                                 <span className="resource-bar__transit">
                                     +{formatNumber(transit[key])}
