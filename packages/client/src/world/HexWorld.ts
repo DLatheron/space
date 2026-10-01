@@ -1096,7 +1096,13 @@ export class HexWorld {
                     reason: "Hyperdrive engaged: cancel the jump to move normally"
                 };
             }
-            return { type: "move", shipId: ship.id, to: { q: hex.q, r: hex.r } };
+            const move: HexClickAction = { type: "move", shipId: ship.id, to: { q: hex.q, r: hex.r } };
+            // A destination beyond this turn's reach leaves a standing order; deselect so
+            // the destination picker doesn't look like it still needs dismissing.
+            const route = this.previewRoute(hex);
+            const steps = Math.floor(ship.movementPoints / MOVE_COST_PER_HEX);
+            if (!route || route.length > steps) this._deselect();
+            return move;
         }
 
         const location = primaryEntity(entities.filter(isBuildSite));

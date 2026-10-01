@@ -86,6 +86,8 @@ describe("HexWorld.handleClick", () => {
             shipId: "ship-1",
             to: { q: 3, r: 2 }
         });
+        // Reachable this turn: stays selected to spend any movement left.
+        expect(world.selectedShipId).toBe("ship-1");
     });
 
     it("opens a lone planet and deselects a lone ship on a second click", () => {
@@ -99,8 +101,12 @@ describe("HexWorld.handleClick", () => {
         const world = makeWorld([planet, ship("ship-1", 0, 0, { movementPoints: 1 })]);
         click(world, 0, 0);
         expect(click(world, 4, 4)).toEqual({ type: "move", shipId: "ship-1", to: { q: 4, r: 4 } });
+        // Leaving a standing order deselects the ship.
+        expect(world.selectedShipId).toBeNull();
         // A far location is a destination too while a ship is selected.
+        click(world, 0, 0);
         expect(click(world, 2, 2)).toEqual({ type: "move", shipId: "ship-1", to: { q: 2, r: 2 } });
+        expect(world.selectedShipId).toBeNull();
     });
 
     it("stores a move order even with no movement left", () => {
