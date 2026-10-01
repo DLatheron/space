@@ -68,6 +68,7 @@ export function planShipRoute(
     const ship = entities.getOfKind(shipId, "ship");
     if (!ship) return { ok: false, error: `Unknown ship ${shipId}` };
     if (ship.sideId !== sideId) return { ok: false, error: `Ship ${shipId} is not yours` };
+    if (ship.carriedBy) return { ok: false, error: `Ship ${shipId} is aboard a carrier` };
 
     const target = findTileByAxial(entities.map, to.q, to.r);
     if (!target) return { ok: false, error: `Destination ${to.q},${to.r} is off the map` };

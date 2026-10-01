@@ -4,11 +4,13 @@ import type { Entity, EntityOf, MapTile } from "./map/types.js";
 
 /**
  * Id-indexed registry of every entity in a game. Keeps each tile's `entityIds`
- * stack in sync with entity positions.
+ * stack in sync with entity positions. Stowed entities (ships aboard a carrier) keep a
+ * position but are left off their tile's stack, so they never count as occupying a hex.
  */
 export class EntityManager {
     readonly map: SpaceMap;
     private readonly _entities = new Map<EntityId, Entity>();
+    private readonly _stowed = new Set<EntityId>();
 
     constructor(map: SpaceMap) {
         this.map = map;
@@ -71,23 +73,52 @@ export class EntityManager {
             tile.entityIds = tile.entityIds.filter((entityId) => entityId !== id);
         }
         this._entities.delete(id);
+        this._stowed.delete(id);
         return entity;
     }
 
-    /** Relocate an entity to `to`. Returns false if the entity or destination is missing. */
+    /**
+     * Relocate an entity to `to`, taking any ships aboard it along. Returns false if the
+     * entity or destination is missing.
+     */
     move(id: EntityId, to: AxialCoord): boolean {
         const entity = this._entities.get(id);
         const target = findTileByAxial(this.map, to.q, to.r);
         if (!entity || !target) return false;
 
-        const source = this.tileOf(entity);
-        if (source) {
-            source.entityIds = source.entityIds.filter((entityId) => entityId !== id);
+        if (!this._stowed.has(id)) {
+            const source = this.tileOf(entity);
+            if (source) {
+                source.entityIds = source.entityIds.filter((entityId) => entityId !== id);
+            }
+            target.entityIds.push(id);
         }
         entity.q = target.q;
         entity.r = target.r;
-        target.entityIds.push(id);
+        if (entity.kind === "ship") {
+            for (const passengerId of entity.carriedShipIds ?? []) this.move(passengerId, to);
+        }
         return true;
+    }
+
+    /** Take an entity off its tile's stack, keeping it registered at the same position. */
+    stow(id: EntityId): void {
+        const entity = this._entities.get(id);
+        if (!entity || this._stowed.has(id)) return;
+        const tile = this.tileOf(entity);
+        if (tile) tile.entityIds = tile.entityIds.filter((entityId) => entityId !== id);
+        this._stowed.add(id);
+    }
+
+    /** Put a stowed entity back on its tile's stack. */
+    unstow(id: EntityId): void {
+        const entity = this._entities.get(id);
+        if (!entity || !this._stowed.delete(id)) return;
+        this.tileOf(entity)?.entityIds.push(id);
+    }
+
+    isStowed(id: EntityId): boolean {
+        return this._stowed.has(id);
     }
 
     /**

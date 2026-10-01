@@ -54,8 +54,8 @@ function connect(game: Game, id: string) {
 type Connection = ReturnType<typeof connect>;
 
 /** A game on an empty map, so tests place exactly what they need. */
-function createGame() {
-    const game = new Game("owner");
+function createGame(rng?: () => number) {
+    const game = new Game("owner", { rng });
     for (const entity of [...game.entities.all()]) game.entities.remove(entity.id);
     const alpha = connect(game, "client-alpha");
     const beta = connect(game, "client-beta");
@@ -314,7 +314,7 @@ describe("Game supply ship messages", () => {
 
 describe("Game ground messages", () => {
     function invasionScenario(defended: boolean) {
-        const world = createGame();
+        const world = createGame(() => 0.5);
         const { game, planet, ship } = world;
         const home = planet("home-a", "alpha", 2, 10);
         const target = planet("target-b", "beta", 8, 10);
@@ -329,35 +329,11 @@ describe("Game ground messages", () => {
         return { ...world, home, target, transport, invaders, defender };
     }
 
-    it("includes pending ground battles in map:init on reconnect and follows resolution with tiles and economy", async () => {
+    it("fights ground combat at once, sending the combat before the tiles and economy", async () => {
         const { game, alpha, beta, target, transport, invaders, defender } = invasionScenario(true);
-        game.queueMessage(
-            { type: "client:invade", payload: { locationId: target.id, shipIds: [transport.id] } },
-            alpha.client
-        );
-        await vi.waitFor(() => expect(beta.last("server:ground:start")).toBeDefined());
-        const battle = alpha.last("server:ground:start")!.payload;
-        expect(battle).toMatchObject({
-            locationId: target.id,
-            attackerSideId: "alpha",
-            defenderSideId: "beta",
-            youAreAttacker: true,
-            defenderUnits: [{ id: defender!.id }]
-        });
-
-        game.clientConnected(beta.client);
-        const info: Partial<typeof battle> = { ...battle };
-        delete info.youAreAttacker;
-        expect(beta.last("server:map:init")!.payload.groundBattles).toEqual([info]);
-        game.clientConnected(alpha.client);
-        expect(alpha.last("server:map:init")!.payload.groundBattles).toEqual([info]);
-
         const marks = { alpha: alpha.messages.length, beta: beta.messages.length };
         game.queueMessage(
-            {
-                type: "client:ground:resolve",
-                payload: { battleId: battle.battleId, winnerSideId: "alpha" }
-            },
+            { type: "client:invade", payload: { locationId: target.id, shipIds: [transport.id] } },
             alpha.client
         );
         await vi.waitFor(() => expect(beta.last("server:economy:state")).toBeDefined());
@@ -366,27 +342,35 @@ describe("Game ground messages", () => {
             [beta, marks.beta]
         ] as const) {
             const types = connection.types(mark);
-            const resolved = types.indexOf("server:ground:resolved");
-            expect(resolved).toBeGreaterThanOrEqual(0);
-            expect(types.indexOf("server:tiles:update")).toBeGreaterThan(resolved);
+            const combat = types.indexOf("server:combat");
+            expect(combat).toBeGreaterThanOrEqual(0);
+            expect(types.indexOf("server:tiles:update")).toBeGreaterThan(combat);
             expect(types.indexOf("server:economy:state")).toBeGreaterThan(
                 types.indexOf("server:tiles:update")
             );
-            expect(connection.last("server:ground:resolved")!.payload).toMatchObject({
+            expect(connection.last("server:combat")!.payload).toMatchObject({
+                kind: "ground",
+                cause: "invasion",
+                attackerSideId: "alpha",
+                defenderSideIds: ["beta"],
+                locationId: target.id,
+                outcome: "attacker_won",
                 captured: true,
-                winnerSideId: "alpha",
+                attackerMovedIn: true,
+                rounds: 3,
                 destroyedUnitIds: [defender!.id]
             });
         }
+        expect(alpha.last("server:map:init")!.payload).not.toHaveProperty("groundBattles");
         expect(tileEntity(alpha, marks.alpha, target, target.id)).toMatchObject({
             sideId: "alpha",
             garrison: invaders
         });
         const economy = alpha.last("server:economy:state")!.payload;
         expect(economy.locations.map((l) => l.locationId)).toContain(target.id);
-        expect(economy.groundUnits.map((u) => u.location)).toEqual([
-            { kind: "garrison", locationId: target.id },
-            { kind: "garrison", locationId: target.id }
+        expect(economy.groundUnits).toMatchObject([
+            { location: { kind: "garrison", locationId: target.id }, hp: 4 },
+            { location: { kind: "garrison", locationId: target.id } }
         ]);
         expect(
             beta.last("server:economy:state")!.payload.locations.map((l) => l.locationId)
@@ -407,9 +391,15 @@ describe("Game ground messages", () => {
             [beta, marks.beta]
         ] as const) {
             const types = connection.types(mark);
-            expect(types).not.toContain("server:ground:start");
-            const resolved = types.indexOf("server:ground:resolved");
-            expect(resolved).toBeGreaterThanOrEqual(0);
+            expect(types.filter((t) => t === "server:combat")).toHaveLength(1);
+            const resolved = types.indexOf("server:combat");
+            expect(connection.last("server:combat")!.payload).toMatchObject({
+                kind: "ground",
+                rounds: 0,
+                participants: [{ role: "attacker" }, { role: "attacker" }],
+                outcome: "attacker_won",
+                captured: true
+            });
             expect(types.indexOf("server:tiles:update")).toBeGreaterThan(resolved);
             expect(types.indexOf("server:economy:state")).toBeGreaterThan(
                 types.indexOf("server:tiles:update")
@@ -452,23 +442,21 @@ describe("Game ground messages", () => {
         });
 
         await moveShip(game, alpha, transport.id, { q: 4, r: 10 });
+        game.entities.getOfKind(transport.id, "ship")!.hp = 1;
         ship("raider-b", "beta", { q: 6, r: 10 }, "frigate");
-        const mark = beta.messages.length;
-        game.queueMessage(
-            { type: "client:ship:move", payload: { shipId: "raider-b", to: { q: 4, r: 10 } } },
-            beta.client
-        );
-        await vi.waitFor(() => expect(beta.all("server:battle:start", mark)).toHaveLength(1));
-        const battleId = beta.last("server:battle:start")!.payload.battleId;
-        game.queueMessage(
-            { type: "client:battle:resolve", payload: { battleId, winnerSideId: "beta" } },
-            beta.client
-        );
+        const mark = alpha.messages.length;
+        await moveShip(game, beta, "raider-b", { q: 4, r: 10 });
         await vi.waitFor(() => expect(units()?.map((u) => u.id)).toEqual([invaders[1]]));
-        expect(alpha.last("server:battle:resolved")!.payload).toMatchObject({
-            destroyedShipIds: [transport.id],
-            destroyedUnitIds: [invaders[0]]
-        });
+        expect(alpha.all("server:combat", mark).map((m) => m.payload)).toEqual([
+            expect.objectContaining({
+                kind: "space",
+                cause: "move",
+                attackerSideId: "beta",
+                outcome: "attacker_won",
+                destroyedIds: [transport.id],
+                destroyedUnitIds: [invaders[0]]
+            })
+        ]);
         game.destroyGame();
     });
 });

@@ -8,7 +8,7 @@
     "mapSeed": 42,
     "revealMap": true,
     "fullVisibility": true,
-    "instantBuild": false,
+    "instantBuild": true,
     "supplySpeed": 6,
     "supplyCapacity": 100,
     "supplyVisionRange": 1,
@@ -187,6 +187,8 @@
                 "buildTurns": 2,
                 "maxMovementPoints": 5,
                 "hp": 6,
+                "attack": 1,
+                "defence": 1,
                 "requires": ["shipyard"],
                 "requiresTech": null,
                 "maxTier": 3,
@@ -198,6 +200,8 @@
                 "buildTurns": 3,
                 "maxMovementPoints": 3,
                 "hp": 12,
+                "attack": 4,
+                "defence": 3,
                 "requires": ["advanced_shipyard"],
                 "requiresTech": null,
                 "maxTier": 3,
@@ -213,6 +217,8 @@
                 "buildTurns": 3,
                 "maxMovementPoints": 2,
                 "hp": 4,
+                "attack": 0,
+                "defence": 1,
                 "requires": ["shipyard"],
                 "requiresTech": null,
                 "maxTier": 1,
@@ -224,6 +230,8 @@
                 "buildTurns": 2,
                 "maxMovementPoints": 3,
                 "hp": 8,
+                "attack": 0,
+                "defence": 2,
                 "requires": ["shipyard"],
                 "requiresTech": "transports",
                 "maxTier": 3,
@@ -235,6 +243,8 @@
                 "buildTurns": 2,
                 "maxMovementPoints": 6,
                 "hp": 4,
+                "attack": 3,
+                "defence": 1,
                 "requires": ["shipyard"],
                 "requiresTech": null,
                 "maxTier": 3,
@@ -246,6 +256,8 @@
                 "buildTurns": 3,
                 "maxMovementPoints": 6,
                 "hp": 7,
+                "attack": 5,
+                "defence": 2,
                 "requires": ["advanced_shipyard"],
                 "requiresTech": null,
                 "maxTier": 3,
@@ -257,11 +269,14 @@
                 "buildTurns": 6,
                 "maxMovementPoints": 2,
                 "hp": 30,
+                "attack": 8,
+                "defence": 8,
                 "requires": ["advanced_shipyard", "docks"],
                 "requiresTech": null,
                 "maxTier": 3,
                 "unitCapacity": 0,
                 "canColonise": false,
+                "hangar": { "capacity": 4, "carries": ["fighter_squadron", "advanced_fighter_squadron"] },
                 "hyperdrive": {
                     "cooldownTurns": 4,
                     "accuracy": { "onTarget": 30, "oneOff": 50, "twoOff": 20 }
@@ -271,7 +286,21 @@
         "shipTiers": {
             "hpMultiplier": [1, 1.5, 2],
             "movementBonus": [0, 0, 1],
-            "hyperdriveAccuracyBonus": [0, 10, 20]
+            "hyperdriveAccuracyBonus": [0, 10, 20],
+            "attackBonus": [0, 1, 2],
+            "defenceBonus": [0, 1, 2]
+        },
+        "combat": { "spread": 0.25, "minDamage": 1, "defenceScale": 10, "groundMaxRounds": 6 },
+        "supplyShips": {
+            "hp": 6,
+            "defence": 1,
+            "evasion": 0.3,
+            "maxEvasion": 0.75,
+            "techBonus": {
+                "evasive_manoeuvres_1": { "hp": 0, "defence": 0, "evasion": 0.15 },
+                "evasive_manoeuvres_2": { "hp": 0, "defence": 0, "evasion": 0.15 },
+                "armoured_freighters": { "hp": 6, "defence": 2, "evasion": 0 }
+            }
         },
         "hyperspace": {
             "hazards": {
@@ -291,6 +320,7 @@
                 "buildTurns": 2,
                 "attack": 2,
                 "defence": 3,
+                "hp": 10,
                 "requires": ["barracks"],
                 "requiresTech": "ground_forces",
                 "maxTier": 3
@@ -300,6 +330,7 @@
                 "buildTurns": 3,
                 "attack": 5,
                 "defence": 4,
+                "hp": 16,
                 "requires": ["barracks"],
                 "requiresTech": "ground_forces",
                 "maxTier": 3

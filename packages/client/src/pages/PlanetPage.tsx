@@ -30,6 +30,7 @@ import {
     type LocationEconomy,
     type StructureSite
 } from "@space/shared-data";
+import { combatLosses, combatOutcome, combatTitle, sideName } from "../components/combatText.js";
 import { ModalHostContext } from "../components/modalHost.js";
 import type { GameActions } from "../gameActions.js";
 import { useHexWorldVersion } from "../hooks/index.js";
@@ -66,10 +67,6 @@ const SITE_LABELS: Record<StructureSite, string> = {
     moon: "Moon",
     asteroid: "Asteroid"
 };
-
-function sideName(sideId: string): string {
-    return sideId.charAt(0).toUpperCase() + sideId.slice(1);
-}
 
 function locationKindLabel(location: LocationEntity): string {
     const site = siteForEntity(location);
@@ -368,6 +365,11 @@ function OwnLocationPanel({ world, location, economy, context, actions }: OwnLoc
                     <OrbitList
                         ships={shipsHere}
                         balance={balance}
+                        hpOf={(ship) => world.hpOf(ship)}
+                        hangar={(ship) =>
+                            world.hangarOf(ship) ? world.carriedShips(ship) : undefined
+                        }
+                        onUnloadShips={actions.unloadShips}
                         aboard={(ship) =>
                             isTransport(ship, balance)
                                 ? world.carriedUnitIds(ship).map((id) => ({
@@ -493,7 +495,6 @@ function EnemyLocationPanel({
     location: LocationEntity;
     onInvade: (shipIds: EntityId[]) => void;
 }) {
-    const pending = world.groundBattleAt(location.id);
     const invasion = world.invasionAt(location.q, location.r);
     const landing = invasion
         ? invasion.ships.reduce((n, ship) => n + world.carriedUnitIds(ship).length, 0)
@@ -507,9 +508,7 @@ function EnemyLocationPanel({
                     ` ${location.garrison.length} ground unit${location.garrison.length === 1 ? "" : "s"} seen in the garrison.`}
             </p>
             <Card area="invade" title="Invade">
-                {pending ? (
-                    <p className="planet-page__muted">A ground battle is already under way here.</p>
-                ) : invasion ? (
+                {invasion ? (
                     <div className="planet-page__colonise">
                         <span>
                             {invasion.ships.length} transport
@@ -550,7 +549,10 @@ export function PlanetPage() {
     const own = !!location?.sideId && location.sideId === world.sideId;
     const kindLabel = location ? locationKindLabel(location) : "Location";
     const full = !!(location && own && economy && context);
-    const pendingGround = own && locationId ? world.groundBattleAt(locationId) : undefined;
+    // Ground combats resolve at once; the latest one this turn stays flagged in the header.
+    const lastGround = locationId ? world.groundCombatsAt(locationId)[0] : undefined;
+    const recentGround =
+        lastGround && lastGround.turn === world.turn?.turn ? lastGround : undefined;
 
     const back = useCallback(() => {
         navigate({ pathname: "/", search: routerLocation.search });
@@ -641,10 +643,14 @@ export function PlanetPage() {
                                 </div>
                             </dl>
                         </div>
-                        {pendingGround && (
-                            <p className="planet-page__alert">
-                                Under invasion by {sideName(pendingGround.attackerSideId)}. Awaiting
-                                the outcome of the ground battle.
+                        {recentGround && (
+                            <p
+                                className="planet-page__alert"
+                                title={combatLosses(recentGround.result)}
+                            >
+                                {combatTitle(world, recentGround.result)}:{" "}
+                                {combatOutcome(recentGround.result)} ·{" "}
+                                {combatLosses(recentGround.result)}
                             </p>
                         )}
                         <button type="button" className="planet-page__back" onClick={back}>

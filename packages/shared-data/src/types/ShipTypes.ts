@@ -50,16 +50,19 @@ export function shipDef(shipType: ShipType, balance: EconomyBalance): ShipTypeDe
     return { ...SHIP_TYPE_INFO[shipType], ...balance.ships[shipType] };
 }
 
-/** Tier-scaled hp and movement (see `EconomyBalance.shipTiers`). */
+/** Tier-scaled hp, movement, attack and defence (see `EconomyBalance.shipTiers`). */
 export function shipStats(
     shipType: ShipType,
     tier: number,
     balance: EconomyBalance
-): { hp: number; maxMovementPoints: number } {
+): { hp: number; maxMovementPoints: number; attack: number; defence: number } {
     const def = balance.ships[shipType];
+    const tiers = balance.shipTiers;
     const index = Math.min(Math.max(tier, 1), 3) - 1;
     return {
-        hp: Math.ceil(def.hp * balance.shipTiers.hpMultiplier[index]),
-        maxMovementPoints: def.maxMovementPoints + balance.shipTiers.movementBonus[index]
+        hp: Math.ceil(def.hp * tiers.hpMultiplier[index]),
+        maxMovementPoints: def.maxMovementPoints + tiers.movementBonus[index],
+        attack: Math.max(0, def.attack + (def.attack > 0 ? tiers.attackBonus[index] : 0)),
+        defence: Math.max(0, def.defence + tiers.defenceBonus[index])
     };
 }

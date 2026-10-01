@@ -1,5 +1,5 @@
 import { MOVE_COST_PER_HEX, type AxialCoord, type EntityId, type SideId } from "@space/shared-data";
-import { hasEnemyVessels, type BattleManager } from "./Battle.js";
+import { hasEnemyVessels } from "./Battle.js";
 import type { EconomyManager } from "./EconomyManager.js";
 import type { EntityManager } from "./EntityManager.js";
 import type { EntityOf } from "./map/types.js";
@@ -29,7 +29,6 @@ export type MoveOrderResult = {
 };
 
 export type MoveOrderOptions = {
-    battles: BattleManager;
     economy?: EconomyManager;
     /** Defaults to the true map with every hex explored. */
     knowledge?: (sideId: SideId) => MoveOrderKnowledge;
@@ -37,19 +36,17 @@ export type MoveOrderOptions = {
 
 /**
  * Runs ships' multi-turn move orders at end of turn: each order is re-planned with the
- * side's knowledge, then the ship steps until its movement runs out. It stops before hexes
- * holding enemy vessels or a pending battle and keeps its order to try again next turn.
- * Ships locked in battle or with a jump pending are skipped.
+ * side's knowledge, then the ship steps until its movement runs out. Orders never attack: the
+ * ship stops before hexes holding enemy vessels and keeps its order to try again next turn.
+ * Ships with a jump pending drop their order.
  */
 export class MoveOrderManager {
     private readonly _entities: EntityManager;
-    private readonly _battles: BattleManager;
     private readonly _economy: EconomyManager | undefined;
     private readonly _knowledge: (sideId: SideId) => MoveOrderKnowledge;
 
-    constructor(entities: EntityManager, options: MoveOrderOptions) {
+    constructor(entities: EntityManager, options: MoveOrderOptions = {}) {
         this._entities = entities;
-        this._battles = options.battles;
         this._economy = options.economy;
         this._knowledge = options.knowledge ?? (() => ({}));
     }
@@ -74,7 +71,6 @@ export class MoveOrderManager {
                 delete ship.moveOrder;
                 continue;
             }
-            if (this._battles.findByShip(ship.id)) continue;
             if (ship.q === order.destination.q && ship.r === order.destination.r) {
                 delete ship.moveOrder;
                 result.arrived.push(ship.id);
@@ -93,9 +89,7 @@ export class MoveOrderManager {
                 plan,
                 Math.floor(ship.movementPoints / MOVE_COST_PER_HEX),
                 {
-                    stopBefore: (hex) =>
-                        !!this._battles.findAt(hex) ||
-                        hasEnemyVessels(this._entities, hex, ship.sideId)
+                    stopBefore: (hex) => hasEnemyVessels(this._entities, hex, ship.sideId)
                 }
             );
             if (steps.path.length === 0) {

@@ -21,7 +21,9 @@ export const SUPPLY_SHIP_MOTION: MotionSpeeds = { rotationSpeed: 480, moveSpeed:
 
 type Segment =
     | { kind: "rotate"; at: Pixel; from: number; delta: number; duration: number }
-    | { kind: "move"; from: Pixel; to: Pixel; heading: number; duration: number };
+    | { kind: "move"; from: Pixel; to: Pixel; heading: number; duration: number }
+    /** Out by `offset` and back again, facing `heading`. */
+    | { kind: "lunge"; at: Pixel; offset: Pixel; heading: number; duration: number };
 
 /** Queued animation beyond this is skipped when another move arrives. */
 const MAX_BACKLOG_MS = 1500;
@@ -38,6 +40,8 @@ export class ShipMotion {
     private _segments: Segment[] = [];
     private _startedAt: number;
     private _totalMs = 0;
+    /** Queued time spent holding or lunging, which doesn't count as backlog. */
+    private _heldMs = 0;
     private _end: ShipPose;
 
     constructor(start: ShipPose, now: number) {
@@ -54,6 +58,11 @@ export class ShipMotion {
         return now - this._startedAt >= this._totalMs;
     }
 
+    /** When everything queued has played. */
+    get endsAt(): number {
+        return this._startedAt + this._totalMs;
+    }
+
     /**
      * Append steps along `path` (neighbouring hexes, `path[0]` = current hex). Chains
      * onto any running animation; a long backlog or a path that doesn't start where
@@ -64,9 +73,10 @@ export class ShipMotion {
         const start = axialToPixel(path[0].q, path[0].r, hexSize);
         const remaining = this._startedAt + this._totalMs - now;
         const offPath = Math.hypot(start.x - this._end.x, start.y - this._end.y) > 1;
-        if (remaining <= 0 || remaining > MAX_BACKLOG_MS || offPath) {
+        if (remaining <= 0 || remaining - this._heldMs > MAX_BACKLOG_MS || offPath) {
             this._segments = [];
             this._totalMs = 0;
+            this._heldMs = 0;
             this._startedAt = now;
             this._end = { x: start.x, y: start.y, heading: this._end.heading };
         }
@@ -102,6 +112,23 @@ export class ShipMotion {
             delta: 0,
             duration: until - end
         });
+        this._heldMs += until - end;
+    }
+
+    /** Dart `distance` world pixels towards `target` and back, after anything already queued. */
+    lunge(target: Pixel, distance: number, duration: number) {
+        const dx = target.x - this._end.x;
+        const dy = target.y - this._end.y;
+        const length = Math.hypot(dx, dy);
+        if (length < 1) return;
+        this._push({
+            kind: "lunge",
+            at: { x: this._end.x, y: this._end.y },
+            offset: { x: (dx / length) * distance, y: (dy / length) * distance },
+            heading: this._end.heading,
+            duration
+        });
+        this._heldMs += duration;
     }
 
     poseAt(now: number): ShipPose {
@@ -114,6 +141,14 @@ export class ShipMotion {
                         x: segment.at.x,
                         y: segment.at.y,
                         heading: segment.from + segment.delta * k
+                    };
+                }
+                if (segment.kind === "lunge") {
+                    const out = Math.sin(Math.PI * k);
+                    return {
+                        x: segment.at.x + segment.offset.x * out,
+                        y: segment.at.y + segment.offset.y * out,
+                        heading: segment.heading
                     };
                 }
                 return {

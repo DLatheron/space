@@ -6,12 +6,15 @@ import {
     buildItemTurns,
     buildSlots,
     canBuild,
+    canCarryShip,
+    combatDamage,
     countQueuedShips,
     createBuildOrder,
     depositCapped,
     fundLocationOrders,
     fundOrders,
     groundUnitStats,
+    hangarFor,
     HOME_PLANET_LEVEL,
     incomeFor,
     isFullyFunded,
@@ -36,6 +39,7 @@ import {
     subtractResources,
     structureOutput,
     supplyCapacityFor,
+    supplyShipStats,
     supplySpeedFor,
     sumResources,
     surplusStock,
@@ -91,6 +95,8 @@ function ship(overrides: Partial<ShipBalance>): ShipBalance {
         buildTurns: 2,
         maxMovementPoints: 3,
         hp: 6,
+        attack: 1,
+        defence: 1,
         requires: ["shipyard"],
         requiresTech: null,
         maxTier: 3,
@@ -155,6 +161,8 @@ const balance: EconomyBalance = {
             cost: res(200, 300, 15),
             buildTurns: 3,
             hp: 12,
+            attack: 4,
+            defence: 3,
             requires: ["advanced_shipyard"],
             hyperdrive: { cooldownTurns: 3, accuracy: { onTarget: 20, oneOff: 50, twoOff: 30 } }
         }),
@@ -163,6 +171,7 @@ const balance: EconomyBalance = {
             buildTurns: 3,
             maxMovementPoints: 2,
             hp: 4,
+            attack: 0,
             maxTier: 1,
             canColonise: true
         }),
@@ -185,14 +194,31 @@ const balance: EconomyBalance = {
             buildTurns: 6,
             maxMovementPoints: 2,
             hp: 30,
+            attack: 8,
+            defence: 8,
             requires: ["advanced_shipyard", "docks"],
-            hyperdrive: { cooldownTurns: 4, accuracy: { onTarget: 30, oneOff: 50, twoOff: 20 } }
+            hyperdrive: { cooldownTurns: 4, accuracy: { onTarget: 30, oneOff: 50, twoOff: 20 } },
+            hangar: { capacity: 4, carries: ["fighter_squadron", "advanced_fighter_squadron"] }
         })
     },
     shipTiers: {
         hpMultiplier: [1, 1.5, 2],
         movementBonus: [0, 0, 1],
-        hyperdriveAccuracyBonus: [0, 10, 20]
+        hyperdriveAccuracyBonus: [0, 10, 20],
+        attackBonus: [0, 1, 2],
+        defenceBonus: [0, 1, 2]
+    },
+    combat: { spread: 0.25, minDamage: 1, defenceScale: 10, groundMaxRounds: 6 },
+    supplyShips: {
+        hp: 6,
+        defence: 1,
+        evasion: 0.3,
+        maxEvasion: 0.75,
+        techBonus: {
+            evasive_manoeuvres_1: { hp: 0, defence: 0, evasion: 0.15 },
+            evasive_manoeuvres_2: { hp: 0, defence: 0, evasion: 0.4 },
+            armoured_freighters: { hp: 6, defence: 2, evasion: 0 }
+        }
     },
     hyperspace: {
         hazards: {
@@ -212,6 +238,7 @@ const balance: EconomyBalance = {
             buildTurns: 2,
             attack: 2,
             defence: 3,
+            hp: 10,
             requires: ["barracks"],
             requiresTech: "ground_forces",
             maxTier: 3
@@ -221,6 +248,7 @@ const balance: EconomyBalance = {
             buildTurns: 3,
             attack: 5,
             defence: 4,
+            hp: 16,
             requires: ["barracks"],
             requiresTech: "ground_forces",
             maxTier: 3
@@ -537,9 +565,20 @@ describe("tier stats", () => {
     it("scales structure output, ship stats and ground unit stats", () => {
         expect(structureOutput("mine", 1, balance)).toEqual(res(0, 40));
         expect(structureOutput("mine", 3, balance)).toEqual(res(0, 80));
-        expect(shipStats("frigate", 2, balance)).toEqual({ hp: 18, maxMovementPoints: 3 });
-        expect(shipStats("frigate", 3, balance)).toEqual({ hp: 24, maxMovementPoints: 4 });
-        expect(groundUnitStats("armour", 3, balance)).toEqual({ attack: 7, defence: 6 });
+        expect(shipStats("frigate", 2, balance)).toEqual({
+            hp: 18,
+            maxMovementPoints: 3,
+            attack: 5,
+            defence: 4
+        });
+        expect(shipStats("frigate", 3, balance)).toEqual({
+            hp: 24,
+            maxMovementPoints: 4,
+            attack: 6,
+            defence: 5
+        });
+        expect(shipStats("colony_ship", 3, balance)).toMatchObject({ attack: 0, defence: 3 });
+        expect(groundUnitStats("armour", 3, balance)).toEqual({ attack: 7, defence: 6, hp: 16 });
     });
 
     it("takes tier multipliers and bonuses from the balance", () => {
@@ -549,15 +588,27 @@ describe("tier stats", () => {
             shipTiers: {
                 hpMultiplier: [1, 1, 3],
                 movementBonus: [0, 2, 2],
-                hyperdriveAccuracyBonus: [0, 0, 0]
+                hyperdriveAccuracyBonus: [0, 0, 0],
+                attackBonus: [0, 3, 3],
+                defenceBonus: [0, 0, 1]
             },
             groundUnitTiers: { attackBonus: [0, 0, 4], defenceBonus: [0, 5, 5] },
             enhancementCostFactor: { "2": 0.25, "3": 2 }
         };
         expect(structureOutput("mine", 2, custom)).toEqual(res(0, 120));
-        expect(shipStats("frigate", 2, custom)).toEqual({ hp: 12, maxMovementPoints: 5 });
-        expect(shipStats("frigate", 3, custom)).toEqual({ hp: 36, maxMovementPoints: 5 });
-        expect(groundUnitStats("armour", 3, custom)).toEqual({ attack: 9, defence: 9 });
+        expect(shipStats("frigate", 2, custom)).toEqual({
+            hp: 12,
+            maxMovementPoints: 5,
+            attack: 7,
+            defence: 3
+        });
+        expect(shipStats("frigate", 3, custom)).toEqual({
+            hp: 36,
+            maxMovementPoints: 5,
+            attack: 7,
+            defence: 4
+        });
+        expect(groundUnitStats("armour", 3, custom)).toEqual({ attack: 9, defence: 9, hp: 16 });
         const upgrade: BuildItem = {
             kind: "enhancement",
             target: { kind: "ship", shipId: "s1", shipType: "frigate" },
@@ -1213,5 +1264,44 @@ describe("queueCategory / moveOrderInQueue", () => {
         expect(moveOrderInQueue(orders, "s1", "down")).toBeUndefined();
         expect(moveOrderInQueue(orders, "s1", "up")).toBeUndefined();
         expect(moveOrderInQueue(orders, "nope", "up")).toBeUndefined();
+    });
+});
+
+describe("combat helpers", () => {
+    const combat = balance.combat;
+
+    it("scales damage by the roll and the target's defence, never below minDamage", () => {
+        expect(combatDamage(8, 0, combat, 0.5)).toBe(8);
+        expect(combatDamage(8, 10, combat, 0.5)).toBe(4);
+        expect(combatDamage(8, 0, combat, 0)).toBe(6);
+        expect(combatDamage(8, 0, combat, 0.999)).toBe(10);
+        expect(combatDamage(1, 30, combat, 0)).toBe(1);
+        expect(combatDamage(0, 0, combat, 0.5)).toBe(0);
+        expect(combatDamage(8, 0, { ...combat, minDamage: 0, spread: 0 }, 0.9)).toBe(8);
+    });
+
+    it("adds supply ship tech bonuses, capping evasion", () => {
+        expect(supplyShipStats(balance, [])).toEqual({
+            hp: 6,
+            defence: 1,
+            evasion: 0.3,
+            attack: 0
+        });
+        expect(supplyShipStats(balance, ["armoured_freighters"])).toMatchObject({
+            hp: 12,
+            defence: 3
+        });
+        expect(supplyShipStats(balance, ["evasive_manoeuvres_1"]).evasion).toBeCloseTo(0.45);
+        expect(
+            supplyShipStats(balance, ["evasive_manoeuvres_1", "evasive_manoeuvres_2"]).evasion
+        ).toBe(0.75);
+    });
+
+    it("reads hangars from the balance", () => {
+        expect(hangarFor(balance, "star_destroyer")?.capacity).toBe(4);
+        expect(hangarFor(balance, "frigate")).toBeUndefined();
+        expect(canCarryShip(balance, "star_destroyer", "fighter_squadron")).toBe(true);
+        expect(canCarryShip(balance, "star_destroyer", "scout")).toBe(false);
+        expect(canCarryShip(balance, "frigate", "fighter_squadron")).toBe(false);
     });
 });

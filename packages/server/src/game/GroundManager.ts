@@ -1,13 +1,14 @@
 import {
     shipDef,
-    type BattleId,
+    type CombatOutcome,
+    type CombatResult,
     type EntityId,
-    type GroundBattleInfo,
     type GroundUnit,
     type LocationEntity,
     type SideId
 } from "@space/shared-data";
-import { hasEnemyWarships, type BattleManager } from "./Battle.js";
+import { hasEnemyWarships } from "./Battle.js";
+import { groundRounds, isAlive, toParticipant, unitFighter } from "./combat.js";
 import type { EconomyManager } from "./EconomyManager.js";
 import type { EntityManager } from "./EntityManager.js";
 import type { EntityOf } from "./map/types.js";
@@ -20,59 +21,34 @@ export type InvadeResult =
           location: LocationEntity;
           /** Defender side (the location's owner before the invasion). */
           defenderSideId: SideId;
-          /** Pending ground battle, or null when the location was undefended and captured. */
-          battle: GroundBattleInfo | null;
+          /** The ground combat (rounds 0 when the location was undefended). */
+          combat: CombatResult;
+          /** Units that landed and now garrison the captured location. */
           landedUnitIds: EntityId[];
       }
     | { ok: false; error: string };
 
-export type GroundResolveResult =
-    | {
-          ok: true;
-          battle: GroundBattleInfo;
-          loserSideId: SideId;
-          destroyedUnitIds: EntityId[];
-          captured: boolean;
-      }
-    | { ok: false; error: string };
-
-const summary = (unit: GroundUnit) => ({ id: unit.id, unitType: unit.unitType, tier: unit.tier });
+export type GroundOptions = {
+    /** Random numbers in [0, 1) for damage rolls; defaults to `Math.random`. */
+    rng?: () => number;
+};
 
 /**
- * Transports, invasions and ground battles. Units board and land only at locations on the
- * transport's hex. Invading needs the orbit free of enemy ships; landing on an undefended
- * enemy location captures it at once, otherwise a ground battle starts that the attacker
- * resolves by naming a winner (as with space battles).
+ * Transports, invasions and automatic ground combat. Units board and land only at locations on
+ * the transport's hex. Invading needs the orbit free of enemy ships; landing on an undefended
+ * enemy location captures it at once, otherwise ground combat is fought in rounds (see
+ * `groundRounds`). Wiping out the defenders captures the location; invaders that are wiped out
+ * are destroyed; undecided invaders stay aboard their transports. Damage persists on units.
  */
 export class GroundManager {
     private readonly _entities: EntityManager;
     private readonly _economy: EconomyManager;
-    private readonly _battles: BattleManager | undefined;
-    private readonly _groundBattles = new Map<BattleId, GroundBattleInfo>();
-    private _nextId = 1;
+    private readonly _rng: () => number;
 
-    constructor(entities: EntityManager, economy: EconomyManager, battles?: BattleManager) {
+    constructor(entities: EntityManager, economy: EconomyManager, options: GroundOptions = {}) {
         this._entities = entities;
         this._economy = economy;
-        this._battles = battles;
-    }
-
-    get(battleId: BattleId): GroundBattleInfo | undefined {
-        return this._groundBattles.get(battleId);
-    }
-
-    pending(): GroundBattleInfo[] {
-        return [...this._groundBattles.values()];
-    }
-
-    involving(sideId: SideId): GroundBattleInfo[] {
-        return this.pending().filter(
-            (b) => b.attackerSideId === sideId || b.defenderSideId === sideId
-        );
-    }
-
-    findAt(locationId: EntityId): GroundBattleInfo | undefined {
-        return this.pending().find((b) => b.locationId === locationId);
+        this._rng = options.rng ?? Math.random;
     }
 
     /** Board garrisoned units at an owned location on the transport's hex. */
@@ -98,9 +74,6 @@ export class GroundManager {
             }
             if (location.sideId !== sideId || !(location.garrison ?? []).includes(unitId)) {
                 return { ok: false, error: `Unit ${unitId} is not in your garrison` };
-            }
-            if (this.findAt(location.id)) {
-                return { ok: false, error: "A ground battle is in progress there" };
             }
         }
         for (const unitId of unitIds) {
@@ -128,9 +101,6 @@ export class GroundManager {
         if (location.q !== ship.q || location.r !== ship.r) {
             return { ok: false, error: "Transport is not at the location" };
         }
-        if (this.findAt(location.id)) {
-            return { ok: false, error: "A ground battle is in progress there" };
-        }
         const carried = ship.carriedUnitIds ?? [];
         const missing = unitIds.find((id) => !carried.includes(id));
         if (missing) return { ok: false, error: `Unit ${missing} is not aboard` };
@@ -141,8 +111,8 @@ export class GroundManager {
     }
 
     /**
-     * Land every unit aboard the given transports on an enemy location on their hex. An
-     * undefended location is captured immediately; otherwise a ground battle starts.
+     * Land every unit aboard the given transports on an enemy location on their hex and fight
+     * for it at once. An undefended location is captured immediately.
      */
     invade(sideId: SideId | null, locationId: EntityId, shipIds: EntityId[]): InvadeResult {
         if (!sideId) return { ok: false, error: "You are not assigned to a side" };
@@ -151,9 +121,6 @@ export class GroundManager {
         const defenderSideId = location.sideId;
         if (!defenderSideId) return { ok: false, error: "Unowned locations are colonised" };
         if (defenderSideId === sideId) return { ok: false, error: "Location is already yours" };
-        if (this.findAt(locationId)) {
-            return { ok: false, error: "A ground battle is already in progress there" };
-        }
         if (hasEnemyWarships(this._entities, location, sideId)) {
             return { ok: false, error: "Enemy ships are defending the location" };
         }
@@ -170,72 +137,63 @@ export class GroundManager {
         }
         if (unitIds.length === 0) return { ok: false, error: "No units aboard" };
 
-        const defenders = this._economy.units.garrisonOf(locationId);
-        if (defenders.length === 0) {
+        const balance = this._economy.balance;
+        const units = this._economy.units;
+        const attackers = unitIds.flatMap((id) => units.get(id) ?? []);
+        const defenders = units.garrisonOf(locationId);
+        const attackerFighters = attackers.map((u) => unitFighter(u, "attacker", balance));
+        const defenderFighters = defenders.map((u) => unitFighter(u, "defender", balance));
+        const rounds = groundRounds(attackerFighters, defenderFighters, balance.combat, this._rng);
+
+        const all = [...attackerFighters, ...defenderFighters];
+        const byId = new Map<EntityId, GroundUnit>(
+            [...attackers, ...defenders].map((u) => [u.id, u])
+        );
+        for (const f of all) {
+            const unit = byId.get(f.id)!;
+            if (f.hp < f.maxHp) unit.hp = f.hp;
+        }
+        const destroyedUnitIds = all.filter((f) => !isAlive(f)).map((f) => f.id);
+        this._economy.onUnitsDestroyed(destroyedUnitIds, location);
+
+        const survivors = attackerFighters.filter(isAlive).map((f) => f.id);
+        const defendersLeft = defenderFighters.some(isAlive);
+        const captured = survivors.length > 0 && !defendersLeft;
+        const outcome: CombatOutcome =
+            survivors.length === 0
+                ? "attacker_destroyed"
+                : captured
+                  ? "attacker_won"
+                  : "inconclusive";
+        if (captured) {
             this._economy.captureLocation(locationId, sideId);
-            for (const unitId of unitIds) {
-                this._economy.units.relocate(unitId, { kind: "garrison", locationId });
+            for (const unitId of survivors) {
+                units.relocate(unitId, { kind: "garrison", locationId });
             }
-            return { ok: true, location, defenderSideId, battle: null, landedUnitIds: unitIds };
         }
-
-        for (const unitId of unitIds) {
-            this._economy.units.relocate(
-                unitId,
-                { kind: "garrison", locationId },
-                { listed: false }
-            );
-        }
-        const battle: GroundBattleInfo = {
-            battleId: `ground-${this._nextId++}`,
-            locationId,
-            q: location.q,
-            r: location.r,
-            attackerSideId: sideId,
+        const hex = { q: location.q, r: location.r };
+        return {
+            ok: true,
+            location,
             defenderSideId,
-            attackerUnits: unitIds.map((id) => summary(this._economy.units.get(id)!)),
-            defenderUnits: defenders.map(summary)
+            combat: {
+                kind: "ground",
+                cause: "invasion",
+                hex,
+                from: { ...hex },
+                attackerSideId: sideId,
+                defenderSideIds: [defenderSideId],
+                participants: all.map(toParticipant),
+                destroyedIds: [],
+                destroyedUnitIds,
+                outcome,
+                attackerMovedIn: captured,
+                rounds,
+                locationId,
+                captured
+            },
+            landedUnitIds: captured ? survivors : []
         };
-        this._groundBattles.set(battle.battleId, battle);
-        return { ok: true, location, defenderSideId, battle, landedUnitIds: unitIds };
-    }
-
-    /**
-     * Resolve a ground battle on behalf of the attacker. The loser's units are destroyed
-     * (their population goes home). If the attacker wins, it captures the location and
-     * its landed units become the garrison.
-     */
-    resolve(
-        battleId: BattleId,
-        bySideId: SideId | null,
-        winnerSideId: SideId
-    ): GroundResolveResult {
-        const battle = this._groundBattles.get(battleId);
-        if (!battle) return { ok: false, error: `Unknown ground battle ${battleId}` };
-        if (bySideId !== battle.attackerSideId) {
-            return { ok: false, error: "Only the invading side can resolve this battle" };
-        }
-        const { attackerSideId, defenderSideId, locationId } = battle;
-        if (winnerSideId !== attackerSideId && winnerSideId !== defenderSideId) {
-            return { ok: false, error: `Side ${winnerSideId} is not part of this battle` };
-        }
-        const attackerWon = winnerSideId === attackerSideId;
-        const loserSideId = attackerWon ? defenderSideId : attackerSideId;
-        const attackers = battle.attackerUnits
-            .map((u) => u.id)
-            .filter((id) => this._economy.units.get(id));
-        const defenders = this._economy.units.garrisonOf(locationId).map((u) => u.id);
-        const destroyedUnitIds = attackerWon ? defenders : attackers;
-        this._economy.onUnitsDestroyed(destroyedUnitIds, battle);
-        this._groundBattles.delete(battleId);
-
-        if (attackerWon) {
-            this._economy.captureLocation(locationId, attackerSideId);
-            for (const unitId of attackers) {
-                this._economy.units.relocate(unitId, { kind: "garrison", locationId });
-            }
-        }
-        return { ok: true, battle, loserSideId, destroyedUnitIds, captured: attackerWon };
     }
 
     private _transport(
@@ -249,9 +207,7 @@ export class GroundManager {
         if (!def.unitCapacity) {
             return { ok: false, error: `${def.name} cannot carry units` };
         }
-        if (this._battles?.findByShip(shipId)) {
-            return { ok: false, error: `Ship ${shipId} is locked in battle` };
-        }
+        if (ship.carriedBy) return { ok: false, error: `Ship ${shipId} is aboard a carrier` };
         return { ok: true, ship };
     }
 }

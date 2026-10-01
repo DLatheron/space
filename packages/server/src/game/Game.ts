@@ -1,14 +1,12 @@
 import {
     AxialCoord,
-    BattleId,
-    BattleInfo,
     BuildItem,
     BuildPriority,
     ClientId,
     ClientToServerMessage,
+    CombatResult,
     EntityId,
     GameId,
-    GroundBattleInfo,
     HexKey,
     OrderId,
     QueueDirection,
@@ -21,7 +19,8 @@ import { ClientManager } from "./ClientManager.js";
 import { gameManager } from "./GameManager.js";
 import { axialKey } from "@space/maths";
 import { config } from "../config/config.schema.js";
-import { BattleManager, type EndedBattle } from "./Battle.js";
+import { BattleManager } from "./Battle.js";
+import { CarrierManager } from "./CarrierManager.js";
 import { EconomyManager } from "./EconomyManager.js";
 import type { EntityManager } from "./EntityManager.js";
 import { GroundManager } from "./GroundManager.js";
@@ -53,7 +52,7 @@ function generateGameId(): GameId {
 }
 
 export type GameOptions = {
-    /** Random numbers in [0, 1) for hyperspace jumps; defaults to `Math.random`. */
+    /** Random numbers in [0, 1) for hyperspace jumps and combat; defaults to `Math.random`. */
     rng?: () => number;
 };
 
@@ -88,6 +87,7 @@ export class Game {
     private readonly _ground: GroundManager;
     private readonly _moveOrders: MoveOrderManager;
     private readonly _hyperspace: HyperspaceManager;
+    private readonly _carriers: CarrierManager;
     private _isDestroying = false;
     private _nextSideIndex = 0;
 
@@ -126,14 +126,14 @@ export class Game {
             research,
             homes: galaxy.homePlanets
         });
-        this._battles = new BattleManager(this._entities, this._economy);
+        this._battles = new BattleManager(this._entities, this._economy, { rng: options.rng });
+        this._carriers = new CarrierManager(this._entities, this._economy.balance);
         this._supply = new SupplyManager(this._entities, this._economy, {
             battles: this._battles,
             knowledge: (sideId) => this._supplyKnowledge(sideId)
         });
-        this._ground = new GroundManager(this._entities, this._economy, this._battles);
+        this._ground = new GroundManager(this._entities, this._economy, { rng: options.rng });
         this._moveOrders = new MoveOrderManager(this._entities, {
-            battles: this._battles,
             economy: this._economy,
             knowledge: (sideId) => this._moveKnowledge(sideId)
         });
@@ -232,6 +232,10 @@ export class Game {
         return this._hyperspace;
     }
 
+    get carriers(): CarrierManager {
+        return this._carriers;
+    }
+
     side(sideId: SideId): Side | undefined {
         return this._sides.get(sideId);
     }
@@ -278,8 +282,18 @@ export class Game {
             this._handleTurnEnd(from);
         });
 
-        this._messageManager.registerHandler("client:battle:resolve", (_context, payload, from) => {
-            this._handleBattleResolve(from, payload.battleId, payload.winnerSideId);
+        this._messageManager.registerHandler("client:ship:load", (_context, payload, from) => {
+            const result = this._carriers.load(from.sideId, payload.carrierId, payload.shipIds);
+            if (!result.ok) return this._reject(from, "ship load", result.error);
+            this.logger.info("Carrier", payload.carrierId, "loaded", payload.shipIds);
+            this._refreshShipHex(payload.carrierId);
+        });
+
+        this._messageManager.registerHandler("client:ship:unload", (_context, payload, from) => {
+            const result = this._carriers.unload(from.sideId, payload.carrierId, payload.shipIds);
+            if (!result.ok) return this._reject(from, "ship unload", result.error);
+            this.logger.info("Carrier", payload.carrierId, "unloaded", payload.shipIds);
+            this._refreshShipHex(payload.carrierId);
         });
 
         this._messageManager.registerHandler("client:location:build", (_context, payload, from) => {
@@ -319,27 +333,14 @@ export class Game {
         this._messageManager.registerHandler("client:invade", (_context, payload, from) => {
             this._handleInvade(from, payload.locationId, payload.shipIds);
         });
-
-        this._messageManager.registerHandler("client:ground:resolve", (_context, payload, from) => {
-            this._handleGroundResolve(from, payload.battleId, payload.winnerSideId);
-        });
     }
 
-    /** What a side believes about a hex for supply routing (pending battles count as hostile). */
+    /** What a side believes about a hex for supply routing. */
     private _supplyKnowledge(sideId: SideId): SupplyKnowledge {
         const side = this._sides.get(sideId);
         return {
             isObstacle: (hex) => side?.knowsObstacleAt(this._entities, hex) ?? false,
-            isHostile: (hex) => {
-                if (side?.knowsEnemyAt(this._entities, hex)) return true;
-                const battle = this._battles.findAt(hex);
-                return (
-                    !!battle &&
-                    (battle.attackerSideId === sideId ||
-                        battle.defenderSideId === sideId ||
-                        !!side?.seesAll([hex]))
-                );
-            },
+            isHostile: (hex) => side?.knowsEnemyAt(this._entities, hex) ?? false,
             isVisible: (hex) => side?.seesAll([hex]) ?? false
         };
     }
@@ -377,22 +378,66 @@ export class Game {
             return;
         }
 
-        const result = outcome.move;
-        if (!result) {
+        const { move, combat } = outcome;
+        if (!move && !combat) {
             this.logger.info("Ship", shipId, "ordered to", outcome.moveOrder?.destination);
             this._refreshShipHex(shipId);
             return;
         }
-        const { ship, from, cost } = result;
-        this.logger.info("Ship", ship.id, "moved", from, "->", result.to, "cost", cost);
-        this._broadcastShipMoves([{ ship, from, to: result.to, path: result.path }]);
+        const touched: HexKey[] = [];
+        if (move) {
+            const { ship, from, cost } = move;
+            this.logger.info("Ship", ship.id, "moved", from, "->", move.to, "cost", cost);
+            this._broadcastShipMoves([{ ship, from, to: move.to, path: move.path }]);
+            touched.push(axialKey(from.q, from.r), axialKey(move.to.q, move.to.r));
+        }
+        const ship = this._entities.getOfKind(shipId, "ship");
+        if (combat) {
+            this.logger.info("Combat", combat.outcome, "at", combat.hex, combat.destroyedIds);
+            this._broadcastCombat(combat);
+            if (ship && combat.attackerMovedIn) {
+                this._broadcastShipMoves([
+                    { ship, from: combat.from, to: combat.hex, path: [combat.hex] }
+                ]);
+            }
+            touched.push(axialKey(combat.hex.q, combat.hex.r));
+            touched.push(axialKey(combat.from.q, combat.from.r));
+        }
+        this._refreshVisibility(touched, combat?.destroyedIds ?? []);
+        const economyChanged = !!ship && this._economy.onShipMoved(ship);
+        if (combat) {
+            for (const sideId of this._combatSides(combat)) this._sendEconomyState(sideId);
+        } else if (economyChanged) {
+            this._sendEconomyState(ship!.sideId);
+        }
+    }
 
-        this._refreshVisibility([axialKey(from.q, from.r), axialKey(result.to.q, result.to.r)]);
-        if (this._economy.onShipMoved(ship)) this._sendEconomyState(ship.sideId);
+    /** Sides with a participant in the combat. */
+    private _combatSides(combat: CombatResult): SideId[] {
+        return [
+            ...new Set([
+                combat.attackerSideId,
+                ...combat.defenderSideIds,
+                ...combat.participants.map((p) => p.sideId)
+            ])
+        ];
+    }
 
-        if (outcome.battle) {
-            this.logger.info("Battle", outcome.battle.battleId, "started", outcome.battle);
-            this._sendBattleStart(outcome.battle);
+    /**
+     * Sent before the tiles update to sides that can see the attacked hex or the attacker's
+     * origin, and to the owners of every participant.
+     */
+    private _broadcastCombat(combat: CombatResult) {
+        const message: ServerToClientMessage = { type: "server:combat", payload: combat };
+        const involved = this._combatSides(combat);
+        for (const side of this._sides.values()) {
+            if (
+                involved.includes(side.id) ||
+                side.seesAll([combat.hex]) ||
+                side.seesAll([combat.from])
+            ) {
+                this.broadcastToSide(side.id, message);
+            }
         }
     }
 
@@ -424,7 +469,7 @@ export class Game {
 
     /**
      * Sent before the tiles update to the owner, sides that could see the origin or landing
-     * hex, and sides that lost ships.
+     * hex, and sides that lost ships. Each jump's landing combat, if any, follows it.
      */
     private _broadcastJumps(jumps: HyperjumpEvent[]) {
         for (const jump of jumps) {
@@ -436,7 +481,8 @@ export class Game {
                     to: jump.to,
                     outcome: jump.outcome,
                     ...(jump.collidedWithId ? { collidedWithId: jump.collidedWithId } : {}),
-                    destroyedIds: jump.destroyedIds
+                    destroyedIds: jump.destroyedIds,
+                    ...(jump.displacedTo ? { displacedTo: jump.displacedTo } : {})
                 }
             };
             for (const side of this._sides.values()) {
@@ -449,83 +495,8 @@ export class Game {
                     this.broadcastToSide(side.id, message);
                 }
             }
+            if (jump.combat) this._broadcastCombat(jump.combat);
         }
-    }
-
-    /** A pending battle ended without a fight because one side's vessels were all lost. */
-    private _broadcastBattleEnded({ battle, winnerSideId, loserSideId }: EndedBattle) {
-        const resolved: ServerToClientMessage = {
-            type: "server:battle:resolved",
-            payload: {
-                battleId: battle.battleId,
-                q: battle.q,
-                r: battle.r,
-                winnerSideId,
-                loserSideId,
-                destroyedShipIds: [],
-                destroyedUnitIds: []
-            }
-        };
-        for (const side of this._sides.values()) {
-            if (
-                side.id === battle.attackerSideId ||
-                side.id === battle.defenderSideId ||
-                side.seesAll([battle])
-            ) {
-                this.broadcastToSide(side.id, resolved);
-            }
-        }
-    }
-
-    private _sendBattleStart(battle: BattleInfo) {
-        for (const sideId of [battle.attackerSideId, battle.defenderSideId]) {
-            this.broadcastToSide(sideId, {
-                type: "server:battle:start",
-                payload: { ...battle, youAreAttacker: sideId === battle.attackerSideId }
-            });
-        }
-    }
-
-    private _handleBattleResolve(client: Client, battleId: BattleId, winnerSideId: SideId) {
-        const battle = this._battles.get(battleId);
-        // Capture viewers first: losers may lose sight of the hex once their ships are gone.
-        const viewers = battle
-            ? [...this._sides.values()].filter(
-                  (side) =>
-                      side.id === battle.attackerSideId ||
-                      side.id === battle.defenderSideId ||
-                      side.seesAll([battle])
-              )
-            : [];
-
-        const result = this._battles.resolve(battleId, client.sideId, winnerSideId);
-        if (!result.ok) {
-            this.logger.warn("Rejected battle resolve from", client.id, result.error);
-            this._sendError(client, result.error);
-            return;
-        }
-
-        const { q, r } = result.battle;
-        this.logger.info("Battle", battleId, "won by", winnerSideId, result.destroyedShipIds);
-        const resolved: ServerToClientMessage = {
-            type: "server:battle:resolved",
-            payload: {
-                battleId,
-                q,
-                r,
-                winnerSideId,
-                loserSideId: result.loserSideId,
-                destroyedShipIds: result.destroyedShipIds,
-                destroyedUnitIds: result.destroyedUnitIds
-            }
-        };
-        for (const side of viewers) {
-            this.broadcastToSide(side.id, resolved);
-        }
-
-        this._refreshVisibility([axialKey(q, r)], result.destroyedShipIds);
-        this._sendEconomyState(result.battle.attackerSideId);
-        this._sendEconomyState(result.battle.defenderSideId);
     }
 
     private _handleTurnEnd(client: Client) {
@@ -541,9 +512,8 @@ export class Game {
     }
 
     /**
-     * After an advance: hyperspace jumps, move order steps and supply ship moves (each
-     * visibility-filtered), then tiles, battles started or changed by jumps and started by
-     * supply ships, battles ended by jumps, and every side's economy.
+     * After an advance: hyperspace jumps with their landing combats, move order steps, supply
+     * ship moves and ambushes (each visibility-filtered), then tiles and every side's economy.
      */
     private _broadcastAdvance({ jumps, orders, economy, supply }: EndTurnResult) {
         if (economy && economy.completed.length > 0) {
@@ -556,7 +526,9 @@ export class Game {
             this._broadcastJumps(jumps);
             for (const jump of jumps) {
                 touched.push(axialKey(jump.from.q, jump.from.r), axialKey(jump.to.q, jump.to.r));
-                removed.push(...jump.destroyedIds);
+                if (jump.displacedTo)
+                    touched.push(axialKey(jump.displacedTo.q, jump.displacedTo.r));
+                removed.push(...jump.destroyedIds, ...(jump.combat?.destroyedIds ?? []));
             }
         }
         if (orders) {
@@ -587,6 +559,13 @@ export class Game {
                 }
                 touched.push(axialKey(move.from.q, move.from.r));
             }
+            for (const combat of supply.combats) {
+                this.logger.info("Supply ambush", combat.outcome, "at", combat.hex);
+                this._broadcastCombat(combat);
+                touched.push(axialKey(combat.hex.q, combat.hex.r));
+                touched.push(axialKey(combat.from.q, combat.from.r));
+                removed.push(...combat.destroyedIds);
+            }
             for (const arrival of supply.arrivals) {
                 touched.push(axialKey(arrival.at.q, arrival.at.r));
                 if (!arrival.waiting) removed.push(arrival.supplyShipId);
@@ -607,21 +586,6 @@ export class Game {
             if (location) touched.push(axialKey(location.q, location.r));
         }
         this._refreshVisibility(touched, removed);
-        for (const jump of jumps ?? []) {
-            if (jump.battle) {
-                this.logger.info("Battle", jump.battle.battleId, "started by jump", jump.battle);
-                this._sendBattleStart(jump.battle);
-            }
-            for (const battle of jump.updatedBattles) {
-                this.logger.info("Battle", battle.battleId, "changed by jump", battle);
-                this._sendBattleStart(battle);
-            }
-            for (const ended of jump.endedBattles) this._broadcastBattleEnded(ended);
-        }
-        for (const battle of supply?.battles ?? []) {
-            this.logger.info("Battle", battle.battleId, "started by supply ship", battle);
-            this._sendBattleStart(battle);
-        }
         for (const sideId of this._sides.keys()) this._sendEconomyState(sideId);
     }
 
@@ -717,80 +681,18 @@ export class Game {
     private _handleInvade(client: Client, locationId: EntityId, shipIds: EntityId[]) {
         const result = this._ground.invade(client.sideId, locationId, shipIds);
         if (!result.ok) return this._reject(client, "invasion", result.error);
-        const { location, defenderSideId, battle } = result;
-        const attackerSideId = client.sideId!;
-        const hex = axialKey(location.q, location.r);
-        if (battle) {
-            this.logger.info("Ground battle", battle.battleId, "started", battle);
-            this._refreshVisibility([hex]);
-            this._sendGroundStart(battle);
-        } else {
-            this.logger.info("Side", attackerSideId, "captured undefended", location.id);
-            const viewers = this._groundViewers(location, attackerSideId, defenderSideId);
-            const resolved: ServerToClientMessage = {
-                type: "server:ground:resolved",
-                payload: {
-                    battleId: `capture-${location.id}-${this._turns.turn}`,
-                    locationId: location.id,
-                    q: location.q,
-                    r: location.r,
-                    winnerSideId: attackerSideId,
-                    loserSideId: defenderSideId,
-                    destroyedUnitIds: [],
-                    captured: true
-                }
-            };
-            for (const side of viewers) this.broadcastToSide(side.id, resolved);
-            this._refreshVisibility([hex]);
-        }
-        this._sendEconomyState(attackerSideId);
-        this._sendEconomyState(defenderSideId);
-    }
-
-    private _sendGroundStart(battle: GroundBattleInfo) {
-        for (const sideId of [battle.attackerSideId, battle.defenderSideId]) {
-            this.broadcastToSide(sideId, {
-                type: "server:ground:start",
-                payload: { ...battle, youAreAttacker: sideId === battle.attackerSideId }
-            });
-        }
-    }
-
-    /** Both combatants plus every side that can currently see the location. */
-    private _groundViewers(hex: AxialCoord, attackerSideId: SideId, defenderSideId: SideId) {
-        return [...this._sides.values()].filter(
-            (side) =>
-                side.id === attackerSideId || side.id === defenderSideId || side.seesAll([hex])
+        const { location, defenderSideId, combat } = result;
+        this.logger.info(
+            "Side",
+            client.sideId,
+            "invaded",
+            location.id,
+            combat.outcome,
+            combat.captured ? "(captured)" : ""
         );
-    }
-
-    private _handleGroundResolve(client: Client, battleId: BattleId, winnerSideId: SideId) {
-        const battle = this._ground.get(battleId);
-        // Capture viewers first: the loser may lose sight of the location once it changes hands.
-        const viewers = battle
-            ? this._groundViewers(battle, battle.attackerSideId, battle.defenderSideId)
-            : [];
-        const result = this._ground.resolve(battleId, client.sideId, winnerSideId);
-        if (!result.ok) return this._reject(client, "ground resolve", result.error);
-
-        const { locationId, q, r, attackerSideId, defenderSideId } = result.battle;
-        this.logger.info("Ground battle", battleId, "won by", winnerSideId, result);
-        const resolved: ServerToClientMessage = {
-            type: "server:ground:resolved",
-            payload: {
-                battleId,
-                locationId,
-                q,
-                r,
-                winnerSideId,
-                loserSideId: result.loserSideId,
-                destroyedUnitIds: result.destroyedUnitIds,
-                captured: result.captured
-            }
-        };
-        for (const side of viewers) this.broadcastToSide(side.id, resolved);
-        this._refreshVisibility([axialKey(q, r)]);
-        this._sendEconomyState(attackerSideId);
+        this._broadcastCombat(combat);
+        this._refreshVisibility([axialKey(location.q, location.r)]);
+        this._sendEconomyState(client.sideId!);
         this._sendEconomyState(defenderSideId);
     }
 
@@ -859,8 +761,6 @@ export class Game {
                 tiles: side.buildTileViews(this._entities),
                 visible: side.visibleKeys(),
                 turn: this._turns.state(),
-                battles: this._battles.involving(side.id),
-                groundBattles: this._ground.involving(side.id),
                 economy: this._economy.stateFor(side.id),
                 balance: this._economy.balance
             }

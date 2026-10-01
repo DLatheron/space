@@ -32,7 +32,7 @@ function orderWorld(knowledge?: (sideId: string) => MoveOrderKnowledge) {
     const map = createEmptyMap({ width: 30, height: 20, hexSize: 50, seed: 1 });
     const entities = new EntityManager(map);
     const battles = new BattleManager(entities);
-    const orders = new MoveOrderManager(entities, { battles, knowledge });
+    const orders = new MoveOrderManager(entities, { knowledge });
     const hyperspace = new HyperspaceManager(entities, { battles, rng: () => 0 });
     const turns = new TurnManager(["alpha", "beta"], entities, undefined, undefined, {
         moveOrders: orders,
@@ -97,7 +97,7 @@ describe("move orders", () => {
         expect(ship.moveOrder).toBeUndefined();
     });
 
-    it("stops before enemy ships without starting a battle and keeps the order", () => {
+    it("stops before enemy ships without attacking and keeps the order", () => {
         const { entities, battles, ship, endTurn } = orderWorld();
         ship.movementPoints = 0;
         battles.moveShip("alpha", ship.id, { q: 10, r: 5 });
@@ -107,7 +107,8 @@ describe("move orders", () => {
         expect(result.orders?.moves[0]?.path).toEqual([{ q: 3, r: 5 }]);
         expect(ship).toMatchObject({ q: 3, r: 5 });
         expect(ship.moveOrder?.destination).toEqual({ q: 10, r: 5 });
-        expect(battles.pending()).toEqual([]);
+        expect(enemy.hp).toBeUndefined();
+        expect(ship.hp).toBeUndefined();
 
         // Still blocked: the ship waits and keeps its order.
         expect(endTurn().orders?.moves).toEqual([]);
@@ -116,23 +117,6 @@ describe("move orders", () => {
         entities.remove(enemy.id);
         endTurn();
         expect(ship).toMatchObject({ q: 6, r: 5 });
-    });
-
-    it("waits before a pending battle and skips ships locked in battle", () => {
-        const { entities, battles, ship, endTurn } = orderWorld();
-        const attacker = entities.add(makeShip("ship-a2", "alpha", { q: 7, r: 6 }));
-        entities.add(makeShip("ship-b", "beta", { q: 7, r: 5 }));
-        const fight = battles.moveShip("alpha", attacker.id, { q: 7, r: 5 });
-        expect(fight.ok && fight.battle).toBeTruthy();
-        attacker.moveOrder = { destination: { q: 12, r: 5 } };
-
-        battles.moveShip("alpha", ship.id, { q: 10, r: 5 });
-        expect(ship).toMatchObject({ q: 5, r: 5 });
-        const result = endTurn();
-        expect(result.orders?.moves.map((m) => m.ship.id)).toEqual([ship.id]);
-        expect(ship).toMatchObject({ q: 6, r: 5 });
-        expect(attacker).toMatchObject({ q: 7, r: 5 });
-        expect(attacker.moveOrder).toBeDefined();
     });
 
     it("re-plans each turn around obstacles the side knows about", () => {
@@ -240,22 +224,13 @@ describe("move orders", () => {
         endTurn();
         expect(ship).toMatchObject({ q: 3, r: 5 });
         expect(ship.moveOrder?.destination).toEqual({ q: 10, r: 5 });
-        expect(battles.pending()).toEqual([]);
     });
 
-    it("keeps the order while a battle is pending at its destination, then arrives", () => {
+    it("waits before enemies at its destination without attacking, then arrives once they leave", () => {
         const { entities, battles, ship, endTurn } = orderWorld();
         ship.movementPoints = 0;
         battles.moveShip("alpha", ship.id, { q: 5, r: 5 });
-        const attacker = entities.add(makeShip("ship-a2", "alpha", { q: 5, r: 6 }));
-        entities.add(makeShip("ship-b", "beta", { q: 5, r: 5 }, 3, "scout"));
-        const fight = battles.moveShip("alpha", attacker.id, { q: 5, r: 5 });
-        const battleId = fight.ok ? fight.battle!.battleId : "";
-        expect(battleId).not.toBe("");
-        expect(battles.moveShip("alpha", ship.id, { q: 5, r: 5 })).toEqual({
-            ok: false,
-            error: "A battle is in progress at 5,5"
-        });
+        const enemy = entities.add(makeShip("ship-b", "beta", { q: 5, r: 5 }, 3, "scout"));
 
         const waiting = endTurn();
         expect(waiting.orders?.moves[0]?.path).toEqual(row(5, 3, 4));
@@ -263,8 +238,9 @@ describe("move orders", () => {
         expect(ship.moveOrder?.destination).toEqual({ q: 5, r: 5 });
         expect(endTurn().orders?.moves).toEqual([]);
         expect(ship.moveOrder?.destination).toEqual({ q: 5, r: 5 });
+        expect(enemy.hp).toBeUndefined();
 
-        expect(battles.resolve(battleId, "alpha", "alpha").ok).toBe(true);
+        entities.remove(enemy.id);
         const arrived = endTurn();
         expect(arrived.orders?.arrived).toEqual([ship.id]);
         expect(ship).toMatchObject({ q: 5, r: 5 });

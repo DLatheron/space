@@ -7,5 +7,6 @@ export * from "./types/Tech.js";
 export * from "./types/GroundUnitTypes.js";
 export * from "./types/Economy.js";
 export * from "./types/Hyperspace.js";
+export * from "./types/Combat.js";
 export * from "./types/ClientToServerMessage.js";
 export * from "./types/ServerToClientMessage.js";

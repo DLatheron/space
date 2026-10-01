@@ -14,8 +14,8 @@ import {
     surplusStock,
     zeroResources,
     type AxialCoord,
-    type BattleInfo,
     type CargoReservation,
+    type CombatResult,
     type EntityId,
     type LocationEntity,
     type OrderDemand,
@@ -33,7 +33,7 @@ import { facingAfterPath } from "./moveShip.js";
 export type SupplyKnowledge = {
     /** An obstacle to path around (the destination itself is always enterable). */
     isObstacle: (hex: AxialCoord) => boolean;
-    /** Enemy warships or a pending battle; never entered, not even as the destination. */
+    /** Enemy warships; never entered, not even as the destination. */
     isHostile: (hex: AxialCoord) => boolean;
     /**
      * Whether the side currently sees `hex`. Hostiles it only remembers are risked when
@@ -71,8 +71,8 @@ export type SupplyArrival = {
 export type SupplyMoveResult = {
     moves: SupplyMove[];
     arrivals: SupplyArrival[];
-    /** Battles started by supply ships running into enemy ships the side didn't know about. */
-    battles: BattleInfo[];
+    /** Ambushes: enemy warships the side didn't know about attacking its supply ships. */
+    combats: CombatResult[];
 };
 
 type Load = { cargo: Resources; reservedFor: CargoReservation[] };
@@ -177,20 +177,20 @@ export class SupplyManager {
     }
 
     /**
-     * Steps 2 and 3. Each supply ship re-plans its route and moves up to its speed, stopping
-     * before a pending battle and in the first hex holding enemy ships (starting a battle).
-     * A ship with no route waits. A ship whose destination was lost heads for the nearest
+     * Steps 2 and 3. Each supply ship re-plans its route and moves up to its speed. Stepping
+     * towards a hex holding enemy warships it didn't know about, it is ambushed (see
+     * `BattleManager.ambush`) and, if it survives, stops before that hex. A ship with no route
+     * waits. A ship whose destination was lost heads for the nearest
      * owned location instead (its reservations are dropped). Ships reaching their
      * destination unload what fits under its stockpile cap and are removed once empty;
      * otherwise they wait there and try again each turn. `only` limits the pass to
      * those ships (used to give ships launched this turn their first move).
      */
     move(only?: Iterable<EntityId>): SupplyMoveResult {
-        const result: SupplyMoveResult = { moves: [], arrivals: [], battles: [] };
+        const result: SupplyMoveResult = { moves: [], arrivals: [], combats: [] };
         const filter = only ? new Set(only) : undefined;
         for (const ship of this._entities.ofKind("supply_ship")) {
             if (filter && !filter.has(ship.id)) continue;
-            if (this._battles?.findByShip(ship.id)) continue;
             ship.speed = this._economy.research.supplySpeed(ship.sideId);
 
             const destination = this._ensureDestination(ship);
@@ -207,13 +207,13 @@ export class SupplyManager {
                     continue;
                 }
                 const path: AxialCoord[] = [];
+                let ambushAt: AxialCoord | undefined;
                 for (const hex of route.slice(0, ship.speed)) {
-                    if (this._battles?.findAt(hex)) break;
-                    path.push(hex);
                     if (hasEnemyWarships(this._entities, hex, ship.sideId)) {
-                        ambushed = true;
+                        ambushAt = hex;
                         break;
                     }
+                    path.push(hex);
                 }
                 ship.route = route.slice(path.length);
                 if (path.length > 0) {
@@ -223,9 +223,11 @@ export class SupplyManager {
                     ship.facing = facingAfterPath(from, path);
                     result.moves.push({ ship, from, to: { ...to }, path });
                 }
-                if (ambushed) {
-                    const battle = this._battles?.startSupplyAmbush(ship);
-                    if (battle) result.battles.push(battle);
+                if (ambushAt) {
+                    ambushed = true;
+                    const combat = this._battles?.ambush(ship, ambushAt);
+                    if (combat) result.combats.push(combat);
+                    if (!this._entities.get(ship.id)) continue;
                 }
             }
 
@@ -475,8 +477,7 @@ export class SupplyManager {
     private _trueKnowledge(sideId: SideId): SupplyKnowledge {
         return {
             isObstacle: (hex) => hexHasObstacle(this._entities.entitiesAt(hex.q, hex.r)),
-            isHostile: (hex) =>
-                !!this._battles?.findAt(hex) || hasEnemyWarships(this._entities, hex, sideId)
+            isHostile: (hex) => hasEnemyWarships(this._entities, hex, sideId)
         };
     }
 }

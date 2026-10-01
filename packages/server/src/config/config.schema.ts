@@ -7,7 +7,9 @@ import {
     TechId,
     type EconomyBalance,
     type GroundUnitBalance,
+    type HangarBalance,
     type HyperdriveBalance,
+    type SupplyShipTechBonus,
     type Resources,
     type ShipBalance,
     type StorageStructureBalance,
@@ -123,6 +125,47 @@ function hyperdrive(defaults: HyperdriveBalance | undefined) {
         .transform((value) => value ?? undefined);
 }
 
+function hangarSchema(defaults: HangarBalance) {
+    return z
+        .object({
+            /** Ships carried at once. */
+            capacity: z.int().min(0).default(defaults.capacity),
+            /** Ship types it may carry. */
+            carries: z.array(ShipType).default(() => [...defaults.carries])
+        })
+        .strict();
+}
+
+/**
+ * Ship types with a default hangar may set `null` to remove it; others may add one, giving at
+ * least `capacity` and `carries`.
+ */
+function hangar(defaults: HangarBalance | undefined) {
+    if (!defaults) {
+        return z
+            .object({ capacity: z.int().min(0), carries: z.array(ShipType) })
+            .strict()
+            .nullable()
+            .optional()
+            .transform((value) => value ?? undefined);
+    }
+    return hangarSchema(defaults)
+        .nullable()
+        .prefault({})
+        .transform((value) => value ?? undefined);
+}
+
+function supplyTechBonus(defaults: SupplyShipTechBonus) {
+    return z
+        .object({
+            hp: z.int().min(0).default(defaults.hp),
+            defence: z.int().min(0).default(defaults.defence),
+            evasion: z.number().min(0).max(1).default(defaults.evasion)
+        })
+        .strict()
+        .prefault({});
+}
+
 function hazard(destroyChance: number, damageFraction: number) {
     return z
         .object({
@@ -145,6 +188,10 @@ function ship(defaults: ShipBalance) {
             maxMovementPoints: z.int().min(0).default(defaults.maxMovementPoints),
             /** At tier 1; `shipTiers.hpMultiplier` scales it. */
             hp: z.int().positive().default(defaults.hp),
+            /** At tier 1; `shipTiers.attackBonus` adds to it (unarmed ships stay at 0). */
+            attack: z.int().min(0).default(defaults.attack),
+            /** At tier 1; `shipTiers.defenceBonus` adds to it. */
+            defence: z.int().min(0).default(defaults.defence),
             /** Structures the building planet needs. */
             requires: requires(defaults.requires),
             requiresTech: requiresTech(defaults.requiresTech),
@@ -152,7 +199,9 @@ function ship(defaults: ShipBalance) {
             /** Ground units it can carry; 0 for none. */
             unitCapacity: z.int().min(0).default(defaults.unitCapacity),
             canColonise: z.boolean().default(defaults.canColonise),
-            hyperdrive: hyperdrive(defaults.hyperdrive)
+            hyperdrive: hyperdrive(defaults.hyperdrive),
+            /** Ships it can carry; `null` removes a default hangar. */
+            hangar: hangar(defaults.hangar)
         })
         .strict()
         .prefault({});
@@ -167,6 +216,8 @@ function groundUnit(defaults: GroundUnitBalance) {
             attack: z.int().min(0).default(defaults.attack),
             /** At tier 1; `groundUnitTiers.defenceBonus` adds to it. */
             defence: z.int().min(0).default(defaults.defence),
+            /** Full hp; damage persists between combats. */
+            hp: z.int().positive().default(defaults.hp),
             /** Structures the training location needs. */
             requires: requires(defaults.requires),
             requiresTech: requiresTech(defaults.requiresTech),
@@ -308,6 +359,8 @@ export const EconomyBalanceConfig = z
                     buildTurns: 2,
                     maxMovementPoints: 5,
                     hp: 6,
+                    attack: 1,
+                    defence: 1,
                     maxTier: 3
                 }),
                 frigate: ship({
@@ -316,6 +369,8 @@ export const EconomyBalanceConfig = z
                     buildTurns: 3,
                     maxMovementPoints: 3,
                     hp: 12,
+                    attack: 4,
+                    defence: 3,
                     requires: ["advanced_shipyard"],
                     maxTier: 3,
                     hyperdrive: {
@@ -329,6 +384,8 @@ export const EconomyBalanceConfig = z
                     buildTurns: 3,
                     maxMovementPoints: 2,
                     hp: 4,
+                    attack: 0,
+                    defence: 1,
                     maxTier: 1,
                     canColonise: true
                 }),
@@ -338,6 +395,8 @@ export const EconomyBalanceConfig = z
                     buildTurns: 2,
                     maxMovementPoints: 3,
                     hp: 8,
+                    attack: 0,
+                    defence: 2,
                     requiresTech: "transports",
                     maxTier: 3,
                     unitCapacity: 4
@@ -348,6 +407,8 @@ export const EconomyBalanceConfig = z
                     buildTurns: 2,
                     maxMovementPoints: 6,
                     hp: 4,
+                    attack: 3,
+                    defence: 1,
                     maxTier: 3
                 }),
                 advanced_fighter_squadron: ship({
@@ -356,6 +417,8 @@ export const EconomyBalanceConfig = z
                     buildTurns: 3,
                     maxMovementPoints: 6,
                     hp: 7,
+                    attack: 5,
+                    defence: 2,
                     requires: ["advanced_shipyard"],
                     maxTier: 3
                 }),
@@ -365,8 +428,11 @@ export const EconomyBalanceConfig = z
                     buildTurns: 6,
                     maxMovementPoints: 2,
                     hp: 30,
+                    attack: 8,
+                    defence: 8,
                     requires: ["advanced_shipyard", "docks"],
                     maxTier: 3,
+                    hangar: { capacity: 4, carries: ["fighter_squadron", "advanced_fighter_squadron"] },
                     hyperdrive: {
                         cooldownTurns: 4,
                         accuracy: { onTarget: 30, oneOff: 50, twoOff: 20 }
@@ -376,14 +442,51 @@ export const EconomyBalanceConfig = z
             .strict()
             .prefault({}),
         /**
-         * Ship stat changes at tiers 1, 2 and 3: hp is multiplied (rounded up), movement added,
-         * and hyperjump accuracy improved by percentage points (see `hyperjumpAccuracy`).
+         * Ship stat changes at tiers 1, 2 and 3: hp is multiplied (rounded up), movement,
+         * defence and attack (armed ships only) added, and hyperjump accuracy improved by
+         * percentage points (see `hyperjumpAccuracy`).
          */
         shipTiers: z
             .object({
                 hpMultiplier: perTier(z.number().positive(), [1, 1.5, 2]),
                 movementBonus: perTier(z.int(), [0, 0, 1]),
-                hyperdriveAccuracyBonus: perTier(z.number().min(0), [0, 10, 20])
+                hyperdriveAccuracyBonus: perTier(z.number().min(0), [0, 10, 20]),
+                attackBonus: perTier(z.int(), [0, 1, 2]),
+                defenceBonus: perTier(z.int(), [0, 1, 2])
+            })
+            .strict()
+            .prefault({}),
+        /**
+         * Automatic combat. Each hit deals
+         * `max(minDamage, round(attack * roll(1 - spread, 1 + spread) * defenceScale / (defenceScale + defence)))`.
+         */
+        combat: z
+            .object({
+                spread: z.number().min(0).max(1).default(0.25),
+                minDamage: z.int().min(0).default(1),
+                defenceScale: z.number().positive().default(10),
+                /** Ground combat rounds before undecided invaders re-embark. */
+                groundMaxRounds: z.int().min(1).default(6)
+            })
+            .strict()
+            .prefault({}),
+        /** Supply ship combat stats (they never attack) and the techs that improve them. */
+        supplyShips: z
+            .object({
+                hp: z.int().positive().default(6),
+                defence: z.int().min(0).default(1),
+                /** Chance (0-1) of evading each attack, taking no damage and staying on course. */
+                evasion: z.number().min(0).max(1).default(0.3),
+                maxEvasion: z.number().min(0).max(1).default(0.75),
+                /** Added per known tech. */
+                techBonus: z
+                    .object({
+                        evasive_manoeuvres_1: supplyTechBonus({ hp: 0, defence: 0, evasion: 0.15 }),
+                        evasive_manoeuvres_2: supplyTechBonus({ hp: 0, defence: 0, evasion: 0.15 }),
+                        armoured_freighters: supplyTechBonus({ hp: 6, defence: 2, evasion: 0 })
+                    })
+                    .strict()
+                    .prefault({})
             })
             .strict()
             .prefault({}),
@@ -430,6 +533,7 @@ export const EconomyBalanceConfig = z
                     buildTurns: 2,
                     attack: 2,
                     defence: 3,
+                    hp: 10,
                     requires: ["barracks"],
                     requiresTech: "ground_forces",
                     maxTier: 3
@@ -439,6 +543,7 @@ export const EconomyBalanceConfig = z
                     buildTurns: 3,
                     attack: 5,
                     defence: 4,
+                    hp: 16,
                     requires: ["barracks"],
                     requiresTech: "ground_forces",
                     maxTier: 3

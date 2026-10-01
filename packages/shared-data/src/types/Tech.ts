@@ -16,7 +16,10 @@ export const TechId = z.enum([
     "enhancement_tier_2",
     "enhancement_tier_3",
     "hyperdrive_calibration_1",
-    "hyperdrive_calibration_2"
+    "hyperdrive_calibration_2",
+    "evasive_manoeuvres_1",
+    "evasive_manoeuvres_2",
+    "armoured_freighters"
 ]);
 export type TechId = z.infer<typeof TechId>;
 
@@ -121,6 +124,27 @@ export const TECHS: Record<TechId, TechDefinition> = {
         cost: { money: 150, materials: 0, population: 0, science: 300 },
         buildTurns: 5,
         requires: ["hyperdrive_calibration_1"]
+    },
+    evasive_manoeuvres_1: {
+        name: "Evasive Manoeuvres I",
+        description: "Supply ships are more likely to evade attacks.",
+        cost: { money: 50, materials: 0, population: 0, science: 100 },
+        buildTurns: 3,
+        requires: []
+    },
+    evasive_manoeuvres_2: {
+        name: "Evasive Manoeuvres II",
+        description: "Supply ships are much more likely to evade attacks.",
+        cost: { money: 100, materials: 0, population: 0, science: 200 },
+        buildTurns: 4,
+        requires: ["evasive_manoeuvres_1"]
+    },
+    armoured_freighters: {
+        name: "Armoured Freighters",
+        description: "Supply ships get more hp and defence.",
+        cost: { money: 50, materials: 100, population: 0, science: 120 },
+        buildTurns: 3,
+        requires: []
     }
 };
 

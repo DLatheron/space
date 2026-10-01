@@ -14,6 +14,8 @@ import {
     type Pixel
 } from "@space/maths";
 import {
+    canCarryShip,
+    hangarFor,
     hexHasObstacle,
     hyperdriveFor,
     hyperjumpAccuracy,
@@ -23,22 +25,24 @@ import {
     RESOURCE_KEYS,
     ringHexes,
     SHIP_TYPE_INFO,
+    shipStats,
     siteForEntity,
     stockpileCap,
     sumResources,
+    supplyShipStats,
     zeroResources,
     type AxialCoord,
-    type BattleId,
-    type BattleInfo,
     type BuildContext,
+    type CombatParticipant,
+    type CombatResult,
     type EconomyBalance,
     type EconomyState,
     type ResourceKey,
     type EntityId,
     type EntityOfKind,
     type EntitySummary,
-    type GroundBattleInfo,
     type GroundUnit,
+    type HangarBalance,
     type HexKey,
     type HyperdriveAccuracy,
     type HyperdriveBalance,
@@ -52,6 +56,7 @@ import {
     type TileView,
     type TurnState
 } from "@space/shared-data";
+import { BEAM_MS, CombatEffects } from "./CombatEffects.js";
 import { Explosions, JUMP_ARRIVE_MS, JUMP_DEPART_MS, JumpFlashes } from "./Explosions.js";
 import { ShipMotion, SUPPLY_SHIP_MOTION, type MotionSpeeds, type ShipPose } from "./ShipMotion.js";
 
@@ -88,26 +93,18 @@ const JUMP_STAGGER_MS = 450;
 /** Arriving ships grow to full size over this part of the arrival flash. */
 const JUMP_SCALE_IN_MS = JUMP_ARRIVE_MS * 0.5;
 
-export type BattleResolved = {
-    battleId: BattleId;
-    q: number;
-    r: number;
-    winnerSideId: SideId;
-    loserSideId: SideId;
-    destroyedShipIds: EntityId[];
-    destroyedUnitIds: EntityId[];
-};
+/** The attacker darts towards the defenders as a combat opens. */
+const COMBAT_LUNGE_MS = 450;
+/** From the start of a combat: beams fire, hits land, then losses explode. */
+const COMBAT_FIRE_MS = 120;
+const COMBAT_HIT_MS = COMBAT_FIRE_MS + BEAM_MS * 0.45;
+const COMBAT_EXPLODE_MS = 650;
+/** Survivors hold position this long before an attacker moves in or a jumper is displaced. */
+const COMBAT_MS = 1100;
+const MAX_COMBAT_REPORTS = 30;
 
-export type GroundBattleResolved = {
-    battleId: BattleId;
-    locationId: EntityId;
-    q: number;
-    r: number;
-    winnerSideId: SideId;
-    loserSideId: SideId;
-    destroyedUnitIds: EntityId[];
-    captured: boolean;
-};
+/** A `server:combat` kept for the combat log; `turn` is when it arrived. */
+export type CombatReport = { id: number; turn: number | null; result: CombatResult };
 
 export type ShipJumped = Extract<ServerToClientMessage, { type: "server:ship:jumped" }>["payload"];
 
@@ -121,6 +118,11 @@ export type MobileEntity = ShipEntity | SupplyShipEntity;
 
 function isMobile(entity: EntitySummary): entity is MobileEntity {
     return entity.kind === "ship" || entity.kind === "supply_ship";
+}
+
+/** Aboard a carrier: kept in our data but not drawn, picked or listed on the map. */
+export function isCarried(entity: EntitySummary): boolean {
+    return entity.kind === "ship" && !!entity.carriedBy;
 }
 
 function motionSpeeds(entity: MobileEntity): MotionSpeeds {
@@ -255,6 +257,8 @@ export class HexWorld {
     hyperjumpTargetingId: EntityId | null = null;
     /** Short message over the map (rejected orders, server errors); `id` changes per message. */
     notice: { text: string; id: number } | null = null;
+    /** Combats seen since the map init, newest first. */
+    combatReports: CombatReport[] = [];
     /** Our side's private economy; `null` until the first map init. */
     economy: EconomyState | null = null;
     /** Server-configured caps and build limits; `null` until the first map init. */
@@ -278,9 +282,10 @@ export class HexWorld {
     private _previewCache: { key: string; route: Axial[] | null } | null = null;
     /** `performance.now()` of the frame being rendered. */
     private _frameNow = 0;
-    /** Pending battles involving our side. */
-    private readonly _battles = new Map<BattleId, BattleInfo>();
-    private readonly _groundBattles = new Map<BattleId, GroundBattleInfo>();
+    private readonly _combatEffects = new CombatEffects();
+    /** Hp bars show the pre-combat `hp` until `until`, so they drop as the hits land. */
+    private readonly _hpShown = new Map<EntityId, { hp: number; until: number }>();
+    private _combatSeq = 0;
 
     camera: Camera = { x: 0, y: 0, zoom: 0.35 };
 
@@ -313,8 +318,6 @@ export class HexWorld {
         tiles: TileView[];
         visible: HexKey[];
         turn: TurnState;
-        battles: BattleInfo[];
-        groundBattles: GroundBattleInfo[];
         economy: EconomyState;
         balance: EconomyBalance;
     }) {
@@ -337,14 +340,9 @@ export class HexWorld {
         this._jumpFlashes.clear();
         this._departing = [];
         this._arrivals.clear();
-        this._battles.clear();
-        for (const battle of payload.battles) {
-            this._battles.set(battle.battleId, battle);
-        }
-        this._groundBattles.clear();
-        for (const battle of payload.groundBattles) {
-            this._groundBattles.set(battle.battleId, battle);
-        }
+        this._combatEffects.clear();
+        this._hpShown.clear();
+        this.combatReports = [];
 
         for (const key of payload.visible) {
             this._visible.add(key);
@@ -473,24 +471,42 @@ export class HexWorld {
         const before = this._snapshotShips();
         const moved: MobileEntity = { ...entity, q: to.q, r: to.r, facing };
         this._removeEntities(new Set([entity.id]));
-
-        const key = hexKey(to.q, to.r);
-        let dest = this._tiles.get(key);
-        if (!dest) {
-            dest = { q: to.q, r: to.r, fog: "visible", entities: [] };
-            this._tiles.set(key, dest);
-        }
+        const dest = this._tileAt(to);
         dest.entities = [...dest.entities, moved];
+        this._moveCarried(entity.id, from, to);
 
         this._animateMovedShips(before, new Map([[entity.id, [from, ...path]]]));
         this._validateSelection();
         this._notify();
     }
 
+    /** Get or create the tile at `hex` (a ship arriving somewhere we have no tile for yet). */
+    private _tileAt(hex: AxialCoord): ClientTile {
+        const key = hexKey(hex.q, hex.r);
+        let tile = this._tiles.get(key);
+        if (!tile) {
+            tile = { q: hex.q, r: hex.r, fog: "visible", entities: [] };
+            this._tiles.set(key, tile);
+        }
+        return tile;
+    }
+
+    /** Ships aboard `carrierId` ride along to `to`; only their owner knows about them. */
+    private _moveCarried(carrierId: EntityId, from: AxialCoord, to: AxialCoord) {
+        const carried = this.entitiesAt(from.q, from.r).filter(
+            (e): e is ShipEntity => e.kind === "ship" && e.carriedBy === carrierId
+        );
+        if (!carried.length) return;
+        this._removeEntities(new Set(carried.map((s) => s.id)));
+        const dest = this._tileAt(to);
+        dest.entities = [...dest.entities, ...carried.map((s) => ({ ...s, q: to.q, r: to.r }))];
+    }
+
     /**
      * Play a resolved hyperspace jump. The ship collapses at its origin, then flashes in at
      * its landing hex; ships it destroyed keep drawing until then and explode on arrival.
      * Positions update now so the tiles update that follows doesn't animate a normal move.
+     * A jumper displaced by its landing combat waits out the combat, then slides aside.
      */
     applyShipJumped(payload: ShipJumped) {
         const now = performance.now();
@@ -523,6 +539,7 @@ export class HexWorld {
                 found && "sideId" in found ? found.sideId : jumper?.sideId,
                 "#ffd166"
             );
+            if (found && isCarried(found)) continue;
             if (id === payload.shipId || !found || !isMobile(found)) {
                 this._explosions.spawn(landing, colour, this.hexSize, arriveAt);
                 continue;
@@ -537,21 +554,28 @@ export class HexWorld {
 
         this._removeEntities(new Set([payload.shipId, ...payload.destroyedIds]));
         if (jumper && !jumperDestroyed) {
+            const end = payload.displacedTo ?? payload.to;
             const arrived: ShipEntity = {
                 ...jumper,
-                q: payload.to.q,
-                r: payload.to.r,
+                q: end.q,
+                r: end.r,
                 moveOrder: undefined,
                 hyperjump: undefined,
                 hyperdriveCharging: undefined
             };
-            const key = hexKey(payload.to.q, payload.to.r);
-            let dest = this._tiles.get(key);
-            if (!dest) {
-                dest = { q: payload.to.q, r: payload.to.r, fog: "visible", entities: [] };
-                this._tiles.set(key, dest);
-            }
+            const dest = this._tileAt(end);
             dest.entities = [...dest.entities, arrived];
+            this._moveCarried(jumper.id, payload.from, end);
+            if (payload.displacedTo) {
+                const motion = new ShipMotion(
+                    ShipMotion.poseAtHex(payload.to, jumper.facing, this.hexSize),
+                    now
+                );
+                motion.holdUntil(arriveAt + JUMP_SCALE_IN_MS + COMBAT_MS);
+                const path = planHexPath(payload.to, payload.displacedTo, this._pathOptions());
+                motion.enqueue(path, this.hexSize, motionSpeeds(jumper), now);
+                this._motions.set(jumper.id, motion);
+            }
         }
         if (!jumperDestroyed) this._arrivals.set(payload.shipId, arriveAt);
         if (this.hyperjumpTargetingId === payload.shipId) this.hyperjumpTargetingId = null;
@@ -559,108 +583,260 @@ export class HexWorld {
         this._notify();
     }
 
-    applyBattleStart(battle: BattleInfo) {
-        this._battles.set(battle.battleId, battle);
-        if (battle.attackerSideId === this.sideId) {
-            this.selectedShipId = null;
-            this.inspectedEntityId = null;
-        }
-        this._notify();
-    }
-
     /**
-     * Remove destroyed ships and blow them up: immediately at their hex, or once a
-     * still-running move animation reaches its end.
+     * Play an automatic combat and keep it for the combat log. Losses are removed now but
+     * keep drawing until they explode, so the tiles update that follows can't snap them away.
      */
-    applyBattleResolved(payload: BattleResolved) {
-        this._battles.delete(payload.battleId);
+    applyCombat(result: CombatResult) {
+        this.combatReports = [
+            { id: ++this._combatSeq, turn: this.turn?.turn ?? null, result },
+            ...this.combatReports
+        ].slice(0, MAX_COMBAT_REPORTS);
         const now = performance.now();
-        const colour = sideColour(payload.loserSideId, "#ffd166");
-
-        for (const id of payload.destroyedShipIds) {
-            const found = this.findEntityById(id);
-            const ship = found && isMobile(found) ? found : undefined;
-            const motion = this._motions.get(id);
-            this._motions.delete(id);
-            if (ship && motion && !motion.isDone(now)) {
-                this._dying.push({ entity: ship, motion, colour });
-                continue;
-            }
-            const at = axialToPixel(ship?.q ?? payload.q, ship?.r ?? payload.r, this.hexSize);
-            this._explosions.spawn(at, colour, this.hexSize, now);
+        if (result.kind === "ground") {
+            this._applyGroundCombat(result, now);
+        } else {
+            this._applySpaceCombat(result, now);
         }
-        if (!payload.destroyedShipIds.length) {
-            const at = axialToPixel(payload.q, payload.r, this.hexSize);
-            this._explosions.spawn(at, colour, this.hexSize, now);
-        }
-
-        this._removeEntities(new Set(payload.destroyedShipIds));
         this._validateSelection();
         this._notify();
     }
 
-    get battles(): BattleInfo[] {
-        return [...this._battles.values()];
-    }
-
-    /** Pending battle our side must resolve, if any. */
-    get battleToResolve(): BattleInfo | undefined {
-        return this.battles.find((battle) => battle.attackerSideId === this.sideId);
-    }
-
-    /** Pending battle we are defending and waiting on the attacker for, if any. */
-    get battleAwaited(): BattleInfo | undefined {
-        return this.battles.find((battle) => battle.defenderSideId === this.sideId);
-    }
-
-    applyGroundStart(battle: GroundBattleInfo) {
-        this._groundBattles.set(battle.battleId, battle);
-        if (battle.attackerSideId === this.sideId) {
-            this.selectedShipId = null;
-            this.inspectedEntityId = null;
+    /**
+     * Once everyone involved has finished moving or jumping in, the attacker lunges (when it
+     * attacked from a neighbouring hex), beams fly, damage floats up and losses explode.
+     * Survivors hold still until the end, so a follow-up move into the hex plays afterwards.
+     */
+    private _applySpaceCombat(result: CombatResult, now: number) {
+        const fighters: { p: CombatParticipant; entity: MobileEntity }[] = [];
+        for (const p of result.participants) {
+            const entity = this.findEntityById(p.id);
+            if (entity && isMobile(entity) && !isCarried(entity)) fighters.push({ p, entity });
         }
-        this._notify();
+
+        let startAt = now;
+        for (const { entity } of fighters) {
+            const arriveAt = this._arrivals.get(entity.id);
+            const motion = this._motions.get(entity.id);
+            if (arriveAt !== undefined) {
+                startAt = Math.max(startAt, arriveAt + JUMP_SCALE_IN_MS);
+            } else if (motion) {
+                startAt = Math.max(startAt, motion.endsAt);
+            }
+        }
+        const hitAt = startAt + COMBAT_HIT_MS;
+        const explodeAt = startAt + COMBAT_EXPLODE_MS;
+        const target = axialToPixel(result.hex.q, result.hex.r, this.hexSize);
+        const lunges =
+            result.cause === "move" &&
+            (result.from.q !== result.hex.q || result.from.r !== result.hex.r);
+
+        for (const { p, entity } of fighters) {
+            if (p.role !== "attacker" || entity.kind !== "ship") continue;
+            const motion = this._motionFor(entity, now);
+            motion.holdUntil(startAt);
+            if (lunges) motion.lunge(target, this.hexSize * 0.3, COMBAT_LUNGE_MS);
+            motion.holdUntil(startAt + COMBAT_MS);
+        }
+
+        const poseOf = (entity: MobileEntity): Pixel =>
+            this._motions.get(entity.id)?.poseAt(hitAt) ??
+            axialToPixel(entity.q, entity.r, this.hexSize);
+        this._spawnBeams(fighters, poseOf, startAt + COMBAT_FIRE_MS);
+
+        const labelsAt = new Map<HexKey, number>();
+        for (const { p, entity } of fighters) {
+            const text = p.evaded
+                ? "Evaded"
+                : p.damageTaken > 0
+                  ? `−${Math.round(p.damageTaken)}`
+                  : undefined;
+            if (!text) continue;
+            const key = hexKey(entity.q, entity.r);
+            const stack = labelsAt.get(key) ?? 0;
+            labelsAt.set(key, stack + 1);
+            const pose = poseOf(entity);
+            this._combatEffects.label({
+                at: { x: pose.x, y: pose.y - stack * this.hexSize * 0.3 },
+                text,
+                colour: p.evaded ? "#7fe8ff" : "#ff8a8a",
+                startAt: hitAt + stack * 80,
+                scale: this.hexSize
+            });
+        }
+
+        // Hp drops as the hits land; losses keep their pre-combat hp until they blow up.
+        const byId = new Map(result.participants.map((p) => [p.id, p]));
+        for (const tile of this._tiles.values()) {
+            if (!tile.entities.some((e) => byId.has(e.id))) continue;
+            tile.entities = tile.entities.map((e) => {
+                const p = byId.get(e.id);
+                if (!p || !isMobile(e)) return e;
+                this._hpShown.set(e.id, { hp: p.hpBefore, until: hitAt });
+                return { ...e, hp: p.hpAfter };
+            });
+        }
+
+        const destroyed = new Set(result.destroyedIds);
+        for (const id of destroyed) {
+            const found = this.findEntityById(id);
+            if (found && isCarried(found)) continue;
+            if (!found || !isMobile(found)) {
+                if (byId.has(id) && this._visible.has(hexKey(result.hex.q, result.hex.r))) {
+                    const colour = sideColour(byId.get(id)?.sideId, "#ffd166");
+                    this._explosions.spawn(target, colour, this.hexSize, explodeAt);
+                }
+                continue;
+            }
+            const motion =
+                this._motions.get(id) ??
+                new ShipMotion(ShipMotion.poseAtHex(found, found.facing, this.hexSize), now);
+            this._motions.delete(id);
+            motion.holdUntil(explodeAt);
+            this._dying.push({
+                entity: found,
+                motion,
+                colour: sideColour(found.sideId, "#ffd166")
+            });
+        }
+        this._removeEntities(destroyed);
     }
 
     /**
-     * Drop the battle and scrub lost units from remembered garrisons. On capture the
-     * location changes hands here too, ahead of the tiles update that confirms it.
+     * Each attacking warship fires at a defender (hit ones first) and defenders that did
+     * damage fire back. Beams at a target that evaded go wide.
      */
-    applyGroundResolved(payload: GroundBattleResolved) {
-        this._groundBattles.delete(payload.battleId);
-        const destroyed = new Set(payload.destroyedUnitIds);
+    private _spawnBeams(
+        fighters: { p: CombatParticipant; entity: MobileEntity }[],
+        poseOf: (entity: MobileEntity) => Pixel,
+        fireAt: number
+    ) {
+        const side = (role: CombatParticipant["role"]) =>
+            fighters
+                .filter(({ p }) => p.role === role)
+                .sort((a, b) => Number(b.p.damageTaken > 0) - Number(a.p.damageTaken > 0));
+        const attackers = side("attacker");
+        const defenders = side("defender");
+        const volley = (shooters: typeof fighters, targets: typeof fighters, startAt: number) => {
+            if (!targets.length) return;
+            shooters
+                .filter(
+                    ({ p }) => p.kind === "ship" && (p.role === "attacker" || p.damageDealt > 0)
+                )
+                .forEach(({ entity }, i) => {
+                    const { p, entity: hit } = targets[i % targets.length];
+                    const from = poseOf(entity);
+                    const to = poseOf(hit);
+                    const wide = p.evaded ? this.hexSize * 0.45 : 0;
+                    this._combatEffects.beam({
+                        from,
+                        to: { x: to.x + wide, y: to.y - wide },
+                        startAt: startAt + i * 70,
+                        colour: sideColour(entity.sideId, "#ffd166"),
+                        scale: this.hexSize
+                    });
+                });
+        };
+        volley(attackers, defenders, fireAt);
+        volley(defenders, attackers, fireAt + 160);
+    }
+
+    /**
+     * Small blasts over the location and a floating verdict. Lost units leave remembered
+     * garrisons and our unit list, survivors take their new hp, and a captured location
+     * changes hands here, ahead of the tiles and economy updates that confirm it.
+     */
+    private _applyGroundCombat(result: CombatResult, now: number) {
+        const destroyed = new Set(result.destroyedUnitIds);
         for (const tile of this._tiles.values()) {
             tile.entities = tile.entities.map((e) => {
                 if (!isLocationEntity(e)) return e;
                 const garrison = e.garrison?.filter((id) => !destroyed.has(id));
                 const sideId =
-                    payload.captured && e.id === payload.locationId
-                        ? payload.winnerSideId
+                    result.captured && e.id === result.locationId
+                        ? result.attackerSideId
                         : e.sideId;
                 return garrison || sideId !== e.sideId ? { ...e, sideId, garrison } : e;
             });
         }
-        const colour = sideColour(payload.loserSideId, "#ffd166");
-        const at = axialToPixel(payload.q, payload.r, this.hexSize);
-        this._explosions.spawn(at, colour, this.hexSize, performance.now());
+        if (this.economy?.groundUnits) {
+            const byId = new Map(result.participants.map((p) => [p.id, p]));
+            this.economy = {
+                ...this.economy,
+                groundUnits: this.economy.groundUnits
+                    .filter((u) => !destroyed.has(u.id))
+                    .map((u) => {
+                        const p = byId.get(u.id);
+                        return p ? { ...u, hp: p.hpAfter } : u;
+                    })
+            };
+        }
+
+        if (!this._visible.has(hexKey(result.hex.q, result.hex.r))) return;
+        const at = axialToPixel(result.hex.q, result.hex.r, this.hexSize);
+        const hits = result.participants.filter((p) => p.damageTaken > 0).slice(0, 6);
+        hits.forEach((p, i) => {
+            const angle = i * 2.4;
+            const spread = this.hexSize * 0.35;
+            this._explosions.spawn(
+                { x: at.x + Math.cos(angle) * spread, y: at.y + Math.sin(angle) * spread },
+                sideColour(p.sideId, "#ffd166"),
+                this.hexSize * 0.35,
+                now + i * 140
+            );
+        });
+        this._combatEffects.label({
+            at,
+            text: result.captured
+                ? "Captured"
+                : result.outcome === "attacker_destroyed"
+                  ? "Invasion repelled"
+                  : "Invasion stalled",
+            colour: sideColour(
+                result.captured ? result.attackerSideId : result.defenderSideIds[0],
+                "#ffd166"
+            ),
+            startAt: now + COMBAT_HIT_MS,
+            scale: this.hexSize
+        });
+    }
+
+    /** Running motion for `entity`, or a new one starting at its hex. */
+    private _motionFor(entity: MobileEntity, now: number): ShipMotion {
+        let motion = this._motions.get(entity.id);
+        if (!motion || motion.isDone(now)) {
+            motion = new ShipMotion(ShipMotion.poseAtHex(entity, entity.facing, this.hexSize), now);
+            this._motions.set(entity.id, motion);
+        }
+        return motion;
+    }
+
+    /** Centre the map on a combat and show one of its survivors (or the location) in the pane. */
+    focusCombat(result: CombatResult) {
+        const p = axialToPixel(result.hex.q, result.hex.r, this.hexSize);
+        this.camera.x = p.x;
+        this.camera.y = p.y;
+        const candidates = [
+            ...(result.locationId ? [result.locationId] : []),
+            ...result.participants.map((participant) => participant.id)
+        ]
+            .map((id) => this.findEntityById(id))
+            .filter((e): e is EntitySummary => !!e && !isCarried(e));
+        const own = candidates.find((e) => e.kind === "ship" && e.sideId === this.sideId);
+        const pick = result.locationId ? candidates[0] : (own ?? candidates[0]);
+        if (pick?.kind === "ship" && pick.sideId === this.sideId) {
+            this.selectShip(pick.id);
+        } else if (pick) {
+            this.inspectEntity(pick.id);
+        }
         this._notify();
     }
 
-    get groundBattles(): GroundBattleInfo[] {
-        return [...this._groundBattles.values()];
-    }
-
-    /** Pending ground battle our side invaded and must resolve, if any. */
-    get groundBattleToResolve(): GroundBattleInfo | undefined {
-        return this.groundBattles.find((battle) => battle.attackerSideId === this.sideId);
-    }
-
-    get groundBattleAwaited(): GroundBattleInfo | undefined {
-        return this.groundBattles.find((battle) => battle.defenderSideId === this.sideId);
-    }
-
-    groundBattleAt(locationId: EntityId): GroundBattleInfo | undefined {
-        return this.groundBattles.find((battle) => battle.locationId === locationId);
+    /** Ground combats fought over `locationId`, newest first. */
+    groundCombatsAt(locationId: EntityId): CombatReport[] {
+        return this.combatReports.filter(
+            (r) => r.result.kind === "ground" && r.result.locationId === locationId
+        );
     }
 
     applyTurnState(payload: TurnState & { yourSideId?: SideId }) {
@@ -757,11 +933,66 @@ export class HexWorld {
         return this._tiles.get(hexKey(q, r))?.entities ?? [];
     }
 
-    /** Our warships (not supply ships) on `hex`. */
+    /** Our warships (not supply ships) on `hex`, excluding ships aboard carriers. */
     ownShipsAt(q: number, r: number): ShipEntity[] {
         return this.entitiesAt(q, r).filter(
-            (e): e is ShipEntity => e.kind === "ship" && e.sideId === this.sideId
+            (e): e is ShipEntity => e.kind === "ship" && e.sideId === this.sideId && !e.carriedBy
         );
+    }
+
+    /** Ships aboard one of our carriers (only we know about them). */
+    carriedShips(carrier: ShipEntity): ShipEntity[] {
+        return this.entitiesAt(carrier.q, carrier.r).filter(
+            (e): e is ShipEntity => e.kind === "ship" && e.carriedBy === carrier.id
+        );
+    }
+
+    hangarOf(ship: ShipEntity): HangarBalance | undefined {
+        return this.balance ? hangarFor(this.balance, ship.shipType) : undefined;
+    }
+
+    /** Our ships on the carrier's hex of a type its hangar takes (MP and room not checked). */
+    boardableShips(carrier: ShipEntity): ShipEntity[] {
+        const balance = this.balance;
+        if (!balance) return [];
+        return this.ownShipsAt(carrier.q, carrier.r).filter(
+            (s) => s.id !== carrier.id && canCarryShip(balance, carrier.shipType, s.shipType)
+        );
+    }
+
+    /** Our carriers on `ship`'s hex that take its type and have room. */
+    carriersFor(ship: ShipEntity): ShipEntity[] {
+        const balance = this.balance;
+        if (!balance || ship.carriedBy) return [];
+        return this.ownShipsAt(ship.q, ship.r).filter((c) => {
+            const hangar = hangarFor(balance, c.shipType);
+            return (
+                c.id !== ship.id &&
+                !!hangar &&
+                canCarryShip(balance, c.shipType, ship.shipType) &&
+                this.carriedShips(c).length < hangar.capacity
+            );
+        });
+    }
+
+    /** Current and full hp of a ship or supply ship; missing hp means full. */
+    hpOf(entity: MobileEntity): { hp: number; max: number } | undefined {
+        const balance = this.balance;
+        if (!balance) return undefined;
+        const max =
+            entity.kind === "ship"
+                ? shipStats(entity.shipType, entity.tier ?? 1, balance).hp
+                : this.supplyStatsOf(entity).hp;
+        const hp = entity.hp ?? max;
+        return { hp, max: Math.max(max, hp) };
+    }
+
+    /** Supply ship stats: with our techs for our own, base stats for anyone else's. */
+    supplyStatsOf(supplyShip: SupplyShipEntity): ReturnType<typeof supplyShipStats> {
+        const techs = supplyShip.sideId === this.sideId ? (this.economy?.techs ?? []) : [];
+        return this.balance
+            ? supplyShipStats(this.balance, techs)
+            : { hp: 0, defence: 0, evasion: 0, attack: 0 };
     }
 
     /** Our ships on `hex` that can colonise. */
@@ -800,7 +1031,7 @@ export class HexWorld {
             (e): e is LocationEntity =>
                 isLocationEntity(e) && e.sideId !== null && e.sideId !== this.sideId
         );
-        if (!location || this.groundBattleAt(location.id)) return undefined;
+        if (!location) return undefined;
         const ships = this.transportsAt(q, r).filter((s) => this.carriedUnitIds(s).length > 0);
         return ships.length ? { location, ships } : undefined;
     }
@@ -830,13 +1061,6 @@ export class HexWorld {
 
     get selectedShip(): ShipEntity | undefined {
         return this.selectedShipId ? this.findEntity(this.selectedShipId, "ship") : undefined;
-    }
-
-    /** Whether one of our ships is held in a pending battle. */
-    shipInBattle(shipId: EntityId): boolean {
-        return this.battles.some(
-            (b) => b.attackerShipIds.includes(shipId) || b.defenderShipIds.includes(shipId)
-        );
     }
 
     hyperdriveOf(ship: ShipEntity): HyperdriveBalance | undefined {
@@ -962,7 +1186,7 @@ export class HexWorld {
                 entity: preferred
             };
         }
-        const entities = tile.entities;
+        const entities = tile.entities.filter((e) => !isCarried(e));
         return {
             mode,
             hex: { q, r },
@@ -1053,7 +1277,6 @@ export class HexWorld {
 
     /** Decide what a click (not drag) at `screen` should do; selection changes are applied here. */
     handleClick(screen: Pixel, canvas: HTMLCanvasElement): HexClickAction {
-        if (this.battleToResolve || this.groundBattleToResolve) return { type: "none" };
         const hex = this.pickHex(screen, canvas);
         if (this.hyperjumpTargetingId) {
             return this._targetingClick(hex);
@@ -1063,7 +1286,7 @@ export class HexWorld {
         }
 
         const tile = this._tiles.get(hexKey(hex.q, hex.r));
-        const entities = tile?.entities ?? [];
+        const entities = tile?.entities.filter((e) => !isCarried(e)) ?? [];
 
         // Clicking the hex of the current selection cycles through everything on it
         // (never a move order); clicking the only selected ship deselects it.
@@ -1096,7 +1319,11 @@ export class HexWorld {
                     reason: "Hyperdrive engaged: cancel the jump to move normally"
                 };
             }
-            const move: HexClickAction = { type: "move", shipId: ship.id, to: { q: hex.q, r: hex.r } };
+            const move: HexClickAction = {
+                type: "move",
+                shipId: ship.id,
+                to: { q: hex.q, r: hex.r }
+            };
             // A destination beyond this turn's reach leaves a standing order; deselect so
             // the destination picker doesn't look like it still needs dismissing.
             const route = this.previewRoute(hex);
@@ -1129,19 +1356,25 @@ export class HexWorld {
         return { type: "hyperjump", shipId: ship.id, target: { q: hex.q, r: hex.r } };
     }
 
-    /** Entities on a hex in click-cycle order: our ships, then locations, then the rest. */
+    /**
+     * Entities on a hex in click-cycle order: our ships, then locations, then the rest.
+     * Ships aboard carriers are left out.
+     */
     clickCycle(entities: EntitySummary[]): EntitySummary[] {
         const rank = (e: EntitySummary) =>
             e.kind === "ship" && e.sideId === this.sideId ? 0 : isBuildSite(e) ? 1 : 2;
-        return [...entities].sort(
-            (a, b) =>
-                rank(a) - rank(b) || ENTITY_FOCUS_PRIORITY[a.kind] - ENTITY_FOCUS_PRIORITY[b.kind]
-        );
+        return entities
+            .filter((e) => !isCarried(e))
+            .sort(
+                (a, b) =>
+                    rank(a) - rank(b) ||
+                    ENTITY_FOCUS_PRIORITY[a.kind] - ENTITY_FOCUS_PRIORITY[b.kind]
+            );
     }
 
     /**
-     * Select our ships, inspect anything else. Locations open their page only when
-     * `openLocation` is set, so cycling onto one doesn't cover the map.
+     * Select our ships, inspect anything else. Our own locations open their page only
+     * when `openLocation` is set, so cycling onto one doesn't cover the map.
      */
     private _pick(entity: EntitySummary, openLocation: boolean): HexClickAction {
         if (entity.kind === "ship" && entity.sideId === this.sideId) {
@@ -1149,7 +1382,7 @@ export class HexWorld {
             return { type: "select", shipId: entity.id };
         }
         this.inspectEntity(entity.id);
-        if (openLocation && isBuildSite(entity)) {
+        if (openLocation && isBuildSite(entity) && entity.sideId === this.sideId) {
             return { type: "open-location", locationId: entity.id };
         }
         return { type: "inspect", entityId: entity.id };
@@ -1216,7 +1449,7 @@ export class HexWorld {
         for (const [key, tile] of this._tiles) {
             if (!this._visible.has(key)) continue;
             for (const entity of tile.entities) {
-                if (!isMobile(entity)) continue;
+                if (!isMobile(entity) || isCarried(entity)) continue;
                 const prev = before.get(entity.id);
                 if (!prev?.seen || (prev.q === tile.q && prev.r === tile.r)) continue;
 
@@ -1240,15 +1473,16 @@ export class HexWorld {
     private _validateSelection() {
         if (this.selectedShipId) {
             const ship = this.findEntity(this.selectedShipId, "ship");
-            if (!ship || ship.sideId !== this.sideId) {
+            if (!ship || ship.sideId !== this.sideId || ship.carriedBy) {
                 this.selectedShipId = null;
             }
         }
         if (this.hyperjumpTargetingId && this.hyperjumpTargetingId !== this.selectedShipId) {
             this.hyperjumpTargetingId = null;
         }
-        if (this.inspectedEntityId && !this.findEntityById(this.inspectedEntityId)) {
-            this.inspectedEntityId = null;
+        if (this.inspectedEntityId) {
+            const entity = this.findEntityById(this.inspectedEntityId);
+            if (!entity || isCarried(entity)) this.inspectedEntityId = null;
         }
     }
 
@@ -1352,6 +1586,7 @@ export class HexWorld {
         const toScreen = (p: Pixel) => this.worldToScreen(p, canvas);
         this._jumpFlashes.render(context, now, toScreen, this.camera.zoom);
         this._explosions.render(context, now, toScreen, this.camera.zoom);
+        this._combatEffects.render(context, now, toScreen, this.camera.zoom);
 
         this._drawSelection(context, canvas);
     }
@@ -1380,6 +1615,66 @@ export class HexWorld {
             this._drawChargeGlow(ctx, center, size, fullColour);
         }
         drawEntityPlaceholder(ctx, center, size * scale, entity, this.balance, fullColour, heading);
+        if (scale < 1 || !fullColour) return;
+        this._drawHpBar(ctx, center, size, entity);
+        const carried =
+            entity.kind === "ship" ? (entity.carriedShipCount ?? entity.carriedShipIds?.length) : 0;
+        if (carried) this._drawHangarBadge(ctx, center, size, carried, entity.sideId);
+    }
+
+    /** Thin hull bar under a damaged ship, or under the selected / inspected one. */
+    private _drawHpBar(ctx: DrawCtx, center: Pixel, size: number, entity: MobileEntity) {
+        if (size < 14) return;
+        const hp = this.hpOf(entity);
+        if (!hp) return;
+        const shown = this._hpShown.get(entity.id);
+        let current = hp.hp;
+        if (shown && this._frameNow < shown.until) {
+            current = shown.hp;
+        } else if (shown) {
+            this._hpShown.delete(entity.id);
+        }
+        const picked = entity.id === this.selectedShipId || entity.id === this.inspectedEntityId;
+        if (current >= hp.max && !picked) return;
+        const ratio = Math.max(0, Math.min(1, current / hp.max));
+        const width = size * 0.62;
+        const height = Math.max(2, size * 0.07);
+        const x = center.x - width / 2;
+        const y = center.y + size * 0.5;
+        ctx.save();
+        ctx.fillStyle = "rgba(4, 8, 18, 0.85)";
+        ctx.fillRect(x - 1, y - 1, width + 2, height + 2);
+        ctx.fillStyle = ratio > 0.6 ? "#5cffb0" : ratio > 0.3 ? "#ffd166" : "#ff6b8a";
+        ctx.fillRect(x, y, width * ratio, height);
+        ctx.restore();
+    }
+
+    /** Count of ships aboard a carrier, in a small disc at its upper right. */
+    private _drawHangarBadge(
+        ctx: DrawCtx,
+        center: Pixel,
+        size: number,
+        count: number,
+        sideId: SideId | null
+    ) {
+        if (size < 18) return;
+        const radius = Math.max(6, size * 0.14);
+        const x = center.x + size * 0.42;
+        const y = center.y - size * 0.42;
+        ctx.save();
+        ctx.fillStyle = "rgba(8, 12, 24, 0.92)";
+        ctx.strokeStyle = sideColour(sideId, "#d0d0d0");
+        ctx.lineWidth = Math.max(1, size * 0.03);
+        ctx.beginPath();
+        ctx.arc(x, y, radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = "#e8eefc";
+        ctx.font = `700 ${Math.round(radius * 1.25)}px "IBM Plex Sans", "Segoe UI", sans-serif`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(String(count), x, y + radius * 0.05);
+        ctx.restore();
     }
 
     /** Pulsing cyan glow around a ship whose hyperdrive is engaged. */
@@ -1443,7 +1738,7 @@ export class HexWorld {
                 return false;
             }
             const center = this.worldToScreen(pose, canvas);
-            drawEntityPlaceholder(ctx, center, size, entity, this.balance, true, pose.heading);
+            this._drawShip(ctx, center, size, entity, true, pose.heading);
             return true;
         });
     }
@@ -1481,6 +1776,7 @@ export class HexWorld {
                 drawEntityPlaceholder(ctx, center, size, entity, this.balance, fullColour);
                 continue;
             }
+            if (isCarried(entity)) continue;
             const pose = this._framePoses.get(entity.id);
             if (pose) {
                 deferred.push({ entity, pose, fullColour });
@@ -1650,7 +1946,7 @@ export class HexWorld {
      */
     private _drawHoverPreview(ctx: DrawCtx, canvas: HTMLCanvasElement, ship: ShipEntity) {
         const hex = this.hoveredHex;
-        if (!hex || this.battleToResolve || this.groundBattleToResolve) return;
+        if (!hex) return;
         const size = this.hexSize * this.camera.zoom;
         const onShip = hex.q === ship.q && hex.r === ship.r;
         if (onShip) return;

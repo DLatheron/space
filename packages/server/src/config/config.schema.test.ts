@@ -72,6 +72,8 @@ describe("economy balance config", () => {
             buildTurns: 2,
             maxMovementPoints: 3,
             hp: 8,
+            attack: 0,
+            defence: 2,
             requires: ["shipyard"],
             requiresTech: "transports",
             maxTier: 3,
@@ -95,13 +97,16 @@ describe("economy balance config", () => {
         expect(economy.shipTiers).toEqual({
             hpMultiplier: [1, 1.5, 2],
             movementBonus: [0, 0, 1],
-            hyperdriveAccuracyBonus: [0, 10, 20]
+            hyperdriveAccuracyBonus: [0, 10, 20],
+            attackBonus: [0, 1, 2],
+            defenceBonus: [0, 1, 2]
         });
         expect(economy.groundUnits.armour).toEqual({
             cost: { money: 120, materials: 150, population: 10, science: 0 },
             buildTurns: 3,
             attack: 5,
             defence: 4,
+            hp: 16,
             requires: ["barracks"],
             requiresTech: "ground_forces",
             maxTier: 3
@@ -180,12 +185,83 @@ describe("economy balance config", () => {
         });
         expect(economy.ships.frigate).toEqual(defaults.ships.frigate);
         expect(economy.shipTiers).toEqual({
-            hpMultiplier: [1, 1.5, 2],
-            movementBonus: [0, 1, 2],
-            hyperdriveAccuracyBonus: [0, 10, 20]
+            ...defaults.shipTiers,
+            movementBonus: [0, 1, 2]
         });
         expect(economy.groundUnits.infantry).toMatchObject({ attack: 4, defence: 3, requires: [] });
         expect(economy.groundUnits.armour).toEqual(defaults.groundUnits.armour);
+    });
+
+    it("defaults combat stats, hangars, the damage formula and supply ship defences", () => {
+        const economy = defaultEconomyBalance();
+        const attackDefence = Object.fromEntries(
+            Object.entries(economy.ships).map(([type, ship]) => [type, [ship.attack, ship.defence]])
+        );
+        expect(attackDefence).toEqual({
+            scout: [1, 1],
+            frigate: [4, 3],
+            colony_ship: [0, 1],
+            transport: [0, 2],
+            fighter_squadron: [3, 1],
+            advanced_fighter_squadron: [5, 2],
+            star_destroyer: [8, 8]
+        });
+        expect(economy.ships.star_destroyer.hangar).toEqual({
+            capacity: 4,
+            carries: ["fighter_squadron", "advanced_fighter_squadron"]
+        });
+        expect(economy.ships.frigate.hangar).toBeUndefined();
+        expect(economy.combat).toEqual({
+            spread: 0.25,
+            minDamage: 1,
+            defenceScale: 10,
+            groundMaxRounds: 6
+        });
+        expect(economy.supplyShips).toEqual({
+            hp: 6,
+            defence: 1,
+            evasion: 0.3,
+            maxEvasion: 0.75,
+            techBonus: {
+                evasive_manoeuvres_1: { hp: 0, defence: 0, evasion: 0.15 },
+                evasive_manoeuvres_2: { hp: 0, defence: 0, evasion: 0.15 },
+                armoured_freighters: { hp: 6, defence: 2, evasion: 0 }
+            }
+        });
+        expect(economy.groundUnits.infantry.hp).toBe(10);
+    });
+
+    it("adds, changes and removes hangars", () => {
+        const economy = Config.parse({
+            economy: {
+                ships: {
+                    star_destroyer: { hangar: null },
+                    frigate: { hangar: { capacity: 1, carries: ["scout"] } },
+                    transport: { attack: 2 }
+                },
+                combat: { spread: 0 },
+                supplyShips: { techBonus: { armoured_freighters: { hp: 10 } } }
+            }
+        }).economy;
+        expect(economy.ships.star_destroyer.hangar).toBeUndefined();
+        expect(economy.ships.frigate.hangar).toEqual({ capacity: 1, carries: ["scout"] });
+        expect(economy.ships.transport.attack).toBe(2);
+        expect(economy.combat).toMatchObject({ spread: 0, minDamage: 1 });
+        expect(economy.supplyShips.techBonus.armoured_freighters).toEqual({
+            hp: 10,
+            defence: 2,
+            evasion: 0
+        });
+        const partial = Config.parse({
+            economy: { ships: { star_destroyer: { hangar: { capacity: 6 } } } }
+        }).economy;
+        expect(partial.ships.star_destroyer.hangar).toEqual({
+            capacity: 6,
+            carries: ["fighter_squadron", "advanced_fighter_squadron"]
+        });
+        expect(() =>
+            Config.parse({ economy: { ships: { frigate: { hangar: { capacity: 1 } } } } })
+        ).toThrow();
     });
 
     it("defaults hyperdrives, hyperspace hazards, collisions and accuracy bonuses", () => {

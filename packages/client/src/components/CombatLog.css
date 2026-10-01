@@ -1,0 +1,179 @@
+/* Bottom right of the map stage, under the planet page (3). */
+.combat-log {
+    position: absolute;
+    right: 0.75rem;
+    bottom: 2rem;
+    z-index: 2;
+    display: flex;
+    flex-direction: column;
+    width: min(22rem, calc(100% - 1.5rem));
+    max-height: 45%;
+    border: 1px solid #2c3d63;
+    border-radius: 0.4rem;
+    background: rgba(8, 12, 24, 0.9);
+    font-size: 0.82rem;
+    overflow: hidden;
+}
+
+.combat-log button {
+    padding: 0.2rem 0.55rem;
+    font-size: 0.75rem;
+}
+
+.combat-log__head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.35rem 0.5rem;
+    border-bottom: 1px solid #243355;
+}
+
+.combat-log .combat-log__toggle {
+    border: none;
+    background: none;
+    padding: 0;
+    color: #9ab3d4;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.combat-log__count {
+    margin-left: 0.25rem;
+    padding: 0 0.35rem;
+    border: 1px solid #3a4d73;
+    border-radius: 0.25rem;
+    color: #e8eefc;
+}
+
+.combat-log__entries {
+    display: grid;
+    gap: 0.35rem;
+    margin: 0;
+    padding: 0.45rem;
+    list-style: none;
+    overflow-y: auto;
+}
+
+.combat-log__entry {
+    display: grid;
+    gap: 0.25rem;
+    padding: 0.35rem 0.45rem;
+    border: 1px solid #22314f;
+    border-left: 3px solid #7f93b5;
+    border-radius: 0.3rem;
+    background: #121c38;
+}
+
+.combat-log__entry--win {
+    border-left-color: #5cffb0;
+}
+
+.combat-log__entry--loss {
+    border-left-color: #ff6b8a;
+}
+
+.combat-log__entry--new {
+    animation: combat-log-new 0.25s ease-out;
+}
+
+@keyframes combat-log-new {
+    from {
+        opacity: 0;
+        transform: translateX(0.5rem);
+    }
+}
+
+.combat-log .combat-log__summary {
+    display: grid;
+    gap: 0.05rem;
+    padding: 0;
+    border: none;
+    background: none;
+    color: inherit;
+    font-size: 0.82rem;
+    text-align: left;
+}
+
+.combat-log__summary:hover strong {
+    color: #6fb3ff;
+}
+
+.combat-log .combat-log__details-toggle {
+    justify-self: start;
+    padding: 0.1rem 0.45rem;
+    font-size: 0.7rem;
+}
+
+.combat-log__muted {
+    color: #7f93b5;
+}
+
+.combat-log__details {
+    display: grid;
+    gap: 0.3rem;
+}
+
+.combat-log__details p {
+    margin: 0;
+    font-size: 0.75rem;
+}
+
+.combat-log__table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.combat-log__table th {
+    color: #7f93b5;
+    font-weight: 600;
+    text-align: left;
+}
+
+.combat-log__table th,
+.combat-log__table td {
+    padding: 0.1rem 0.25rem;
+    border-bottom: 1px solid #1c2945;
+}
+
+.combat-log__table td:not(:first-child),
+.combat-log__table th:not(:first-child) {
+    text-align: right;
+    white-space: nowrap;
+}
+
+.combat-log__lost td {
+    color: #ffb3c2;
+}
+
+.combat-log__side {
+    display: inline-block;
+    width: 0.5rem;
+    height: 0.5rem;
+    margin-right: 0.3rem;
+    border-radius: 50%;
+}
+
+.combat-log__tier {
+    margin-left: 0.3rem;
+    padding: 0 0.25rem;
+    border: 1px solid #3a4d73;
+    border-radius: 0.25rem;
+    color: #9fd0ff;
+    font-size: 0.68rem;
+}
+
+.combat-log__tag {
+    margin-left: 0.3rem;
+    color: #7fe8ff;
+    font-size: 0.68rem;
+    text-transform: uppercase;
+}
+
+.combat-log__tag--lost {
+    color: #ff6b8a;
+}

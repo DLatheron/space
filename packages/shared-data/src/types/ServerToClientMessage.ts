@@ -1,11 +1,9 @@
 import { z } from "zod";
+import { CombatResult } from "./Combat.js";
 import { EconomyBalance, EconomyState } from "./Economy.js";
-import { GroundBattleInfo } from "./GroundUnitTypes.js";
 import { HyperjumpOutcome } from "./Hyperspace.js";
 import {
     AxialCoord,
-    BattleId,
-    BattleInfo,
     ClientSummary,
     EntityId,
     GameId,
@@ -49,10 +47,6 @@ export const ServerToClientMessage = z.discriminatedUnion("type", [
             tiles: z.array(TileView),
             visible: z.array(HexKey),
             turn: TurnState,
-            /** Pending battles involving the receiving side. */
-            battles: z.array(BattleInfo),
-            /** Pending ground battles involving the receiving side. */
-            groundBattles: z.array(GroundBattleInfo),
             economy: EconomyState,
             /** Server-configured caps, storage structures and concurrency limits. */
             balance: EconomyBalance
@@ -96,8 +90,13 @@ export const ServerToClientMessage = z.discriminatedUnion("type", [
             outcome: HyperjumpOutcome,
             /** Ship it collided with on landing, if any. */
             collidedWithId: EntityId.optional(),
-            /** Every ship destroyed by this jump (the jumper and/or the ship hit). */
-            destroyedIds: z.array(EntityId)
+            /**
+             * Every ship destroyed by hazards or collision (the jumper and/or the ship hit, plus
+             * ships aboard them). Combat on landing is reported separately by `server:combat`.
+             */
+            destroyedIds: z.array(EntityId),
+            /** The survivor didn't clear the enemies at `to` and was moved here instead. */
+            displacedTo: AxialCoord.optional()
         })
     }),
     z.object({
@@ -111,26 +110,11 @@ export const ServerToClientMessage = z.discriminatedUnion("type", [
     }),
     z.object({
         /**
-         * Sent to both combatant sides. Sent again with the same `battleId` when the ships
-         * involved change (a hyperspace arrival joins, or a collision destroys some).
+         * An automatic space or ground combat was fought. Sent before the tiles update to sides
+         * that could see `hex` or `from` and to the owners of every participant.
          */
-        type: z.literal("server:battle:start"),
-        payload: BattleInfo.extend({ youAreAttacker: z.boolean() })
-    }),
-    z.object({
-        /** Sent to every side that could see the hex, plus both combatants. */
-        type: z.literal("server:battle:resolved"),
-        payload: z.object({
-            battleId: BattleId,
-            q: z.number().int(),
-            r: z.number().int(),
-            winnerSideId: SideId,
-            loserSideId: SideId,
-            /** May include supply ships (cargo lost) and transports. */
-            destroyedShipIds: z.array(EntityId),
-            /** Ground units lost aboard destroyed transports. */
-            destroyedUnitIds: z.array(EntityId)
-        })
+        type: z.literal("server:combat"),
+        payload: CombatResult
     }),
     z.object({
         /** Same visibility rules as `server:ship:moved`. */
@@ -147,26 +131,6 @@ export const ServerToClientMessage = z.discriminatedUnion("type", [
              * so clients that have never seen it can fly it out from `from`.
              */
             supplyShip: SupplyShipEntity.optional()
-        })
-    }),
-    z.object({
-        /** Sent to both combatant sides. */
-        type: z.literal("server:ground:start"),
-        payload: GroundBattleInfo.extend({ youAreAttacker: z.boolean() })
-    }),
-    z.object({
-        /** Sent to every side that could see the location, plus both combatants. */
-        type: z.literal("server:ground:resolved"),
-        payload: z.object({
-            battleId: BattleId,
-            locationId: EntityId,
-            q: z.number().int(),
-            r: z.number().int(),
-            winnerSideId: SideId,
-            loserSideId: SideId,
-            destroyedUnitIds: z.array(EntityId),
-            /** The attacker won and now owns the location. */
-            captured: z.boolean()
         })
     })
 ]);

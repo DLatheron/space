@@ -7,8 +7,7 @@ import {
     scatterRing,
     shipStats,
     type AxialCoord,
-    type BattleId,
-    type BattleInfo,
+    type CombatResult,
     type EconomyBalance,
     type EntityId,
     type HyperjumpOutcome,
@@ -16,7 +15,7 @@ import {
     type TechId
 } from "@space/shared-data";
 import { defaultEconomyBalance } from "../config/config.schema.js";
-import type { BattleManager, EndedBattle } from "./Battle.js";
+import type { BattleManager } from "./Battle.js";
 import { destroyVessels } from "./destroyShips.js";
 import type { EconomyManager } from "./EconomyManager.js";
 import type { EntityManager } from "./EntityManager.js";
@@ -32,18 +31,16 @@ export type HyperjumpEvent = {
     to: AxialCoord;
     outcome: HyperjumpOutcome;
     collidedWithId?: EntityId;
-    /** Ships destroyed by this jump (the jumper and/or the ship it hit). */
+    /** Ships destroyed by hazards or collision (the jumper and/or the ship it hit, plus ships aboard). */
     destroyedIds: EntityId[];
-    /** Ground units lost aboard destroyed transports. */
+    /** Ground units lost aboard ships destroyed by hazards or collision. */
     destroyedUnitIds: EntityId[];
-    /** Sides that lost ships. */
+    /** Sides that lost ships to hazards or collision. */
     lossSideIds: SideId[];
-    /** Battle started by the survivor landing among enemies. */
-    battle: BattleInfo | null;
-    /** Pending battles still running whose ships changed (the survivor joined, or some were lost). */
-    updatedBattles: BattleInfo[];
-    /** Pending battles ended because a side's last vessel there was destroyed. */
-    endedBattles: EndedBattle[];
+    /** Combat fought by the survivor landing among enemies (see `BattleManager.arrival`). */
+    combat: CombatResult | null;
+    /** Where the survivor ended up when it didn't clear the enemies at `to`. */
+    displacedTo?: AxialCoord;
 };
 
 export type HyperspaceOptions = {
@@ -65,7 +62,9 @@ export type HyperspaceOptions = {
  * number generator in this order: the scatter ring roll, the pick among in-bounds hexes on
  * that ring, one roll per hazard on the landing hex (destroyed below its `destroyChance`,
  * else damaged), then, if ships are there, the pick of one ship, the both-destroyed roll and
- * the which-one roll. A survivor landing among enemies starts a battle as attacker.
+ * the which-one roll. A survivor landing among enemies then attacks them at once (using the
+ * BattleManager's random numbers) and is displaced if it doesn't clear the hex. Carried ships
+ * jump with their carrier.
  */
 export class HyperspaceManager {
     private readonly _entities: EntityManager;
@@ -98,9 +97,7 @@ export class HyperspaceManager {
                 error: `Hyperdrive is cooling down for ${ship.hyperdriveCooldown} more turn(s)`
             };
         }
-        if (this._battles.findByShip(ship.id)) {
-            return { ok: false, error: `Ship ${shipId} is locked in battle` };
-        }
+        if (ship.carriedBy) return { ok: false, error: `Ship ${shipId} is aboard a carrier` };
         const tile = findTileByAxial(this._entities.map, target.q, target.r);
         if (!tile) return { ok: false, error: `Target ${target.q},${target.r} is off the map` };
         if (tile.q === ship.q && tile.r === ship.r) {
@@ -135,11 +132,11 @@ export class HyperspaceManager {
         }
     }
 
-    /** Resolve every pending jump; ships locked in battle keep theirs for a later turn. */
+    /** Resolve every pending jump. */
     resolve(): HyperjumpEvent[] {
         const events: HyperjumpEvent[] = [];
         for (const ship of this._entities.ofKind("ship")) {
-            if (!ship.hyperjump || this._battles.findByShip(ship.id)) continue;
+            if (!ship.hyperjump || ship.carriedBy) continue;
             // Earlier jumps this turn may have destroyed it.
             if (!this._entities.get(ship.id)) continue;
             events.push(this._jump(ship, ship.hyperjump.target));
@@ -207,12 +204,9 @@ export class HyperspaceManager {
             destroyedIds: [],
             destroyedUnitIds: [],
             lossSideIds: [],
-            battle: null,
-            updatedBattles: [],
-            endedBattles: []
+            combat: null
         };
         const destroyed: EntityOf<"ship">[] = [];
-        const changed = new Set<BattleId>();
 
         const hazards = this._entities
             .entitiesAt(to.q, to.r)
@@ -249,28 +243,18 @@ export class HyperspaceManager {
         }
 
         if (destroyed.length > 0) {
-            for (const lost of destroyed) {
-                const battle = this._battles.findByShip(lost.id);
-                if (battle) changed.add(battle.battleId);
-            }
             const result = destroyVessels(this._entities, this._economy, destroyed);
             event.destroyedIds = result.destroyedShipIds;
             event.destroyedUnitIds = result.destroyedUnitIds;
             event.lossSideIds = [...new Set(destroyed.map((s) => s.sideId))];
-            event.endedBattles = this._battles.removeDestroyed(result.destroyedShipIds);
         }
         if (destroyed.includes(ship)) {
             event.outcome = "destroyed";
         } else {
-            this._economy?.onShipMoved(ship);
-            event.battle = this._battles.startArrivalBattle(ship);
-            const joined = !event.battle && this._battles.findByShip(ship.id);
-            if (joined) changed.add(joined.battleId);
+            event.combat = this._battles.arrival(ship, from);
+            if (event.combat?.displacedTo) event.displacedTo = event.combat.displacedTo;
+            if (this._entities.get(ship.id)) this._economy?.onShipMoved(ship);
         }
-        event.updatedBattles = [...changed].flatMap((id) => {
-            const battle = this._battles.get(id);
-            return battle ? [battle] : [];
-        });
         return event;
     }
 }

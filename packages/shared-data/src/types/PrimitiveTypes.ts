@@ -103,6 +103,18 @@ export const ShipEntity = EntityBase.extend({
     /** Ground units aboard; transports only. */
     carriedUnitIds: z.array(EntityId).optional(),
     /**
+     * Ships aboard this carrier's hangar (see `ShipBalance.hangar`); absent when empty. Only
+     * sent to the owning side; other sides get `carriedShipCount`.
+     */
+    carriedShipIds: z.array(EntityId).optional(),
+    /** Number of ships aboard; set on every side's view of a carrier with ships aboard. */
+    carriedShipCount: z.number().int().min(0).optional(),
+    /**
+     * Carrier this ship is aboard. Carried ships share the carrier's hex but don't occupy it:
+     * they can't act, fight or be seen by other sides, and only their owner receives them.
+     */
+    carriedBy: EntityId.optional(),
+    /**
      * Multi-turn move still to run at the start of each end of turn; only sent to the owning
      * side. `route` is the planned path from the current hex (excluded) to `destination`.
      */
@@ -147,7 +159,9 @@ export const SupplyShipEntity = EntityBase.extend({
     /** Planned hexes ahead, excluding the current hex; only sent to the owning side. */
     route: z.array(AxialCoord).optional(),
     /** At its destination, waiting for stockpile room to unload the rest of its cargo. */
-    waiting: z.boolean().optional()
+    waiting: z.boolean().optional(),
+    /** Current hp; absent means full (see `supplyShipStats`). */
+    hp: z.number().min(0).optional()
 });
 export type SupplyShipEntity = z.infer<typeof SupplyShipEntity>;
 
@@ -244,25 +258,6 @@ export const TurnState = z.object({
     sideReady: z.record(SideId, z.boolean())
 });
 export type TurnState = z.infer<typeof TurnState>;
-
-export const BattleId = z.string().min(1);
-export type BattleId = z.infer<typeof BattleId>;
-
-/**
- * A pending battle: a ship moved into a hex holding enemy ships. Defender ids may include
- * supply ships and transports.
- */
-export const BattleInfo = z.object({
-    battleId: BattleId,
-    q: z.number().int(),
-    r: z.number().int(),
-    /** Side of the moving ship; only its clients may resolve the battle. */
-    attackerSideId: SideId,
-    defenderSideId: SideId,
-    attackerShipIds: z.array(EntityId),
-    defenderShipIds: z.array(EntityId)
-});
-export type BattleInfo = z.infer<typeof BattleInfo>;
 
 export const FogState = z.enum(["unexplored", "explored", "visible"]);
 export type FogState = z.infer<typeof FogState>;

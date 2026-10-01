@@ -61,7 +61,7 @@ function jumpWorld(rng: () => number = () => 0, balance?: EconomyBalance) {
         level: 10
     });
     const economy = new EconomyManager(entities, ["alpha", "beta"], { balance });
-    const battles = new BattleManager(entities, economy);
+    const battles = new BattleManager(entities, economy, { rng: () => 0.5 });
     const explored = new Set<string>();
     forEachHex(map.width, map.height, (hex) => explored.add(axialKey(hex.q, hex.r)));
     const hyperspace = new HyperspaceManager(entities, {
@@ -116,8 +116,8 @@ describe("HyperspaceManager activation", () => {
         expect(hyperspace.cancel("alpha", ship.id).ok).toBe(false);
     });
 
-    it("rejects ships without a hyperdrive, cooling down, foreign or locked in battle", () => {
-        const { entities, battles, hyperspace, ship } = jumpWorld();
+    it("rejects ships without a hyperdrive, cooling down, foreign or aboard a carrier", () => {
+        const { entities, hyperspace, ship } = jumpWorld();
         const scout = entities.add(makeShip("scout-a", "alpha", { q: 6, r: 6 }, "scout"));
         expect(hyperspace.activate("alpha", scout.id, TARGET)).toEqual({
             ok: false,
@@ -132,11 +132,10 @@ describe("HyperspaceManager activation", () => {
         expect(hyperspace.activate("alpha", ship.id, TARGET).ok).toBe(false);
         delete ship.hyperdriveCooldown;
 
-        entities.add(makeShip("ship-b", "beta", { q: 6, r: 5 }));
-        battles.moveShip("alpha", ship.id, { q: 6, r: 5 });
+        ship.carriedBy = "carrier-a";
         expect(hyperspace.activate("alpha", ship.id, TARGET)).toEqual({
             ok: false,
-            error: `Ship ${ship.id} is locked in battle`
+            error: `Ship ${ship.id} is aboard a carrier`
         });
     });
 
@@ -161,7 +160,7 @@ describe("HyperspaceManager jumps", () => {
             to: TARGET,
             outcome: "arrived",
             destroyedIds: [],
-            battle: null
+            combat: null
         });
         expect(event!.collidedWithId).toBeUndefined();
         expect(ship).toMatchObject({ ...TARGET, hyperdriveCooldown: 3 });
@@ -285,7 +284,7 @@ describe("HyperspaceManager jumps", () => {
             outcome: "arrived",
             collidedWithId: target.id,
             destroyedIds: [target.id],
-            battle: null
+            combat: null
         });
         expect(won.ship).toMatchObject(TARGET);
     });
@@ -305,51 +304,63 @@ describe("HyperspaceManager jumps", () => {
         expect(entities.get(ship.id)).toBeUndefined();
     });
 
-    it("starts a battle when the survivor lands among enemies", () => {
+    it("fights enemies left after the collision, displacing a jumper that doesn't clear the hex", () => {
         // Collision with the first enemy, which is destroyed; the second remains.
-        const { entities, battles, hyperspace, ship } = jumpWorld(scripted([0, 0, 0, 0.5, 0.99]));
+        const { entities, hyperspace, ship } = jumpWorld(scripted([0, 0, 0, 0.5, 0.99]));
         const first = entities.add(makeShip("ship-b1", "beta", TARGET));
         const second = entities.add(makeShip("ship-b2", "beta", TARGET));
         hyperspace.activate("alpha", ship.id, TARGET);
         const [event] = hyperspace.resolve();
         expect(event!.destroyedIds).toEqual([first.id]);
-        expect(event!.battle).toMatchObject({
-            ...TARGET,
+        expect(event!.combat).toMatchObject({
+            kind: "space",
+            cause: "hyperjump",
+            hex: TARGET,
+            from: { q: 5, r: 5 },
             attackerSideId: "alpha",
-            defenderSideId: "beta",
-            attackerShipIds: [ship.id],
-            defenderShipIds: [second.id]
+            defenderSideIds: ["beta"],
+            outcome: "inconclusive",
+            attackerMovedIn: false
         });
-        expect(battles.findByShip(ship.id)).toBeDefined();
+        // Frigates trade round(4 * 10 / 13) = 3 damage.
+        expect([ship.hp, second.hp]).toEqual([9, 9]);
+        expect(event!.displacedTo).toEqual(event!.combat!.displacedTo);
+        expect(axialDistance(event!.displacedTo!, TARGET)).toBe(1);
+        expect(ship).toMatchObject(event!.displacedTo!);
+        expect(event!.to).toEqual(TARGET);
     });
 
-    it("ends a pending battle whose last defender is destroyed in a collision", () => {
-        const { entities, battles, hyperspace, ship } = jumpWorld(scripted([0, 0, 0, 0.5, 0.99]));
-        const attacker = entities.add(makeShip("ship-a2", "alpha", { q: 9, r: 10 }));
-        const defender = entities.add(makeShip("ship-b", "beta", TARGET, "scout"));
-        const fight = battles.moveShip("alpha", attacker.id, TARGET);
-        const battleId = fight.ok ? fight.battle!.battleId : "";
+    it("keeps a jumper that destroys the enemies on the hex where it landed", () => {
+        // Collision with the first scout, which is destroyed; the second is fought.
+        const { entities, hyperspace } = jumpWorld(scripted([0, 0, 0, 0.5, 0.99]));
+        const sd = entities.add(makeShip("sd-a", "alpha", { q: 5, r: 8 }, "star_destroyer"));
+        entities.add(makeShip("scout-b1", "beta", TARGET, "scout"));
+        const second = entities.add(makeShip("scout-b2", "beta", TARGET, "scout"));
+        hyperspace.activate("alpha", sd.id, TARGET);
+        const [event] = hyperspace.resolve();
+        expect(event!.combat).toMatchObject({
+            outcome: "attacker_won",
+            attackerMovedIn: true,
+            destroyedIds: [second.id]
+        });
+        expect(event!.displacedTo).toBeUndefined();
+        expect(sd).toMatchObject({ ...TARGET, hp: 29 });
+    });
+
+    it("loses a jumper destroyed in the fight after landing", () => {
+        // Collision with the first star destroyer, which is destroyed; the second fights.
+        const { entities, hyperspace, ship } = jumpWorld(scripted([0, 0, 0, 0.5, 0.99]));
+        ship.hp = 2;
+        entities.add(makeShip("sd-b1", "beta", TARGET, "star_destroyer"));
+        const second = entities.add(makeShip("sd-b2", "beta", TARGET, "star_destroyer"));
         hyperspace.activate("alpha", ship.id, TARGET);
         const [event] = hyperspace.resolve();
-        // The random ship picked (index 0) is the defender.
-        expect(event!.collidedWithId).toBe(defender.id);
-        expect(event!.endedBattles).toEqual([
-            {
-                battle: expect.objectContaining({ battleId }),
-                winnerSideId: "alpha",
-                loserSideId: "beta"
-            }
-        ]);
-        expect(battles.pending()).toEqual([]);
-    });
-
-    it("keeps the jump pending while the ship is locked in battle", () => {
-        const { entities, battles, hyperspace, ship } = jumpWorld();
-        hyperspace.activate("alpha", ship.id, TARGET);
-        const enemy = entities.add(makeShip("ship-b", "beta", { q: 6, r: 5 }));
-        battles.moveShip("beta", enemy.id, ship);
-        expect(hyperspace.resolve()).toEqual([]);
-        expect(ship.hyperjump).toEqual({ target: TARGET });
+        expect(event!.combat).toMatchObject({
+            outcome: "attacker_destroyed",
+            destroyedIds: [ship.id]
+        });
+        expect(entities.get(ship.id)).toBeUndefined();
+        expect(second.hp).toBeLessThan(30);
     });
 });
 
@@ -452,15 +463,15 @@ describe("HyperspaceManager hazards", () => {
             outcome: "damaged",
             collidedWithId: other.id,
             destroyedIds: [other.id],
-            battle: null
+            combat: null
         });
         expect(ship.hp).toBe(12 - 5);
     });
 });
 
 describe("HyperspaceManager collisions", () => {
-    it("collides with the side's own ships too, without starting a battle", () => {
-        const { entities, battles, hyperspace, ship } = jumpWorld(scripted([0, 0, 0, 0.5, 0.99]));
+    it("collides with the side's own ships too, without fighting them", () => {
+        const { entities, hyperspace, ship } = jumpWorld(scripted([0, 0, 0, 0.5, 0.99]));
         const own = entities.add(makeShip("ship-a2", "alpha", TARGET));
         hyperspace.activate("alpha", ship.id, TARGET);
         expect(hyperspace.resolve()[0]).toMatchObject({
@@ -468,9 +479,8 @@ describe("HyperspaceManager collisions", () => {
             collidedWithId: own.id,
             destroyedIds: [own.id],
             lossSideIds: ["alpha"],
-            battle: null
+            combat: null
         });
-        expect(battles.pending()).toEqual([]);
     });
 
     it("picks the ship hit at random among those on the hex", () => {
@@ -483,7 +493,7 @@ describe("HyperspaceManager collisions", () => {
     });
 
     it("lets later jumpers land safely where earlier ones were all destroyed", () => {
-        const { entities, battles, hyperspace, ship } = jumpWorld(
+        const { entities, hyperspace, ship } = jumpWorld(
             // First on target; second on target, both destroyed; third on target, hex empty.
             scripted([0, 0, 0, 0, 0, 0.1, 0, 0])
         );
@@ -500,7 +510,7 @@ describe("HyperspaceManager collisions", () => {
         ]);
         expect(events[1]!.destroyedIds).toEqual([second.id, ship.id]);
         expect(entities.entitiesAt(TARGET.q, TARGET.r)).toEqual([third]);
-        expect(battles.pending()).toEqual([]);
+        expect(events[2]!.combat).toBeNull();
     });
 
     it("skips the jump of a ship destroyed by an earlier arrival", () => {
@@ -517,16 +527,13 @@ describe("HyperspaceManager collisions", () => {
     it("destroys the units aboard a transport lost in a jump, releasing only its crew", () => {
         const balance = defaultEconomyBalance();
         balance.ships.transport.hyperdrive = DEFAULTS.ships.frigate.hyperdrive;
-        const { entities, economy, battles, hyperspace, home } = jumpWorld(
-            scripted([0, 0, 0]),
-            balance
-        );
+        const { entities, economy, hyperspace, home } = jumpWorld(scripted([0, 0, 0]), balance);
         addHazard(entities, "sun", TARGET);
         const transport = entities.add({
             ...makeShip("transport-a", "alpha", home, "transport"),
             carriedUnitIds: []
         });
-        const ground = new GroundManager(entities, economy, battles);
+        const ground = new GroundManager(entities, economy);
         const ids = [0, 1].map(
             () => economy.units.create("alpha", "infantry", home.id, home.id).id
         );
@@ -590,73 +597,17 @@ describe("HyperspaceManager collisions", () => {
     });
 });
 
-describe("HyperspaceManager arrivals at pending battles", () => {
-    /** Alpha's ship-a2 attacked beta's ship-b1 and ship-b2 at the target; tile order b1, b2, a2. */
-    function battleWorld(rng: () => number) {
-        const world = jumpWorld(rng);
-        const { entities, battles } = world;
-        const b1 = entities.add(makeShip("ship-b1", "beta", TARGET));
-        const b2 = entities.add(makeShip("ship-b2", "beta", TARGET));
-        const a2 = entities.add(makeShip("ship-a2", "alpha", { q: 9, r: 10 }));
-        const fight = battles.moveShip("alpha", a2.id, TARGET);
-        const battle = fight.ok ? fight.battle! : undefined;
-        expect(battle).toMatchObject({ defenderShipIds: [b1.id, b2.id] });
-        return { ...world, b1, b2, a2, battle: battle! };
-    }
-
-    it("joins the side's battle and reports it as updated", () => {
-        // Hits ship-b1, which alone is destroyed.
-        const { battles, hyperspace, ship, b2, a2, battle } = battleWorld(
-            scripted([0, 0, 0, 0.99, 0.99])
-        );
+describe("HyperspaceManager arrivals beside friendly ships", () => {
+    it("lands among the side's own surviving ships without fighting", () => {
+        // Hits ship-a2, which alone is destroyed; ship-a3 remains.
+        const { entities, hyperspace, ship } = jumpWorld(scripted([0, 0, 0, 0.99, 0.99]));
+        entities.add(makeShip("ship-a2", "alpha", TARGET));
+        const a3 = entities.add(makeShip("ship-a3", "alpha", TARGET));
         hyperspace.activate("alpha", ship.id, TARGET);
         const [event] = hyperspace.resolve();
-        expect(event).toMatchObject({ outcome: "arrived", battle: null, endedBattles: [] });
-        expect(event!.updatedBattles).toEqual([
-            {
-                ...battle,
-                attackerShipIds: [a2.id, ship.id],
-                defenderShipIds: [b2.id]
-            }
-        ]);
-        expect(battles.findByShip(ship.id)?.battleId).toBe(battle.battleId);
-    });
-
-    it("joins as a defender", () => {
-        // Hits ship-b1 (its own side), which alone is destroyed.
-        const { entities, hyperspace, b2, a2, battle } = battleWorld(
-            scripted([0, 0, 0, 0.99, 0.99])
-        );
-        const jumper = entities.add(makeShip("ship-b3", "beta", { q: 6, r: 15 }));
-        hyperspace.activate("beta", jumper.id, TARGET);
-        expect(hyperspace.resolve()[0]!.updatedBattles).toEqual([
-            { ...battle, attackerShipIds: [a2.id], defenderShipIds: [b2.id, jumper.id] }
-        ]);
-    });
-
-    it("reports a battle that lost ships but continues, even when the jumper is lost", () => {
-        // Hits ship-b1; both destroyed.
-        const { hyperspace, ship, b1, b2, a2, battle } = battleWorld(scripted([0, 0, 0, 0.1]));
-        hyperspace.activate("alpha", ship.id, TARGET);
-        const [event] = hyperspace.resolve();
-        expect(event).toMatchObject({
-            outcome: "destroyed",
-            destroyedIds: [ship.id, b1.id],
-            endedBattles: []
-        });
-        expect(event!.updatedBattles).toEqual([
-            { ...battle, attackerShipIds: [a2.id], defenderShipIds: [b2.id] }
-        ]);
-    });
-
-    it("leaves battles unreported when only the jumper is lost", () => {
-        // Hits ship-b1; the jumper is lost.
-        const { hyperspace, ship, battle } = battleWorld(scripted([0, 0, 0, 0.99, 0]));
-        hyperspace.activate("alpha", ship.id, TARGET);
-        const [event] = hyperspace.resolve();
-        expect(event).toMatchObject({ outcome: "destroyed", destroyedIds: [ship.id] });
-        expect(event!.updatedBattles).toEqual([]);
-        expect(battle.defenderShipIds).toHaveLength(2);
+        expect(event).toMatchObject({ outcome: "arrived", combat: null });
+        expect(event!.displacedTo).toBeUndefined();
+        expect(entities.entitiesAt(TARGET.q, TARGET.r)).toEqual([a3, ship]);
     });
 });
 
@@ -690,8 +641,8 @@ describe("HyperspaceManager cooldowns", () => {
 
 describe("hyperspace at end of turn", () => {
     it("ticks cooldowns down and resolves jumps before move orders", () => {
-        const { entities, economy, battles, hyperspace, ship } = jumpWorld(scripted([0, 0]));
-        const orders = new MoveOrderManager(entities, { battles, economy });
+        const { entities, economy, hyperspace, ship } = jumpWorld(scripted([0, 0]));
+        const orders = new MoveOrderManager(entities, { economy });
         const turns = new TurnManager(["alpha", "beta"], entities, economy, undefined, {
             hyperspace,
             moveOrders: orders

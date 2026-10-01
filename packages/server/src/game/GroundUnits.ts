@@ -17,8 +17,7 @@ export function isLocationEntity(entity: { kind: string } | undefined): entity i
 
 /**
  * Every ground unit in the game. Keeps each location's `garrison` and each transport's
- * `carriedUnitIds` in sync with the units' `location`. Units that have landed in a pending
- * invasion point at the invaded location but aren't listed in its garrison.
+ * `carriedUnitIds` in sync with the units' `location`.
  */
 export class GroundUnitRegistry {
     private readonly _entities: EntityManager;

@@ -1,15 +1,30 @@
+import { axialDirectionTowards } from "@space/maths";
 import {
+    hexHasObstacle,
     MOVE_COST_PER_HEX,
+    ringHexes,
     type AxialCoord,
-    type BattleId,
-    type BattleInfo,
+    type CombatCause,
+    type CombatOutcome,
+    type CombatResult,
+    type EconomyBalance,
     type EntityId,
     type ShipMoveOrder,
     type SideId
 } from "@space/shared-data";
+import { defaultEconomyBalance } from "../config/config.schema.js";
+import {
+    isAlive,
+    shipFighter,
+    spaceExchange,
+    supplyFighter,
+    toParticipant,
+    type Fighter
+} from "./combat.js";
 import { destroyVessels, type Vessel } from "./destroyShips.js";
 import type { EconomyManager } from "./EconomyManager.js";
 import type { EntityManager } from "./EntityManager.js";
+import { findTileByAxial } from "./map/SpaceMap.js";
 import type { EntityOf } from "./map/types.js";
 import {
     applyShipMove,
@@ -23,29 +38,24 @@ import {
 export type BattleMoveResult =
     | {
           ok: true;
-          /** Null when the ship couldn't move this turn (no MP, or the next hex is blocked). */
+          /**
+           * Steps taken before any combat; null when the ship didn't move (no MP, or the
+           * first hex on its path held enemies).
+           */
           move: Extract<MoveValidation, { ok: true }> | null;
-          /** Battle started by this move, if it ended in a hex holding enemy vessels. */
-          battle: BattleInfo | null;
+          /** Combat fought at the first hex on the path holding enemy vessels, if any. */
+          combat: CombatResult | null;
           /** Order left for the rest of the route, if the destination wasn't reached. */
           moveOrder: ShipMoveOrder | null;
       }
     | { ok: false; error: string };
 
-export type BattleResolveResult =
-    | {
-          ok: true;
-          battle: BattleInfo;
-          loserSideId: SideId;
-          /** Ships and supply ships (whose cargo is lost). */
-          destroyedShipIds: EntityId[];
-          /** Ground units lost aboard destroyed transports. */
-          destroyedUnitIds: EntityId[];
-      }
-    | { ok: false; error: string };
-
-/** A pending battle that ended because one side had no vessels left in the hex. */
-export type EndedBattle = { battle: BattleInfo; winnerSideId: SideId; loserSideId: SideId };
+export type BattleOptions = {
+    /** Defaults to the economy's balance, else the config defaults. */
+    balance?: EconomyBalance;
+    /** Random numbers in [0, 1) for evasion and damage rolls; defaults to `Math.random`. */
+    rng?: () => number;
+};
 
 function shipsAt(entities: EntityManager, hex: AxialCoord): EntityOf<"ship">[] {
     return entities
@@ -76,62 +86,31 @@ export function hasEnemyVessels(entities: EntityManager, hex: AxialCoord, sideId
 }
 
 /**
- * Pending battles. A ship stepping into a hex with enemy ships or supply ships stops there
- * and starts a battle, which the attacker (mover's side) resolves by naming a winner. A
- * supply ship blundering into enemy ships also starts one, with the enemy as attacker.
- * While pending, involved vessels are locked and nothing may move into the hex. Turns may
- * still end; the battle simply carries over.
+ * Automatic space combat. An aggressor attacking a hex fights every enemy ship and supply ship
+ * there in one exchange (see `spaceExchange`): its attack is shared across the defenders and
+ * each defender fires back. Supply ships may evade. Damage persists on the entities; ships at
+ * 0 hp are destroyed (see `destroyVessels`). If every defender that didn't evade is destroyed
+ * the attacker won; if the attacker is destroyed it lost; otherwise it is inconclusive.
  */
 export class BattleManager {
     private readonly _entities: EntityManager;
     private readonly _economy: EconomyManager | undefined;
-    private readonly _battles = new Map<BattleId, BattleInfo>();
-    private _nextId = 1;
+    private readonly _balance: EconomyBalance;
+    private readonly _rng: () => number;
 
-    constructor(entities: EntityManager, economy?: EconomyManager) {
+    constructor(entities: EntityManager, economy?: EconomyManager, options: BattleOptions = {}) {
         this._entities = entities;
         this._economy = economy;
-    }
-
-    get(battleId: BattleId): BattleInfo | undefined {
-        return this._battles.get(battleId);
-    }
-
-    pending(): BattleInfo[] {
-        return [...this._battles.values()];
-    }
-
-    /** Pending battles in which `sideId` is a combatant. */
-    involving(sideId: SideId): BattleInfo[] {
-        return this.pending().filter(
-            (battle) => battle.attackerSideId === sideId || battle.defenderSideId === sideId
-        );
-    }
-
-    findAt(hex: AxialCoord): BattleInfo | undefined {
-        for (const battle of this._battles.values()) {
-            if (battle.q === hex.q && battle.r === hex.r) return battle;
-        }
-        return undefined;
-    }
-
-    findByShip(shipId: EntityId): BattleInfo | undefined {
-        for (const battle of this._battles.values()) {
-            if (
-                battle.attackerShipIds.includes(shipId) ||
-                battle.defenderShipIds.includes(shipId)
-            ) {
-                return battle;
-            }
-        }
-        return undefined;
+        this._balance = options.balance ?? economy?.balance ?? defaultEconomyBalance();
+        this._rng = options.rng ?? Math.random;
     }
 
     /**
-     * Validate and apply a move towards `to`, as far as movement allows this turn. The path
-     * is cut at the first hex holding enemy vessels (ending there starts a battle) and just
-     * before a hex with a pending battle. If the destination isn't reached, the rest of the
-     * route is stored as the ship's `moveOrder`; otherwise any order is cleared.
+     * Validate and apply a manual move towards `to`, as far as movement allows this turn. If
+     * the path meets a hex holding enemy vessels, the ship stops on the hex before it and
+     * attacks; it advances into the hex only if it wins. Attacking ends its movement for the
+     * turn and clears its order. Otherwise, if the destination isn't reached, the rest of the
+     * route is stored as the ship's `moveOrder`.
      */
     moveShip(
         sideId: SideId | null,
@@ -139,14 +118,8 @@ export class BattleManager {
         to: AxialCoord,
         options: MovePlanOptions = {}
     ): BattleMoveResult {
-        if (this.findByShip(shipId)) {
-            return { ok: false, error: `Ship ${shipId} is locked in battle` };
-        }
         if (this._entities.getOfKind(shipId, "ship")?.hyperjump) {
             return { ok: false, error: `Ship ${shipId} is preparing a hyperspace jump` };
-        }
-        if (this.findAt(to)) {
-            return { ok: false, error: `A battle is in progress at ${to.q},${to.r}` };
         }
         const plan = planShipRoute(this._entities, sideId, shipId, to, options);
         if (!plan.ok) return plan;
@@ -154,17 +127,34 @@ export class BattleManager {
         const ship = plan.ship;
         const maxSteps = Math.floor(ship.movementPoints / MOVE_COST_PER_HEX);
         const steps = stepAlongRoute(plan, maxSteps, {
-            stopAt: (hex) => hasEnemyVessels(this._entities, hex, ship.sideId),
-            stopBefore: (hex) => !!this.findAt(hex)
+            stopAt: (hex) => hasEnemyVessels(this._entities, hex, ship.sideId)
         });
+        const last = steps.path.at(-1);
+        const target = last && hasEnemyVessels(this._entities, last, ship.sideId) ? last : null;
+        const approach = target ? steps.path.slice(0, -1) : steps.path;
+
         let move: Extract<MoveValidation, { ok: true }> | null = null;
-        let battle: BattleInfo | null = null;
-        if (steps.path.length > 0) {
-            const validated = moveFromSteps(this._entities, plan, steps);
+        if (approach.length > 0) {
+            const validated = moveFromSteps(this._entities, plan, {
+                path: approach,
+                remaining: plan.route.slice(approach.length)
+            });
             if (!validated.ok) return validated;
             move = validated;
             applyShipMove(this._entities, move);
-            battle = this._startIfContested(ship);
+        }
+
+        if (target) {
+            delete ship.moveOrder;
+            const from = { q: ship.q, r: ship.r };
+            ship.facing = axialDirectionTowards(from, target);
+            ship.movementPoints = 0;
+            const combat = this._fight(ship, target, from, "move");
+            if (combat.outcome === "attacker_won") {
+                this._entities.move(ship.id, target);
+                combat.attackerMovedIn = true;
+            }
+            return { ok: true, move, combat, moveOrder: null };
         }
 
         if (steps.remaining.length > 0) {
@@ -172,110 +162,154 @@ export class BattleManager {
         } else {
             delete ship.moveOrder;
         }
-        return { ok: true, move, battle, moveOrder: ship.moveOrder ?? null };
+        return { ok: true, move, combat: null, moveOrder: ship.moveOrder ?? null };
     }
 
     /**
-     * A supply ship moved into a hex holding enemy ships: the enemy attacks, and every
-     * vessel of the supply ship's side in the hex defends. Returns null if the hex is quiet.
+     * A supply ship tried to step into `hex`, which holds enemy warships it didn't know about.
+     * Each armed enemy warship there attacks it in turn (it may evade each attack) until it is
+     * destroyed. It never enters the hex. Null when no warship there is armed.
      */
-    startSupplyAmbush(supplyShip: EntityOf<"supply_ship">): BattleInfo | null {
-        if (this.findAt(supplyShip)) return null;
-        const attackerSideId = shipsAt(this._entities, supplyShip).find(
-            (ship) => ship.sideId !== supplyShip.sideId
-        )?.sideId;
-        if (!attackerSideId) return null;
-        return this._create(supplyShip, attackerSideId, supplyShip.sideId);
-    }
+    ambush(supplyShip: EntityOf<"supply_ship">, hex: AxialCoord): CombatResult | null {
+        const enemies = shipsAt(this._entities, hex).filter((s) => s.sideId !== supplyShip.sideId);
+        const attackerSideId = enemies[0]?.sideId;
+        const aggressors = enemies
+            .filter((s) => s.sideId === attackerSideId)
+            .map((s) => shipFighter(s, "attacker", this._balance))
+            .filter((f) => f.attack > 0);
+        if (!attackerSideId || aggressors.length === 0) return null;
 
-    /**
-     * A ship arrived out of hyperspace. With a battle already pending in the hex it joins its
-     * side if that side is a combatant (returning null); otherwise enemy vessels there start
-     * a battle with the arrival as attacker.
-     */
-    startArrivalBattle(ship: EntityOf<"ship">): BattleInfo | null {
-        const pending = this.findAt(ship);
-        if (pending) {
-            if (pending.attackerSideId === ship.sideId) pending.attackerShipIds.push(ship.id);
-            else if (pending.defenderSideId === ship.sideId) pending.defenderShipIds.push(ship.id);
-            return null;
+        const target = supplyFighter(
+            supplyShip,
+            "defender",
+            this._balance,
+            this._techs(supplyShip.sideId)
+        );
+        let rounds = 0;
+        for (const aggressor of aggressors) {
+            if (!isAlive(target)) break;
+            spaceExchange(aggressor, [target], this._balance.combat, this._rng);
+            rounds += 1;
         }
-        return this._startIfContested(ship);
-    }
-
-    /**
-     * Drop destroyed vessels from pending battles. A battle left with no vessels on one side
-     * ends, won by the other side.
-     */
-    removeDestroyed(ids: Iterable<EntityId>): EndedBattle[] {
-        const gone = new Set(ids);
-        const ended: EndedBattle[] = [];
-        for (const battle of [...this._battles.values()]) {
-            battle.attackerShipIds = battle.attackerShipIds.filter((id) => !gone.has(id));
-            battle.defenderShipIds = battle.defenderShipIds.filter((id) => !gone.has(id));
-            const present = (sideId: SideId) =>
-                vesselsAt(this._entities, battle).some((v) => v.sideId === sideId);
-            const attackerLeft = present(battle.attackerSideId);
-            const defenderLeft = present(battle.defenderSideId);
-            if (attackerLeft && defenderLeft) continue;
-            this._battles.delete(battle.battleId);
-            const attackerWon = attackerLeft || !defenderLeft;
-            ended.push({
-                battle,
-                winnerSideId: attackerWon ? battle.attackerSideId : battle.defenderSideId,
-                loserSideId: attackerWon ? battle.defenderSideId : battle.attackerSideId
-            });
-        }
-        return ended;
-    }
-
-    private _startIfContested(attacker: EntityOf<"ship">): BattleInfo | null {
-        const defenderSideId = vesselsAt(this._entities, attacker).find(
-            (vessel) => vessel.sideId !== attacker.sideId
-        )?.sideId;
-        if (!defenderSideId) return null;
-        return this._create(attacker, attacker.sideId, defenderSideId);
-    }
-
-    private _create(hex: AxialCoord, attackerSideId: SideId, defenderSideId: SideId): BattleInfo {
-        const vessels = vesselsAt(this._entities, hex);
-        const battle: BattleInfo = {
-            battleId: `battle-${this._nextId++}`,
-            q: hex.q,
-            r: hex.r,
+        const fought = aggressors.slice(0, rounds);
+        const destroyed = this._apply([...fought, target]);
+        return {
+            kind: "space",
+            cause: "ambush",
+            hex: { q: supplyShip.q, r: supplyShip.r },
+            from: { q: hex.q, r: hex.r },
             attackerSideId,
-            defenderSideId,
-            attackerShipIds: vessels.filter((v) => v.sideId === attackerSideId).map((v) => v.id),
-            defenderShipIds: vessels.filter((v) => v.sideId === defenderSideId).map((v) => v.id)
+            defenderSideIds: [supplyShip.sideId],
+            participants: [...fought, target].map(toParticipant),
+            ...destroyed,
+            outcome: isAlive(target) ? "inconclusive" : "attacker_won",
+            attackerMovedIn: false,
+            rounds
         };
-        this._battles.set(battle.battleId, battle);
-        return battle;
     }
 
     /**
-     * Resolve a battle on behalf of `bySideId` (must be the attacker). Every ship and supply
-     * ship of the losing side in the hex is destroyed (see `destroyVessels`).
+     * A ship arrived out of hyperspace from `origin`. If enemy vessels are on its hex it
+     * attacks them at once. Unless it clears the hex (or is destroyed) it is displaced to the
+     * nearest in-bounds hex without obstacles or other sides' vessels. Null when the hex is quiet.
      */
-    resolve(
-        battleId: BattleId,
-        bySideId: SideId | null,
-        winnerSideId: SideId
-    ): BattleResolveResult {
-        const battle = this._battles.get(battleId);
-        if (!battle) return { ok: false, error: `Unknown battle ${battleId}` };
-        if (bySideId !== battle.attackerSideId) {
-            return { ok: false, error: "Only the attacking side can resolve this battle" };
+    arrival(ship: EntityOf<"ship">, origin: AxialCoord): CombatResult | null {
+        if (!hasEnemyVessels(this._entities, ship, ship.sideId)) return null;
+        const hex = { q: ship.q, r: ship.r };
+        const combat = this._fight(ship, hex, origin, "hyperjump");
+        if (combat.outcome === "attacker_won") {
+            combat.attackerMovedIn = true;
+        } else if (combat.outcome === "inconclusive") {
+            const refuge = this.nearestSafeHex(hex, ship.sideId);
+            if (refuge) {
+                this._entities.move(ship.id, refuge);
+                combat.displacedTo = refuge;
+            }
         }
-        const { attackerSideId, defenderSideId } = battle;
-        if (winnerSideId !== attackerSideId && winnerSideId !== defenderSideId) {
-            return { ok: false, error: `Side ${winnerSideId} is not part of this battle` };
+        return combat;
+    }
+
+    /** Nearest hex to `from` (excluded) that is in bounds, free of obstacles and of other sides' vessels. */
+    nearestSafeHex(from: AxialCoord, sideId: SideId): AxialCoord | undefined {
+        const map = this._entities.map;
+        const inBounds = (hex: AxialCoord) => !!findTileByAxial(map, hex.q, hex.r);
+        const maxRadius = map.width + map.height;
+        for (let radius = 1; radius <= maxRadius; radius++) {
+            for (const hex of ringHexes(from, radius, inBounds)) {
+                const contents = this._entities.entitiesAt(hex.q, hex.r);
+                if (hexHasObstacle(contents)) continue;
+                if (hasEnemyVessels(this._entities, hex, sideId)) continue;
+                return hex;
+            }
         }
+        return undefined;
+    }
 
-        const loserSideId = winnerSideId === attackerSideId ? defenderSideId : attackerSideId;
-        const losers = vesselsAt(this._entities, battle).filter((v) => v.sideId === loserSideId);
-        const destroyed = destroyVessels(this._entities, this._economy, losers);
-        this._battles.delete(battleId);
+    private _techs(sideId: SideId) {
+        return this._economy?.research.techs(sideId) ?? [];
+    }
 
-        return { ok: true, battle, loserSideId, ...destroyed };
+    private _fighterFor(vessel: Vessel, role: Fighter["role"]): Fighter {
+        return vessel.kind === "ship"
+            ? shipFighter(vessel, role, this._balance)
+            : supplyFighter(vessel, role, this._balance, this._techs(vessel.sideId));
+    }
+
+    /** One exchange between `attacker` and every enemy vessel on `hex`. */
+    private _fight(
+        attacker: EntityOf<"ship">,
+        hex: AxialCoord,
+        from: AxialCoord,
+        cause: CombatCause
+    ): CombatResult {
+        const defenders = vesselsAt(this._entities, hex)
+            .filter((v) => v.sideId !== attacker.sideId)
+            .map((v) => this._fighterFor(v, "defender"));
+        const aggressor = shipFighter(attacker, "attacker", this._balance);
+        spaceExchange(aggressor, defenders, this._balance.combat, this._rng);
+        const fighters = [aggressor, ...defenders];
+        const destroyed = this._apply(fighters);
+        const cleared = defenders.every(
+            (d) => !isAlive(d) || (d.attacked > 0 && d.evadedCount === d.attacked)
+        );
+        const outcome: CombatOutcome = !isAlive(aggressor)
+            ? "attacker_destroyed"
+            : cleared
+              ? "attacker_won"
+              : "inconclusive";
+        return {
+            kind: "space",
+            cause,
+            hex: { q: hex.q, r: hex.r },
+            from: { q: from.q, r: from.r },
+            attackerSideId: attacker.sideId,
+            defenderSideIds: [...new Set(defenders.map((d) => d.sideId))],
+            participants: fighters.map(toParticipant),
+            ...destroyed,
+            outcome,
+            attackerMovedIn: false,
+            rounds: 1
+        };
+    }
+
+    /** Write fighters' hp back to their vessels and destroy those at 0 hp. */
+    private _apply(
+        fighters: readonly Fighter[]
+    ): Pick<CombatResult, "destroyedIds" | "destroyedUnitIds"> {
+        const lost: Vessel[] = [];
+        for (const f of fighters) {
+            const vessel = this._entities.get(f.id);
+            if (vessel?.kind !== "ship" && vessel?.kind !== "supply_ship") continue;
+            if (!isAlive(f)) {
+                lost.push(vessel);
+            } else if (vessel.kind === "ship") {
+                vessel.hp = f.hp;
+            } else if (f.hp < f.maxHp) {
+                vessel.hp = f.hp;
+            }
+        }
+        if (lost.length === 0) return { destroyedIds: [], destroyedUnitIds: [] };
+        const result = destroyVessels(this._entities, this._economy, lost);
+        return { destroyedIds: result.destroyedShipIds, destroyedUnitIds: result.destroyedUnitIds };
     }
 }

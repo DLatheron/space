@@ -9,6 +9,7 @@ import {
 } from "@space/shared-data";
 import { defaultEconomyBalance } from "../config/config.schema.js";
 import { BattleManager } from "./Battle.js";
+import { destroyVessels } from "./destroyShips.js";
 import { EconomyManager, type BuildResult } from "./EconomyManager.js";
 import { EntityManager } from "./EntityManager.js";
 import { createEmptyMap } from "./map/SpaceMap.js";
@@ -96,12 +97,13 @@ function makeSupplyShip(
 /** Moons have no base income, so stockpiles only change through orders and supply. */
 function supplyWorld(
     knowledge?: (sideId: string) => SupplyKnowledge,
-    balance: EconomyBalance = unlimitedBalance()
+    balance: EconomyBalance = unlimitedBalance(),
+    rng: () => number = () => 0.5
 ) {
     const map = createEmptyMap({ width: 30, height: 30, hexSize: 50, seed: 1 });
     const entities = new EntityManager(map);
     const economy = new EconomyManager(entities, ["alpha", "beta"], { balance });
-    const battles = new BattleManager(entities, economy);
+    const battles = new BattleManager(entities, economy, { rng });
     const supply = new SupplyManager(entities, economy, { battles, knowledge });
     const turns = new TurnManager(["alpha", "beta"], entities, economy, supply);
     const endTurn = () => {
@@ -397,7 +399,7 @@ describe("SupplyManager movement", () => {
         const ship = makeSupplyShip(entities, "s1", hex(0, 10), "source", dest.id);
 
         const first = supply.move();
-        expect(first.battles).toEqual([]);
+        expect(first.combats).toEqual([]);
         expect(first.moves[0].path).toHaveLength(6);
         expect(first.moves[0].path).not.toContainEqual(hex(3, 10));
 
@@ -409,7 +411,7 @@ describe("SupplyManager movement", () => {
             ship.route![0].r
         );
         const second = supply.move();
-        expect(second.battles).toEqual([]);
+        expect(second.combats).toEqual([]);
         expect(second.moves[0].path).not.toContainEqual(hex(blocker.q, blocker.r));
         expect(ship.route?.some((h) => h.q === blocker.q && h.r === blocker.r)).toBe(false);
     });
@@ -451,15 +453,13 @@ describe("SupplyManager movement", () => {
         expect(economy.stockpile(dest.id)).toEqual(zeroResources());
     });
 
-    it("stops before a pending battle it didn't know about and routes around known ones", () => {
+    it("stops before enemy warships it didn't know about and routes around known ones", () => {
         const setup = (knowledge?: (sideId: string) => SupplyKnowledge) => {
             const world = supplyWorld(knowledge);
-            const { entities, battles } = world;
+            const { entities } = world;
             makeMoon(entities, "source", 0, 10);
             const dest = makeMoon(entities, "dest", 10, 10);
             makeWarship(entities, "enemy", "beta", 4, 10);
-            const attacker = makeWarship(entities, "attacker", "alpha", 4, 11);
-            expect(battles.moveShip("alpha", attacker.id, hex(4, 10)).ok).toBe(true);
             const ship = makeSupplyShip(entities, "s1", hex(0, 10), "source", dest.id);
             return { ...world, ship };
         };
@@ -468,11 +468,11 @@ describe("SupplyManager movement", () => {
         const result = unaware.supply.move();
         expect(unaware.ship).toMatchObject({ q: 3, r: 10 });
         expect(unaware.ship.route![0]).toEqual(hex(4, 10));
-        expect(result.battles).toEqual([]);
-        expect(unaware.battles.pending()).toHaveLength(1);
+        expect(result.combats).toHaveLength(1);
 
         const aware = setup();
         const around = aware.supply.move();
+        expect(around.combats).toEqual([]);
         expect(around.moves[0].path).toHaveLength(6);
         expect(around.moves[0].path).not.toContainEqual(hex(4, 10));
     });
@@ -527,8 +527,8 @@ describe("SupplyManager movement", () => {
     });
 });
 
-describe("SupplyManager battles", () => {
-    it("fights an enemy warship entering its hex as a defender and loses its cargo", () => {
+describe("SupplyManager combat", () => {
+    it("loses its cargo when destroyed by an attacking warship, which moves in", () => {
         const { entities, economy, battles, supply } = supplyWorld();
         const source = makeMoon(entities, "source", 0, 10);
         const dest = makeMoon(entities, "dest", 12, 10);
@@ -537,21 +537,18 @@ describe("SupplyManager battles", () => {
         const convoy = supply.dispatch();
         supply.move();
         expect(convoy.map((s) => axialKey(s.q, s.r))).toEqual([axialKey(6, 10), axialKey(6, 10)]);
+        for (const ship of convoy) ship.hp = 1;
 
         const raider = makeWarship(entities, "raider", "beta", 8, 10);
         const moved = battles.moveShip("beta", raider.id, hex(6, 10));
-        expect(moved.ok && moved.battle).toMatchObject({
+        expect(moved.ok && moved.combat).toMatchObject({
             attackerSideId: "beta",
-            defenderSideId: "alpha",
-            attackerShipIds: [raider.id],
-            defenderShipIds: convoy.map((s) => s.id)
+            defenderSideIds: ["alpha"],
+            outcome: "attacker_won",
+            attackerMovedIn: true,
+            destroyedIds: convoy.map((s) => s.id)
         });
-        // Locked while the battle is pending.
-        expect(supply.move().moves).toEqual([]);
-
-        const battleId = moved.ok ? moved.battle!.battleId : "";
-        const resolved = battles.resolve(battleId, "beta", "beta");
-        expect(resolved.ok && resolved.destroyedShipIds).toEqual(convoy.map((s) => s.id));
+        expect(raider).toMatchObject({ q: 6, r: 10 });
         expect(supply.shipsOf("alpha")).toEqual([]);
         expect(supply.inFlightTo(dest.id)).toEqual(zeroResources());
 
@@ -561,44 +558,75 @@ describe("SupplyManager battles", () => {
         expect(economy.stockpile(source.id)).toEqual(res({ money: 900, materials: 800 }));
     });
 
-    it("destroys the attacker instead when the supply ship's side is named winner", () => {
-        const { entities, battles } = supplyWorld();
-        makeMoon(entities, "dest", 12, 10);
-        const ship = makeSupplyShip(entities, "s1", hex(6, 10), "source", "dest");
-        const raider = makeWarship(entities, "raider", "beta", 8, 10);
-        const moved = battles.moveShip("beta", raider.id, hex(6, 10));
-        const battleId = moved.ok ? moved.battle!.battleId : "";
-        const resolved = battles.resolve(battleId, "beta", "alpha");
-        expect(resolved.ok && resolved.destroyedShipIds).toEqual([raider.id]);
-        expect(entities.get(ship.id)).toBeDefined();
-    });
-
-    it("is ambushed when it steps into enemy warships it didn't know about", () => {
-        const { entities, economy, battles, supply } = supplyWorld(blind);
+    it("survives an ambush damaged, stopping before the ambushers", () => {
+        const { entities, supply } = supplyWorld(blind);
         makeMoon(entities, "source", 0, 10);
         const dest = makeMoon(entities, "dest", 10, 10);
         const lurker = makeWarship(entities, "lurker", "beta", 3, 10);
         const ship = makeSupplyShip(entities, "s1", hex(0, 10), "source", dest.id);
 
         const result = supply.move();
-        expect(ship).toMatchObject({ q: 3, r: 10 });
+        expect(ship).toMatchObject({ q: 2, r: 10, hp: 2 });
         expect(result.arrivals).toEqual([]);
-        expect(result.battles).toEqual([
+        expect(result.combats).toEqual([
             expect.objectContaining({
-                q: 3,
-                r: 10,
+                kind: "space",
+                cause: "ambush",
+                hex: hex(2, 10),
+                from: hex(3, 10),
                 attackerSideId: "beta",
-                defenderSideId: "alpha",
-                attackerShipIds: [lurker.id],
-                defenderShipIds: [ship.id]
+                defenderSideIds: ["alpha"],
+                outcome: "inconclusive",
+                attackerMovedIn: false,
+                destroyedIds: []
             })
         ]);
-        expect(battles.findByShip(ship.id)).toBeDefined();
-        expect(supply.move().moves).toEqual([]);
+        expect(result.combats[0]!.participants.map((p) => [p.id, p.role])).toEqual([
+            [lurker.id, "attacker"],
+            [ship.id, "defender"]
+        ]);
+        expect(lurker).toMatchObject({ q: 3, r: 10 });
+    });
 
-        battles.resolve(result.battles[0].battleId, "beta", "beta");
+    it("is destroyed by an ambush, losing its cargo", () => {
+        const { entities, economy, supply } = supplyWorld(blind);
+        makeMoon(entities, "source", 0, 10);
+        const dest = makeMoon(entities, "dest", 10, 10);
+        makeWarship(entities, "lurker-1", "beta", 3, 10);
+        makeWarship(entities, "lurker-2", "beta", 3, 10);
+        const ship = makeSupplyShip(entities, "s1", hex(0, 10), "source", dest.id);
+
+        const result = supply.move();
+        expect(result.combats).toMatchObject([
+            { outcome: "attacker_won", destroyedIds: [ship.id], rounds: 2 }
+        ]);
         expect(entities.get(ship.id)).toBeUndefined();
+        expect(supply.move().moves).toEqual([]);
         expect(economy.stockpile(dest.id)).toEqual(zeroResources());
+    });
+
+    it("evades ambushes more often with evasive manoeuvres", () => {
+        const ambush = (techs: boolean) => {
+            const world = supplyWorld(blind, unlimitedBalance(), () => 0.4);
+            if (techs) world.economy.research.add("alpha", "evasive_manoeuvres_1");
+            makeMoon(world.entities, "source", 0, 10);
+            const dest = makeMoon(world.entities, "dest", 10, 10);
+            makeWarship(world.entities, "lurker", "beta", 3, 10);
+            const ship = makeSupplyShip(world.entities, "s1", hex(0, 10), "source", dest.id);
+            const [combat] = world.supply.move().combats;
+            return { ship, defender: combat!.participants[1]! };
+        };
+
+        // Base evasion 0.3: a 0.4 roll hits for round(4 * 0.95 * 10 / 11) = 3.
+        const plain = ambush(false);
+        expect(plain.defender).toMatchObject({ evaded: false, damageTaken: 3 });
+        expect(plain.ship.hp).toBe(3);
+
+        // Evasive manoeuvres I adds 0.15: the same roll misses.
+        const evasive = ambush(true);
+        expect(evasive.defender).toMatchObject({ evaded: true, damageTaken: 0 });
+        expect(evasive.ship.hp).toBeUndefined();
+        expect(evasive.ship).toMatchObject({ q: 2, r: 10 });
     });
 });
 
@@ -620,13 +648,9 @@ describe("SupplyManager population returns", () => {
         const economy = new EconomyManager(entities, ["alpha", "beta"], {
             balance: unlimitedBalance()
         });
-        const battles = new BattleManager(entities, economy);
-        const supply = new SupplyManager(entities, economy, { battles });
+        const supply = new SupplyManager(entities, economy);
         const destroyFrigate = () => {
-            const raider = makeWarship(entities, "raider", "beta", frigate.q + 1, frigate.r);
-            const moved = battles.moveShip("beta", raider.id, frigate);
-            expect(moved.ok && moved.battle).toBeTruthy();
-            battles.resolve(moved.ok ? moved.battle!.battleId : "", "beta", "beta");
+            destroyVessels(entities, economy, [frigate]);
             expect(entities.get(frigate.id)).toBeUndefined();
         };
         return { entities, economy, supply, home, outpost, frigate, destroyFrigate };

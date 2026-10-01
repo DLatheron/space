@@ -14,7 +14,7 @@ import { Server, useClientId, useServerMessageManager, useServerSocket } from ".
 import { MainMenu } from "./pages/MainMenu.js";
 import type { GameOutletContext } from "./pages/PlanetPage.js";
 import { HexMapView } from "./components/HexMapView.js";
-import { BattleDialog } from "./components/BattleDialog.js";
+import { CombatLog } from "./components/CombatLog.js";
 import { formatResources } from "./components/format.js";
 import { ResourceBar } from "./components/ResourceBar.js";
 import { InfoPane } from "./components/InfoPane.js";
@@ -99,37 +99,19 @@ export function App() {
             messageManager.registerHandler("server:ship:jumped", (_ctx, payload) => {
                 world.applyShipJumped(payload);
                 appendLog(
-                    `ship jumped — ${payload.shipId} ${payload.from.q},${payload.from.r} → ${payload.to.q},${payload.to.r} (${payload.outcome})${payload.destroyedIds.length ? `, destroyed ${payload.destroyedIds.join(", ")}` : ""}`
+                    `ship jumped — ${payload.shipId} ${payload.from.q},${payload.from.r} → ${payload.to.q},${payload.to.r} (${payload.outcome})${payload.displacedTo ? `, displaced to ${payload.displacedTo.q},${payload.displacedTo.r}` : ""}${payload.destroyedIds.length ? `, destroyed ${payload.destroyedIds.join(", ")}` : ""}`
                 );
             }),
-            messageManager.registerHandler("server:battle:start", (_ctx, payload) => {
-                world.applyBattleStart(payload);
+            messageManager.registerHandler("server:combat", (_ctx, payload) => {
+                world.applyCombat(payload);
                 appendLog(
-                    `battle start — ${payload.attackerSideId} vs ${payload.defenderSideId} at ${payload.q},${payload.r}${payload.youAreAttacker ? " (you attack)" : ""}`
-                );
-            }),
-            messageManager.registerHandler("server:battle:resolved", (_ctx, payload) => {
-                world.applyBattleResolved(payload);
-                appendLog(
-                    `battle resolved — ${payload.winnerSideId} wins at ${payload.q},${payload.r}, destroyed ${payload.destroyedShipIds.join(", ") || "nothing"}${payload.destroyedUnitIds.length ? ` and units ${payload.destroyedUnitIds.join(", ")}` : ""}`
+                    `combat (${payload.kind}, ${payload.cause}) — ${payload.attackerSideId} attacks ${payload.hex.q},${payload.hex.r}: ${payload.outcome}${payload.destroyedIds.length ? `, destroyed ${payload.destroyedIds.join(", ")}` : ""}${payload.destroyedUnitIds.length ? `, units lost ${payload.destroyedUnitIds.join(", ")}` : ""}`
                 );
             }),
             messageManager.registerHandler("server:supply:moved", (_ctx, payload) => {
                 world.applySupplyMoved(payload);
                 appendLog(
                     `supply moved — ${payload.supplyShipId} ${payload.from.q},${payload.from.r} → ${payload.to.q},${payload.to.r} in ${payload.path.length} steps`
-                );
-            }),
-            messageManager.registerHandler("server:ground:start", (_ctx, payload) => {
-                world.applyGroundStart(payload);
-                appendLog(
-                    `ground battle start — ${payload.attackerSideId} invades ${payload.locationId}${payload.youAreAttacker ? " (you attack)" : ""}`
-                );
-            }),
-            messageManager.registerHandler("server:ground:resolved", (_ctx, payload) => {
-                world.applyGroundResolved(payload);
-                appendLog(
-                    `ground battle resolved — ${payload.winnerSideId} wins at ${payload.locationId}${payload.captured ? " (captured)" : ""}, destroyed ${payload.destroyedUnitIds.join(", ") || "nothing"}`
                 );
             })
         ];
@@ -268,13 +250,13 @@ export function App() {
                 sendMessage({ type: "client:ship:hyperjump:cancel", payload: { shipId } });
                 appendLog(`cancel hyperjump — ${shipId}`);
             },
-            resolveBattle: (battleId, winnerSideId) => {
-                sendMessage({ type: "client:battle:resolve", payload: { battleId, winnerSideId } });
-                appendLog(`resolve battle — ${battleId} → ${winnerSideId} wins`);
+            loadShips: (carrierId, shipIds) => {
+                sendMessage({ type: "client:ship:load", payload: { carrierId, shipIds } });
+                appendLog(`load ships — ${shipIds.join(", ")} onto ${carrierId}`);
             },
-            resolveGroundBattle: (battleId, winnerSideId) => {
-                sendMessage({ type: "client:ground:resolve", payload: { battleId, winnerSideId } });
-                appendLog(`resolve ground battle — ${battleId} → ${winnerSideId} wins`);
+            unloadShips: (carrierId, shipIds) => {
+                sendMessage({ type: "client:ship:unload", payload: { carrierId, shipIds } });
+                appendLog(`unload ships — ${shipIds.join(", ")} from ${carrierId}`);
             }
         }),
         [sendMessage, appendLog]
@@ -376,11 +358,7 @@ export function App() {
                                 </button>
                             </div>
                         </div>
-                        <BattleDialog
-                            world={world}
-                            onResolve={actions.resolveBattle}
-                            onResolveGround={actions.resolveGroundBattle}
-                        />
+                        <CombatLog world={world} />
                         <Outlet context={outletContext} />
                     </div>
                     <InfoPane

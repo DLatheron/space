@@ -54,8 +54,6 @@ function makeWorld(entities: EntitySummary[]): HexWorld {
         tiles,
         visible: tiles.map((t) => `${t.q},${t.r}` as const),
         turn: { turn: 1, sideReady: {} } as never,
-        battles: [],
-        groundBattles: [],
         economy: {} as EconomyState,
         balance: null as unknown as EconomyBalance
     });
@@ -95,6 +93,14 @@ describe("HexWorld.handleClick", () => {
         expect(click(world, 2, 2)).toEqual({ type: "open-location", locationId: "planet-1" });
         expect(click(world, 1, 1)).toEqual({ type: "select", shipId: "ship-1" });
         expect(click(world, 1, 1)).toEqual({ type: "deselect" });
+    });
+
+    it("only inspects planets we don't own", () => {
+        const unclaimed = { ...planet, id: "planet-2", sideId: null, q: 3, r: 3 } as EntitySummary;
+        const enemy = { ...planet, id: "planet-3", sideId: "beta", q: 4, r: 4 } as EntitySummary;
+        const world = makeWorld([unclaimed, enemy]);
+        expect(click(world, 3, 3)).toEqual({ type: "inspect", entityId: "planet-2" });
+        expect(click(world, 4, 4)).toEqual({ type: "inspect", entityId: "planet-3" });
     });
 
     it("sends a long-range move to an explored hex beyond this turn's movement", () => {
@@ -165,6 +171,19 @@ describe("HexWorld server events", () => {
         expect(world.findEntityById("enemy-1")).toBeUndefined();
     });
 
+    it("places a displaced jumper at its refuge hex", () => {
+        const world = makeWorld([ship("ship-1", 1, 1, { hyperjump: { target: { q: 3, r: 3 } } })]);
+        world.applyShipJumped({
+            shipId: "ship-1",
+            from: { q: 1, r: 1 },
+            to: { q: 3, r: 3 },
+            outcome: "arrived",
+            destroyedIds: [],
+            displacedTo: { q: 4, r: 3 }
+        });
+        expect(world.findEntity("ship-1", "ship")).toMatchObject({ q: 4, r: 3 });
+    });
+
     it("trims the walked part of a move order on each step", () => {
         const route = [
             { q: 1, r: 0 },
@@ -187,6 +206,157 @@ describe("HexWorld server events", () => {
         expect(world.findEntity("ship-1", "ship")?.moveOrder?.route).toEqual([{ q: 3, r: 0 }]);
         step({ q: 3, r: 0 });
         expect(world.findEntity("ship-1", "ship")?.moveOrder).toBeUndefined();
+    });
+});
+
+describe("HexWorld carriers", () => {
+    const carrier = ship("carrier-1", 1, 1, {
+        shipType: "star_destroyer",
+        carriedShipIds: ["fighter-1"],
+        carriedShipCount: 1
+    });
+    const fighter = ship("fighter-1", 1, 1, {
+        shipType: "fighter_squadron",
+        carriedBy: "carrier-1"
+    });
+
+    it("leaves carried ships out of click cycling, selection and the hex lists", () => {
+        const world = makeWorld([carrier, fighter]);
+        expect(world.clickCycle(world.entitiesAt(1, 1)).map((e) => e.id)).toEqual(["carrier-1"]);
+        expect(click(world, 1, 1)).toEqual({ type: "select", shipId: "carrier-1" });
+        // Nothing else to cycle to: a second click deselects instead of picking the fighter.
+        expect(click(world, 1, 1)).toEqual({ type: "deselect" });
+        click(world, 1, 1);
+        expect(world.mapFocus).toMatchObject({ entities: [{ id: "carrier-1" }] });
+        expect(world.ownShipsAt(1, 1).map((s) => s.id)).toEqual(["carrier-1"]);
+        expect(world.carriedShips(world.selectedShip!).map((s) => s.id)).toEqual(["fighter-1"]);
+    });
+
+    it("drops the selection when the selected ship boards a carrier", () => {
+        const world = makeWorld([
+            carrier,
+            ship("fighter-2", 1, 1, { shipType: "fighter_squadron" })
+        ]);
+        world.selectShip("fighter-2");
+        world.applyTilesUpdate({
+            tiles: [
+                {
+                    q: 1,
+                    r: 1,
+                    fog: "visible",
+                    entities: [
+                        carrier,
+                        ship("fighter-2", 1, 1, {
+                            shipType: "fighter_squadron",
+                            carriedBy: "carrier-1"
+                        })
+                    ]
+                }
+            ],
+            visible: ["1,1"]
+        });
+        expect(world.selectedShipId).toBeNull();
+    });
+
+    it("carries ships along when the carrier moves", () => {
+        const world = makeWorld([carrier, fighter]);
+        world.applyShipMoved({
+            shipId: "carrier-1",
+            from: { q: 1, r: 1 },
+            to: { q: 2, r: 1 },
+            path: [{ q: 2, r: 1 }],
+            facing: 0,
+            movementPoints: 10
+        });
+        expect(world.findEntity("fighter-1", "ship")).toMatchObject({ q: 2, r: 1 });
+        expect(world.entitiesAt(1, 1)).toEqual([]);
+    });
+});
+
+describe("HexWorld combat", () => {
+    const participant = (
+        id: string,
+        sideId: string,
+        role: "attacker" | "defender",
+        hpBefore: number,
+        hpAfter: number
+    ) => ({
+        id,
+        kind: "ship" as const,
+        sideId,
+        role,
+        shipType: "scout" as const,
+        maxHp: 100,
+        hpBefore,
+        hpAfter,
+        damageDealt: 0,
+        damageTaken: hpBefore - hpAfter,
+        evaded: false,
+        destroyed: hpAfter === 0
+    });
+    const combat = {
+        kind: "space" as const,
+        cause: "move" as const,
+        hex: { q: 2, r: 1 },
+        from: { q: 1, r: 1 },
+        attackerSideId: "alpha",
+        defenderSideIds: ["beta"],
+        participants: [
+            participant("ship-1", "alpha", "attacker", 100, 70),
+            participant("enemy-1", "beta", "defender", 100, 0)
+        ],
+        destroyedIds: ["enemy-1"],
+        destroyedUnitIds: [],
+        outcome: "attacker_won" as const,
+        attackerMovedIn: true,
+        rounds: 1
+    };
+
+    it("applies hp, removes losses (they explode as an effect) and logs the report", () => {
+        const enemy = { ...ship("enemy-1", 2, 1), sideId: "beta" } as EntitySummary;
+        const world = makeWorld([ship("ship-1", 1, 1), enemy]);
+        world.applyCombat(combat);
+
+        expect(world.findEntity("ship-1", "ship")).toMatchObject({ q: 1, r: 1, hp: 70 });
+        expect(world.findEntityById("enemy-1")).toBeUndefined();
+        expect(world.combatReports.map((r) => r.result)).toEqual([combat]);
+
+        // The follow-up advance and tiles update don't bring the loss back.
+        world.applyShipMoved({
+            shipId: "ship-1",
+            from: { q: 1, r: 1 },
+            to: { q: 2, r: 1 },
+            path: [{ q: 2, r: 1 }],
+            facing: 0,
+            movementPoints: 0
+        });
+        world.applyTilesUpdate({
+            tiles: [
+                { q: 1, r: 1, fog: "visible", entities: [] },
+                { q: 2, r: 1, fog: "visible", entities: [ship("ship-1", 2, 1, { hp: 70 })] }
+            ],
+            visible: ["1,1", "2,1"]
+        });
+        expect(world.findEntity("ship-1", "ship")).toMatchObject({ q: 2, r: 1, hp: 70 });
+        expect(world.findEntityById("enemy-1")).toBeUndefined();
+    });
+
+    it("drops a destroyed selected ship from the selection", () => {
+        const enemy = { ...ship("enemy-1", 2, 1), sideId: "beta" } as EntitySummary;
+        const world = makeWorld([ship("ship-1", 1, 1), enemy]);
+        world.selectShip("ship-1");
+        world.applyCombat({
+            ...combat,
+            participants: [
+                participant("ship-1", "alpha", "attacker", 100, 0),
+                participant("enemy-1", "beta", "defender", 100, 40)
+            ],
+            destroyedIds: ["ship-1"],
+            outcome: "attacker_destroyed",
+            attackerMovedIn: false
+        });
+        expect(world.selectedShipId).toBeNull();
+        expect(world.findEntity("enemy-1", "ship")).toMatchObject({ hp: 40 });
     });
 });
 

@@ -127,7 +127,7 @@ export class TurnManager {
             supply: {
                 moves: [...moved.moves, ...departed.moves],
                 arrivals: [...moved.arrivals, ...departed.arrivals],
-                battles: [...moved.battles, ...departed.battles],
+                combats: [...moved.combats, ...departed.combats],
                 returning,
                 dispatched
             }

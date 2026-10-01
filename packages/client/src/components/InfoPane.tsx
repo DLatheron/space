@@ -1,10 +1,13 @@
+import type { ReactNode } from "react";
 import {
     GROUND_UNIT_TYPE_INFO,
+    HANGAR_LOAD_COST,
     isFullyFunded,
     MAX_SCATTER_RING,
     MOVE_COST_PER_HEX,
     resourceUnits,
     SHIP_TYPE_INFO,
+    shipStats,
     slotsForEntity,
     type EntityKind,
     type EntitySummary
@@ -41,7 +44,10 @@ const KIND_LABELS: Record<EntityKind, string> = {
 type InfoPaneProps = {
     world: HexWorld;
     onEndTurn: () => void;
-    actions: Pick<GameActions, "colonise" | "invade" | "cancelMoveOrder" | "cancelHyperjump">;
+    actions: Pick<
+        GameActions,
+        "colonise" | "invade" | "cancelMoveOrder" | "cancelHyperjump" | "loadShips" | "unloadShips"
+    >;
     onOpenLocation: (locationId: string) => void;
 };
 
@@ -183,18 +189,24 @@ function FocusBody({
                 </div>
             </dl>
 
-            {entity && focus.mode === "selection" && isBuildSite(entity) && (
-                <button
-                    type="button"
-                    className="info-pane__open"
-                    onClick={() => onOpenLocation(entity.id)}
-                >
-                    Open {entityTitle(entity)}
-                </button>
-            )}
+            {entity &&
+                focus.mode === "selection" &&
+                isBuildSite(entity) &&
+                entity.sideId === world.sideId && (
+                    <button
+                        type="button"
+                        className="info-pane__open"
+                        onClick={() => onOpenLocation(entity.id)}
+                    >
+                        Open {entityTitle(entity)}
+                    </button>
+                )}
 
             {entity?.kind === "ship" && entity.id === world.selectedShipId && (
-                <ShipOrders world={world} ship={entity} actions={actions} />
+                <>
+                    <ShipOrders world={world} ship={entity} actions={actions} />
+                    <HangarControls world={world} ship={entity} actions={actions} />
+                </>
             )}
 
             {entity ? (
@@ -243,6 +255,23 @@ function FocusBody({
     );
 }
 
+/** "80/120" with a small bar, red when low. */
+function HpValue({ hp }: { hp: { hp: number; max: number } }) {
+    const ratio = hp.max > 0 ? Math.max(0, Math.min(1, hp.hp / hp.max)) : 1;
+    const tone = ratio > 0.6 ? "ok" : ratio > 0.3 ? "low" : "critical";
+    return (
+        <span className="info-pane__hp">
+            {formatNumber(hp.hp)}/{formatNumber(hp.max)}
+            <span className="info-pane__hp-bar" aria-hidden="true">
+                <span
+                    className={`info-pane__hp-fill info-pane__hp-fill--${tone}`}
+                    style={{ width: `${ratio * 100}%` }}
+                />
+            </span>
+        </span>
+    );
+}
+
 function plural(count: number, word: string): string {
     return `${count} ${word}${count === 1 ? "" : "s"}`;
 }
@@ -266,11 +295,7 @@ function ShipOrders({
     const targeting = world.hyperjumpTargeting?.id === ship.id;
     const cooldown = ship.hyperdriveCooldown ?? 0;
     const blocked =
-        cooldown > 0
-            ? `Hyperdrive cooling down for ${plural(cooldown, "more turn")}`
-            : world.shipInBattle(ship.id)
-              ? "Locked in battle"
-              : undefined;
+        cooldown > 0 ? `Hyperdrive cooling down for ${plural(cooldown, "more turn")}` : undefined;
     const routeLength = order?.route?.length ?? 0;
     const perTurn = Math.max(1, Math.floor(ship.maxMovementPoints / MOVE_COST_PER_HEX));
     const percent = (value: number) => `${Math.round(value)}%`;
@@ -364,6 +389,159 @@ function ShipOrders({
     );
 }
 
+/** Thumbnail, name, tier and hull of a ship in a hangar list. */
+function HangarShip({
+    world,
+    ship,
+    children
+}: {
+    world: HexWorld;
+    ship: ShipEntity;
+    children: ReactNode;
+}) {
+    const hp = world.hpOf(ship);
+    return (
+        <li className="info-pane__hangar-row">
+            <Thumbnail
+                src={imageUrl({ kind: "ship", shipType: ship.shipType })}
+                label={entityTitle(ship)}
+                size="sm"
+            />
+            <span className="info-pane__hangar-name">
+                {entityTitle(ship)} <span className="info-pane__tier">T{ship.tier ?? 1}</span>
+                {hp && (
+                    <span className="info-pane__muted-inline">
+                        {" "}
+                        {formatNumber(hp.hp)}/{formatNumber(hp.max)} HP
+                    </span>
+                )}
+            </span>
+            {children}
+        </li>
+    );
+}
+
+/**
+ * Hangar of one of our selected carriers (ships aboard, ships on the hex that could board),
+ * or Board buttons when the selected ship could fly into a carrier sharing its hex.
+ */
+function HangarControls({
+    world,
+    ship,
+    actions
+}: {
+    world: HexWorld;
+    ship: ShipEntity;
+    actions: InfoPaneProps["actions"];
+}) {
+    const hangar = world.hangarOf(ship);
+    const carriers = world.carriersFor(ship);
+    if (!hangar && !carriers.length) return null;
+    const lowMp = ship.movementPoints < HANGAR_LOAD_COST;
+
+    if (!hangar) {
+        return (
+            <div className="info-pane__hangar">
+                {carriers.map((carrier) => (
+                    <button
+                        key={carrier.id}
+                        type="button"
+                        className="info-pane__board"
+                        disabled={lowMp}
+                        title={
+                            lowMp
+                                ? `Boarding needs ${HANGAR_LOAD_COST} MP`
+                                : `Fly into ${entityTitle(carrier)}'s hangar`
+                        }
+                        onClick={() => {
+                            actions.loadShips(carrier.id, [ship.id]);
+                            world.selectShip(carrier.id);
+                        }}
+                    >
+                        Board {entityTitle(carrier)}
+                    </button>
+                ))}
+                <p className="info-pane__hint">Boarding costs {HANGAR_LOAD_COST} MP.</p>
+            </div>
+        );
+    }
+
+    const carried = world.carriedShips(ship);
+    const room = hangar.capacity - carried.length;
+    const boardable = world.boardableShips(ship);
+    return (
+        <div className="info-pane__hangar">
+            <h3>
+                Hangar{" "}
+                <span className="info-pane__muted-inline">
+                    {carried.length}/{hangar.capacity}
+                </span>
+            </h3>
+            {carried.length ? (
+                <ul>
+                    {carried.map((s) => (
+                        <HangarShip key={s.id} world={world} ship={s}>
+                            <button
+                                type="button"
+                                title="Launch onto this hex"
+                                onClick={() => actions.unloadShips(ship.id, [s.id])}
+                            >
+                                Unload
+                            </button>
+                        </HangarShip>
+                    ))}
+                </ul>
+            ) : (
+                <p className="info-pane__muted">Empty.</p>
+            )}
+            {carried.length > 1 && (
+                <button
+                    type="button"
+                    onClick={() =>
+                        actions.unloadShips(
+                            ship.id,
+                            carried.map((s) => s.id)
+                        )
+                    }
+                >
+                    Unload all
+                </button>
+            )}
+            {boardable.length > 0 && (
+                <>
+                    <h3>Can board</h3>
+                    <ul>
+                        {boardable.map((s) => {
+                            const reason =
+                                room <= 0
+                                    ? "Hangar is full"
+                                    : s.movementPoints < HANGAR_LOAD_COST
+                                      ? `Needs ${HANGAR_LOAD_COST} MP`
+                                      : undefined;
+                            return (
+                                <HangarShip key={s.id} world={world} ship={s}>
+                                    <button
+                                        type="button"
+                                        disabled={!!reason}
+                                        title={reason ?? `Load ${entityTitle(s)}`}
+                                        onClick={() => actions.loadShips(ship.id, [s.id])}
+                                    >
+                                        Load
+                                    </button>
+                                </HangarShip>
+                            );
+                        })}
+                    </ul>
+                </>
+            )}
+            <p className="info-pane__hint">
+                Loading costs each ship {HANGAR_LOAD_COST} MP and drops its orders; unloading is
+                free. Ships aboard move with the carrier and can&apos;t fight.
+            </p>
+        </div>
+    );
+}
+
 function EntityDetails({ world, entity }: { world: HexWorld; entity: EntitySummary }) {
     const economy = isLocationEntity(entity) ? world.locationEconomy(entity.id) : undefined;
     const garrison = isLocationEntity(entity)
@@ -375,6 +553,20 @@ function EntityDetails({ world, entity }: { world: HexWorld; entity: EntitySumma
         entity.kind === "ship" && isTransport(entity, world.balance)
             ? world.carriedUnitIds(entity).map((id) => world.groundUnit(id))
             : undefined;
+    const hp =
+        entity.kind === "ship" || entity.kind === "supply_ship" ? world.hpOf(entity) : undefined;
+    const stats =
+        entity.kind === "ship" && world.balance
+            ? shipStats(entity.shipType, entity.tier ?? 1, world.balance)
+            : undefined;
+    const supplyStats = entity.kind === "supply_ship" ? world.supplyStatsOf(entity) : undefined;
+    const hangar = entity.kind === "ship" ? world.hangarOf(entity) : undefined;
+    const aboard =
+        entity.kind === "ship"
+            ? entity.sideId === world.sideId
+                ? world.carriedShips(entity).length
+                : (entity.carriedShipCount ?? 0)
+            : 0;
     const route = entity.kind === "supply_ship" ? world.supplyRoute(entity.id) : [];
     const routeTurns =
         entity.kind === "supply_ship" ? Math.ceil(route.length / Math.max(1, entity.speed)) : 0;
@@ -428,16 +620,36 @@ function EntityDetails({ world, entity }: { world: HexWorld; entity: EntitySumma
                                 {entity.movementPoints}/{entity.maxMovementPoints}
                             </dd>
                         </div>
-                        {entity.hp !== undefined && (
+                        {hp && (
                             <div>
                                 <dt>Hull</dt>
-                                <dd>{formatNumber(entity.hp)}</dd>
+                                <dd>
+                                    <HpValue hp={hp} />
+                                </dd>
+                            </div>
+                        )}
+                        {stats && (
+                            <div>
+                                <dt>Attack / def.</dt>
+                                <dd>
+                                    {stats.attack} / {stats.defence}
+                                </dd>
                             </div>
                         )}
                         <div>
                             <dt>Tier</dt>
                             <dd>{entity.tier ?? 1}</dd>
                         </div>
+                        {(hangar || aboard > 0) && (
+                            <div>
+                                <dt>Hangar</dt>
+                                <dd>
+                                    {hangar && entity.sideId === world.sideId
+                                        ? `${aboard}/${hangar.capacity} ships aboard`
+                                        : `${plural(aboard, "ship")} aboard`}
+                                </dd>
+                            </div>
+                        )}
                         {entity.hyperdriveCharging && entity.sideId !== world.sideId && (
                             <div>
                                 <dt>Hyperdrive</dt>
@@ -486,6 +698,27 @@ function EntityDetails({ world, entity }: { world: HexWorld; entity: EntitySumma
                             <dt>Speed</dt>
                             <dd>{entity.speed} hexes/turn</dd>
                         </div>
+                        {hp && (
+                            <div>
+                                <dt>Hull</dt>
+                                <dd>
+                                    <HpValue hp={hp} />
+                                </dd>
+                            </div>
+                        )}
+                        {supplyStats && (
+                            <div>
+                                <dt>Evasion</dt>
+                                <dd>
+                                    {Math.round(supplyStats.evasion * 100)}%
+                                    <span className="info-pane__muted-inline">
+                                        {" "}
+                                        · defence {supplyStats.defence}
+                                        {entity.sideId !== world.sideId && " (base)"}
+                                    </span>
+                                </dd>
+                            </div>
+                        )}
                         {entity.sideId === world.sideId && (
                             <div>
                                 <dt>Route</dt>

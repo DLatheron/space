@@ -29,6 +29,7 @@ import {
     sumResources,
     zeroResources
 } from "./Resources.js";
+import { CombatBalance, HangarBalance, SupplyShipBalance } from "./Combat.js";
 import { HyperdriveBalance, HyperspaceBalance } from "./Hyperspace.js";
 import { SHIP_TYPE_INFO, shipDef } from "./ShipTypes.js";
 import { maxEnhancementTierFor, missingTechPrerequisite, TechId, TECHS } from "./Tech.js";
@@ -126,6 +127,10 @@ export const ShipBalance = z.object({
     buildTurns: z.number().int().positive(),
     maxMovementPoints: z.number().int().min(0),
     hp: z.number().int().positive(),
+    /** Damage output at tier 1 (see `combatDamage`); `shipTiers.attackBonus` adds to it. */
+    attack: z.number().int().min(0),
+    /** At tier 1; `shipTiers.defenceBonus` adds to it. */
+    defence: z.number().int().min(0),
     /** Structures that must be built on the planet building this ship. */
     requires: z.array(StructureType),
     requiresTech: TechId.nullable(),
@@ -135,7 +140,9 @@ export const ShipBalance = z.object({
     /** Can be consumed to claim an unowned planet, moon or mineable asteroid on its hex. */
     canColonise: z.boolean(),
     /** Absent for ship types without a hyperdrive. */
-    hyperdrive: HyperdriveBalance.optional()
+    hyperdrive: HyperdriveBalance.optional(),
+    /** Absent for ship types that can't carry ships. */
+    hangar: HangarBalance.optional()
 });
 export type ShipBalance = z.infer<typeof ShipBalance>;
 
@@ -145,6 +152,7 @@ export const GroundUnitBalance = z.object({
     buildTurns: z.number().int().positive(),
     attack: z.number().int().min(0),
     defence: z.number().int().min(0),
+    hp: z.number().int().positive(),
     /** Structures that must be built at the location training this unit. */
     requires: z.array(StructureType),
     requiresTech: TechId.nullable(),
@@ -170,9 +178,13 @@ export const EconomyBalance = z.object({
         hpMultiplier: PerTier(z.number().positive()),
         movementBonus: PerTier(z.number().int()),
         /** Hyperjump accuracy bonus in percentage points (see `hyperjumpAccuracy`). */
-        hyperdriveAccuracyBonus: PerTier(z.number().min(0))
+        hyperdriveAccuracyBonus: PerTier(z.number().min(0)),
+        attackBonus: PerTier(z.number().int()),
+        defenceBonus: PerTier(z.number().int())
     }),
     hyperspace: HyperspaceBalance,
+    combat: CombatBalance,
+    supplyShips: SupplyShipBalance,
     groundUnits: z.record(GroundUnitType, GroundUnitBalance),
     groundUnitTiers: z.object({
         attackBonus: PerTier(z.number().int()),

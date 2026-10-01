@@ -113,7 +113,8 @@ describe("Game economy messages", () => {
         const init = alpha.last("server:map:init")!.payload;
         expect(init.economy).toMatchObject({ shipCount: 2, shipCap: 3, techs: [] });
         expect(init.economy.locations[0].stockpile).toEqual(DEFAULTS.startingStockpile);
-        expect(init.groundBattles).toEqual([]);
+        expect(init).not.toHaveProperty("battles");
+        expect(init).not.toHaveProperty("groundBattles");
         expect(init.balance).toEqual(defaultEconomyBalance());
 
         const mark = alpha.messages.length;

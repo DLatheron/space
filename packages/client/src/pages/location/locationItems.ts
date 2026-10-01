@@ -109,9 +109,19 @@ export function itemStats(item: BuildItem, balance: EconomyBalance): string[] {
     switch (item.kind) {
         case "ship": {
             const def = balance.ships[item.shipType];
-            const stats = [`${def.maxMovementPoints} MP`, `${def.hp} HP`];
+            const { attack, defence } = shipStats(item.shipType, 1, balance);
+            const stats = [
+                `${def.maxMovementPoints} MP`,
+                `${def.hp} HP`,
+                `Attack ${attack}`,
+                `Defence ${defence}`
+            ];
             if (def.canColonise) stats.push("Can colonise");
             if (def.unitCapacity) stats.push(`Carries ${def.unitCapacity} units`);
+            if (def.hangar?.capacity) {
+                const kinds = def.hangar.carries.map((t) => SHIP_TYPE_INFO[t].name).join(", ");
+                stats.push(`Hangar for ${def.hangar.capacity} (${kinds})`);
+            }
             return stats;
         }
         case "structure": {
@@ -131,7 +141,7 @@ export function itemStats(item: BuildItem, balance: EconomyBalance): string[] {
         }
         case "groundUnit": {
             const def = groundUnitDef(item.unitType, balance);
-            return [`Attack ${def.attack}`, `Defence ${def.defence}`];
+            return [`Attack ${def.attack}`, `Defence ${def.defence}`, `${def.hp} HP`];
         }
         case "research":
         case "enhancement":
@@ -239,7 +249,9 @@ export function tierStats(
                     label: "Movement",
                     value: stats.maxMovementPoints,
                     text: `${stats.maxMovementPoints} MP`
-                }
+                },
+                { label: "Attack", value: stats.attack, text: `${stats.attack}` },
+                { label: "Defence", value: stats.defence, text: `${stats.defence}` }
             ];
         }
         case "groundUnit": {

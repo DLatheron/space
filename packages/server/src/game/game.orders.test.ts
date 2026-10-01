@@ -348,20 +348,19 @@ describe("Game hyperspace jumps", () => {
         game.destroyGame();
     });
 
-    it("re-sends a pending battle to both sides when a jumper joins it", async () => {
-        // Lands on target and hits ship-b1 (first on the hex), which alone is destroyed.
+    it("sends a jump's combat to both sides right after the jump, before the tiles", async () => {
+        // Lands on target and hits ship-b1 (first on the hex), which alone is destroyed; the
+        // jumper then fights ship-b2 with low rolls, fails to clear the hex and is displaced.
         const { game, alpha, beta } = createGame(
             [
                 { id: "ship-a", sideId: "alpha", at: { q: 5, r: 10 }, shipType: "frigate", mp: 3 },
-                { id: "ship-a2", sideId: "alpha", at: { q: 9, r: 10 }, shipType: "frigate", mp: 3 },
+                // Scouts the target so it is explored.
+                { id: "ship-a2", sideId: "alpha", at: { q: 8, r: 10 }, shipType: "frigate", mp: 3 },
                 { id: "ship-b1", sideId: "beta", at: { q: 10, r: 10 }, shipType: "frigate", mp: 3 },
                 { id: "ship-b2", sideId: "beta", at: { q: 10, r: 10 }, shipType: "frigate", mp: 3 }
             ],
             scripted([0, 0, 0, 0.99, 0.99])
         );
-        const fight = game.battles.moveShip("alpha", "ship-a2", { q: 10, r: 10 });
-        const battleId = fight.ok ? fight.battle!.battleId : "";
-        expect(battleId).not.toBe("");
         await send(
             game,
             alpha,
@@ -373,31 +372,40 @@ describe("Game hyperspace jumps", () => {
         );
 
         const marks = await endTurn(game, alpha, beta);
-        for (const [connection, since, youAreAttacker] of [
-            [alpha, marks.alpha, true],
-            [beta, marks.beta, false]
+        const ship = game.entities.getOfKind("ship-a", "ship")!;
+        for (const [connection, since] of [
+            [alpha, marks.alpha],
+            [beta, marks.beta]
         ] as const) {
-            expect(connection.all("server:ship:jumped", since)[0]?.payload.destroyedIds).toEqual([
-                "ship-b1"
+            const jumped = connection.all("server:ship:jumped", since);
+            expect(jumped.map((m) => m.payload)).toEqual([
+                expect.objectContaining({
+                    shipId: "ship-a",
+                    to: { q: 10, r: 10 },
+                    destroyedIds: ["ship-b1"],
+                    displacedTo: { q: ship.q, r: ship.r }
+                })
             ]);
-            expect(connection.all("server:battle:start", since).map((m) => m.payload)).toEqual([
-                {
-                    battleId,
-                    q: 10,
-                    r: 10,
+            expect(connection.all("server:combat", since).map((m) => m.payload)).toEqual([
+                expect.objectContaining({
+                    kind: "space",
+                    cause: "hyperjump",
+                    hex: { q: 10, r: 10 },
+                    from: { q: 5, r: 10 },
                     attackerSideId: "alpha",
-                    defenderSideId: "beta",
-                    attackerShipIds: ["ship-a2", "ship-a"],
-                    defenderShipIds: ["ship-b2"],
-                    youAreAttacker
-                }
+                    defenderSideIds: ["beta"],
+                    outcome: "inconclusive",
+                    attackerMovedIn: false,
+                    displacedTo: { q: ship.q, r: ship.r }
+                })
             ]);
             const types = connection.types(since);
-            expect(types.indexOf("server:battle:start")).toBeGreaterThan(
-                types.indexOf("server:tiles:update")
-            );
-            expect(connection.all("server:battle:resolved", since)).toEqual([]);
+            const combatAt = types.indexOf("server:combat");
+            expect(combatAt).toBeGreaterThan(types.indexOf("server:ship:jumped"));
+            expect(types.indexOf("server:tiles:update", combatAt)).toBeGreaterThan(combatAt);
         }
+        expect(ship.hp).toBe(10);
+        expect(game.entities.getOfKind("ship-b2", "ship")!.hp).toBe(10);
         game.destroyGame();
     });
 

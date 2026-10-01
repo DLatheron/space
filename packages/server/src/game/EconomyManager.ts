@@ -390,6 +390,10 @@ export class EconomyManager {
         if (ship.sideId !== sideId) return { ok: false, error: `Ship ${shipId} is not yours` };
         const def = shipDef(ship.shipType, this._balance);
         if (!def.canColonise) return { ok: false, error: `${def.name} cannot colonise` };
+        if (ship.carriedBy) return { ok: false, error: `Ship ${shipId} is aboard a carrier` };
+        if ((ship.carriedShipIds ?? []).length > 0) {
+            return { ok: false, error: "Launch the ships aboard first" };
+        }
         if (ship.q !== location.q || ship.r !== location.r) {
             return { ok: false, error: "Ship is not at the location" };
         }
@@ -531,7 +535,7 @@ export class EconomyManager {
     }
 
     /**
-     * Bookkeeping for ships about to be removed after a lost battle: upgrades are
+     * Bookkeeping for ships about to be removed (combat, hyperspace): upgrades are
      * cancelled, crews are released to go home and units aboard transports are destroyed
      * (their population is lost). Returns the destroyed unit ids.
      */
@@ -554,7 +558,7 @@ export class EconomyManager {
         return destroyedUnitIds;
     }
 
-    /** Ground units destroyed in a ground battle; their population goes home. */
+    /** Ground units destroyed in ground combat; their population goes home. */
     onUnitsDestroyed(unitIds: EntityId[], from: AxialCoord): void {
         for (const unitId of unitIds) {
             this._cancelEnhancementsFor("groundUnit", unitId);
@@ -574,9 +578,14 @@ export class EconomyManager {
      * was delivered stays in that location's stockpile. Returns whether anything was cancelled.
      */
     onShipMoved(ship: EntityOf<"ship">): boolean {
-        return this._cancelEnhancementsFor("ship", ship.id, (location) => {
+        let cancelled = this._cancelEnhancementsFor("ship", ship.id, (location) => {
             return location.q !== ship.q || location.r !== ship.r;
         });
+        for (const carriedId of ship.carriedShipIds ?? []) {
+            const carried = this._entities.getOfKind(carriedId, "ship");
+            if (carried && this.onShipMoved(carried)) cancelled = true;
+        }
+        return cancelled;
     }
 
     /** A unit leaving its garrison (e.g. boarding a transport) cancels its upgrade. */

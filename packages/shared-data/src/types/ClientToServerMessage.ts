@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { BuildItem, BuildPriority, QueueDirection } from "./Economy.js";
-import { AxialCoord, BattleId, EntityId, OrderId, SideId } from "./PrimitiveTypes.js";
+import { AxialCoord, EntityId, OrderId } from "./PrimitiveTypes.js";
 
 export const ClientToServerMessage = z.discriminatedUnion("type", [
     z.object({
@@ -37,9 +37,17 @@ export const ClientToServerMessage = z.discriminatedUnion("type", [
         payload: z.object({})
     }),
     z.object({
-        /** Only accepted from the attacker's side. */
-        type: z.literal("client:battle:resolve"),
-        payload: z.object({ battleId: BattleId, winnerSideId: SideId })
+        /**
+         * Board own ships on the carrier's hex into its hangar (see `ShipBalance.hangar`). Each
+         * loaded ship spends `HANGAR_LOAD_COST` movement and loses its move order and pending jump.
+         */
+        type: z.literal("client:ship:load"),
+        payload: z.object({ carrierId: EntityId, shipIds: z.array(EntityId).min(1) })
+    }),
+    z.object({
+        /** Launch carried ships onto the carrier's hex; they keep their movement points. */
+        type: z.literal("client:ship:unload"),
+        payload: z.object({ carrierId: EntityId, shipIds: z.array(EntityId).min(1) })
     }),
     z.object({
         /**
@@ -83,14 +91,12 @@ export const ClientToServerMessage = z.discriminatedUnion("type", [
         })
     }),
     z.object({
-        /** Land every unit carried by the transports on an enemy location on their hex. */
+        /**
+         * Land every unit carried by the transports on an enemy location on their hex. Ground
+         * combat resolves at once (see `server:combat`).
+         */
         type: z.literal("client:invade"),
         payload: z.object({ locationId: EntityId, shipIds: z.array(EntityId).min(1) })
-    }),
-    z.object({
-        /** Only accepted from the invading side. */
-        type: z.literal("client:ground:resolve"),
-        payload: z.object({ battleId: BattleId, winnerSideId: SideId })
     })
 ]);
 export type ClientToServerMessage = z.infer<typeof ClientToServerMessage>;

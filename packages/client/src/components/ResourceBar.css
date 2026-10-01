@@ -7,7 +7,7 @@
     display: flex;
     justify-content: center;
     pointer-events: none;
-    /* Above the planet page (3) so the stockpile stays visible while building; below battle dialogs. */
+    /* Above the planet page (3) so the stockpile stays visible while building. */
     z-index: 4;
 }
 

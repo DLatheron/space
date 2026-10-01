@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { EconomyBalance, GroundUnitBalance } from "./Economy.js";
-import { BattleId, EnhancementTier, EntityId, SideId } from "./PrimitiveTypes.js";
+import { EnhancementTier, EntityId, SideId } from "./PrimitiveTypes.js";
 
 export const GroundUnitType = z.enum(["infantry", "armour"]);
 export type GroundUnitType = z.infer<typeof GroundUnitType>;
@@ -25,17 +25,18 @@ export function groundUnitDef(
     return { ...GROUND_UNIT_TYPE_INFO[unitType], ...balance.groundUnits[unitType] };
 }
 
-/** Tier-boosted attack and defence (see `EconomyBalance.groundUnitTiers`). */
+/** Tier-boosted attack and defence (see `EconomyBalance.groundUnitTiers`) and full hp. */
 export function groundUnitStats(
     unitType: GroundUnitType,
     tier: number,
     balance: EconomyBalance
-): { attack: number; defence: number } {
+): { attack: number; defence: number; hp: number } {
     const def = balance.groundUnits[unitType];
     const index = Math.min(Math.max(tier, 1), 3) - 1;
     return {
         attack: def.attack + balance.groundUnitTiers.attackBonus[index],
-        defence: def.defence + balance.groundUnitTiers.defenceBonus[index]
+        defence: def.defence + balance.groundUnitTiers.defenceBonus[index],
+        hp: def.hp
     };
 }
 
@@ -55,24 +56,12 @@ export const GroundUnit = z.object({
     tier: EnhancementTier,
     /** Location the borrowed population returns to. */
     populationFrom: EntityId,
-    location: GroundUnitLocation
+    location: GroundUnitLocation,
+    /** Current hp; absent means full (see `groundUnitStats`). Damage persists between combats. */
+    hp: z.number().min(0).optional()
 });
 export type GroundUnit = z.infer<typeof GroundUnit>;
 
-/** What an opponent may see of a unit, e.g. in a ground battle. */
+/** What an opponent may see of a unit, e.g. in a ground combat. */
 export const GroundUnitSummary = GroundUnit.pick({ id: true, unitType: true, tier: true });
 export type GroundUnitSummary = z.infer<typeof GroundUnitSummary>;
-
-/** A pending ground battle: units landed from transports on an enemy location. */
-export const GroundBattleInfo = z.object({
-    battleId: BattleId,
-    locationId: EntityId,
-    q: z.number().int(),
-    r: z.number().int(),
-    /** Invading side; only its clients may resolve the battle. */
-    attackerSideId: SideId,
-    defenderSideId: SideId,
-    attackerUnits: z.array(GroundUnitSummary),
-    defenderUnits: z.array(GroundUnitSummary)
-});
-export type GroundBattleInfo = z.infer<typeof GroundBattleInfo>;

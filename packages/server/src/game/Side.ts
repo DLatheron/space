@@ -79,10 +79,7 @@ export class Side {
             const key = tileKey(tile);
             this._explored.add(key);
             if (!this._visible.has(key)) {
-                this._memory.set(
-                    key,
-                    entities.entitiesAt(tile.q, tile.r).map((e) => this.summarize(e))
-                );
+                this._memory.set(key, this._viewAt(entities, tile.q, tile.r));
             }
         });
     }
@@ -134,7 +131,7 @@ export class Side {
             this._visible.add(key);
             this._explored.add(key);
             const { q, r } = parseAxialKey(key);
-            const summaries = entities.entitiesAt(q, r).map((e) => this.summarize(e));
+            const summaries = this._viewAt(entities, q, r);
             this._memory.set(key, summaries);
             for (const summary of summaries) knownPositions.set(summary.id, key);
         }
@@ -186,7 +183,7 @@ export class Side {
                 q,
                 r,
                 fog: "visible",
-                entities: entities.entitiesAt(q, r).map((e) => this.summarize(e))
+                entities: this._viewAt(entities, q, r)
             };
         }
         return { q, r, fog: "explored", entities: this._memory.get(key) ?? [] };
@@ -265,16 +262,38 @@ export class Side {
     }
 
     /**
+     * A hex's contents as this side sees them live: the tile's stack plus this side's own ships
+     * stowed aboard carriers there (listed after their carrier, with `carriedBy` set). Other
+     * sides' carried ships are never shown.
+     */
+    private _viewAt(entities: EntityManager, q: number, r: number): EntitySummary[] {
+        const result: EntitySummary[] = [];
+        const add = (entity: Entity) => {
+            result.push(this.summarize(entity));
+            if (entity.kind !== "ship" || entity.sideId !== this.id) return;
+            for (const id of entity.carriedShipIds ?? []) {
+                const carried = entities.getOfKind(id, "ship");
+                if (carried) add(carried);
+            }
+        };
+        for (const entity of entities.entitiesAt(q, r)) add(entity);
+        return result;
+    }
+
+    /**
      * Wire snapshot as this side may see it: other sides' supply routes and reservations, ship
-     * move orders, jump targets and hyperdrive cooldowns are hidden (charging stays visible).
+     * move orders, jump targets, hyperdrive cooldowns and carried ship ids are hidden (charging
+     * and the carried ship count stay visible).
      */
     summarize(entity: Entity): EntitySummary {
         const summary = entityToSummary(entity);
         if (summary.kind === "ship") {
+            if (summary.carriedShipIds) summary.carriedShipCount = summary.carriedShipIds.length;
             if (summary.sideId === this.id) return summary;
             delete summary.moveOrder;
             delete summary.hyperjump;
             delete summary.hyperdriveCooldown;
+            delete summary.carriedShipIds;
             return summary;
         }
         if (summary.kind !== "supply_ship" || summary.sideId === this.id) return summary;

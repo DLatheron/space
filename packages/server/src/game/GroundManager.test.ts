@@ -1,6 +1,6 @@
 import { zeroResources, type Resources, type ShipType } from "@space/shared-data";
 import { defaultEconomyBalance } from "../config/config.schema.js";
-import { BattleManager } from "./Battle.js";
+import { destroyVessels } from "./destroyShips.js";
 import { EconomyManager } from "./EconomyManager.js";
 import { EntityManager } from "./EntityManager.js";
 import { GroundManager } from "./GroundManager.js";
@@ -33,7 +33,7 @@ function makeShip(
     });
 }
 
-function groundWorld() {
+function groundWorld(rng: () => number = () => 0.5) {
     const map = createEmptyMap({ width: 20, height: 20, hexSize: 50, seed: 1 });
     const entities = new EntityManager(map);
     const planet = (id: string, sideId: string, q: number, r: number) =>
@@ -50,9 +50,8 @@ function groundWorld() {
     const target = planet("target-b", "beta", 10, 5);
     const betaHome = planet("home-b", "beta", 8, 14);
     const economy = new EconomyManager(entities, ["alpha", "beta"]);
-    const battles = new BattleManager(entities, economy);
-    const ground = new GroundManager(entities, economy, battles);
-    const supply = new SupplyManager(entities, economy, { battles });
+    const ground = new GroundManager(entities, economy, { rng });
+    const supply = new SupplyManager(entities, economy);
     const transport = makeShip(entities, "transport-a", "alpha", home.q, home.r);
     const infantry = (sideId: string, locationId: string) =>
         economy.units.create(sideId, "infantry", locationId, locationId);
@@ -61,7 +60,6 @@ function groundWorld() {
     return {
         entities,
         economy,
-        battles,
         ground,
         supply,
         home,
@@ -171,23 +169,13 @@ describe("GroundManager transports", () => {
         expect(unit.tier).toBe(1);
     });
 
-    it("destroys the units aboard a transport lost in battle, returning only its crew", () => {
-        const { entities, economy, battles, ground, home, transport, infantry, unitsAt } =
-            groundWorld();
+    it("destroys the units aboard a transport that is destroyed, returning only its crew", () => {
+        const { entities, economy, ground, home, transport, infantry, unitsAt } = groundWorld();
         const ids = [infantry("alpha", home.id).id, infantry("alpha", home.id).id];
         ground.load("alpha", transport.id, ids);
         entities.move(transport.id, { q: 7, r: 5 });
-        const raider = makeShip(entities, "raider", "beta", 8, 5, "frigate");
-        const moved = battles.moveShip("beta", raider.id, { q: 7, r: 5 });
-        expect(moved.ok && moved.battle?.defenderShipIds).toEqual([transport.id]);
-        expect(ground.load("alpha", transport.id, [])).toEqual({
-            ok: false,
-            error: `Ship ${transport.id} is locked in battle`
-        });
 
-        const resolved = battles.resolve(moved.ok ? moved.battle!.battleId : "", "beta", "beta");
-        expect(resolved).toMatchObject({
-            ok: true,
+        expect(destroyVessels(entities, economy, [transport])).toMatchObject({
             destroyedShipIds: [transport.id],
             destroyedUnitIds: ids
         });
@@ -243,7 +231,21 @@ describe("GroundManager invasion", () => {
         expect(result).toMatchObject({
             ok: true,
             defenderSideId: "beta",
-            battle: null,
+            combat: {
+                kind: "ground",
+                cause: "invasion",
+                hex: { q: target.q, r: target.r },
+                from: { q: target.q, r: target.r },
+                attackerSideId: "alpha",
+                defenderSideIds: ["beta"],
+                destroyedIds: [],
+                destroyedUnitIds: [],
+                outcome: "attacker_won",
+                attackerMovedIn: true,
+                rounds: 0,
+                locationId: target.id,
+                captured: true
+            },
             landedUnitIds: ids
         });
         expect(target.sideId).toBe("alpha");
@@ -294,63 +296,53 @@ describe("GroundManager invasion", () => {
         });
     });
 
-    it("starts a ground battle against a garrison that the attacker wins and captures", () => {
+    it("fights a garrison at once; wiping it out captures the location", () => {
         const world = groundWorld();
-        const { entities, economy, ground, supply, target, betaHome, transport, infantry } = world;
+        const { economy, ground, supply, target, betaHome, transport, infantry } = world;
         const defender = infantry("beta", target.id);
         const ids = embark(world, 2);
 
+        // Infantry deal round(2 * 10 / 13) = 2: the defender falls in round 3, having hit the
+        // first invader three times.
         const result = ground.invade("alpha", target.id, [transport.id]);
-        expect(result.ok && result.battle).toEqual({
-            battleId: "ground-1",
-            locationId: target.id,
-            q: target.q,
-            r: target.r,
-            attackerSideId: "alpha",
-            defenderSideId: "beta",
-            attackerUnits: ids.map((id) => ({ id, unitType: "infantry", tier: 1 })),
-            defenderUnits: [{ id: defender.id, unitType: "infantry", tier: 1 }]
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.combat).toMatchObject({
+            kind: "ground",
+            outcome: "attacker_won",
+            attackerMovedIn: true,
+            captured: true,
+            rounds: 3,
+            destroyedUnitIds: [defender.id]
         });
-        // Landed but not yet part of the garrison; still beta's location.
-        expect(target.sideId).toBe("beta");
-        expect(target.garrison).toEqual([defender.id]);
-        expect(economy.units.get(ids[0])?.location).toEqual({
-            kind: "garrison",
-            locationId: target.id
-        });
-        expect(transport.carriedUnitIds).toEqual([]);
-        expect(ground.involving("beta")).toHaveLength(1);
-
-        // Locked while pending.
-        expect(ground.invade("alpha", target.id, [transport.id]).ok).toBe(false);
-        const relief = makeShip(entities, "relief", "beta", target.q, target.r);
-        expect(ground.load("beta", relief.id, [defender.id])).toEqual({
-            ok: false,
-            error: "A ground battle is in progress there"
-        });
-        const reserve = infantry("beta", betaHome.id);
-        economy.units.relocate(reserve.id, { kind: "transport", shipId: relief.id });
-        expect(ground.unload("beta", relief.id, target.id, [reserve.id])).toEqual({
-            ok: false,
-            error: "A ground battle is in progress there"
-        });
-
-        expect(ground.resolve("ground-1", "beta", "beta")).toEqual({
-            ok: false,
-            error: "Only the invading side can resolve this battle"
-        });
-        expect(ground.resolve("ground-1", "alpha", "gamma").ok).toBe(false);
-        const resolved = ground.resolve("ground-1", "alpha", "alpha");
-        expect(resolved).toMatchObject({
-            ok: true,
-            loserSideId: "beta",
-            destroyedUnitIds: [defender.id],
-            captured: true
-        });
+        expect(result.combat.participants).toEqual([
+            expect.objectContaining({
+                id: ids[0],
+                kind: "ground_unit",
+                role: "attacker",
+                maxHp: 10,
+                hpBefore: 10,
+                hpAfter: 4,
+                damageDealt: 6,
+                damageTaken: 6
+            }),
+            expect.objectContaining({ id: ids[1], role: "attacker", hpAfter: 10, damageDealt: 4 }),
+            expect.objectContaining({
+                id: defender.id,
+                role: "defender",
+                unitType: "infantry",
+                tier: 1,
+                hpAfter: 0,
+                destroyed: true
+            })
+        ]);
+        expect(result.landedUnitIds).toEqual(ids);
         expect(target.sideId).toBe("alpha");
         expect(target.garrison).toEqual(ids);
+        expect(transport.carriedUnitIds).toEqual([]);
+        expect(economy.units.get(ids[0])?.hp).toBe(4);
+        expect(economy.units.get(ids[1])?.hp).toBeUndefined();
         expect(economy.units.get(defender.id)).toBeUndefined();
-        expect(ground.pending()).toEqual([]);
 
         // The defender's home was lost, so its population goes to beta's nearest location.
         const before = economy.stockpile(betaHome.id).population;
@@ -360,28 +352,59 @@ describe("GroundManager invasion", () => {
         );
     });
 
-    it("destroys the invaders when the defender is named winner", () => {
+    it("destroys invaders that are wiped out, leaving the garrison damaged", () => {
         const world = groundWorld();
-        const { economy, ground, supply, home, target, transport, infantry } = world;
-        const defender = infantry("beta", target.id);
-        const ids = embark(world, 2);
-        ground.invade("alpha", target.id, [transport.id]);
+        const { economy, ground, supply, home, target, transport } = world;
+        const defender = economy.units.create("beta", "armour", target.id, target.id);
+        const ids = embark(world, 1);
 
-        const resolved = ground.resolve("ground-1", "alpha", "beta");
-        expect(resolved).toMatchObject({
-            ok: true,
-            loserSideId: "alpha",
-            destroyedUnitIds: ids,
-            captured: false
+        // Armour deals round(5 * 10 / 13) = 4 and takes round(2 * 10 / 14) = 1 a round.
+        const result = ground.invade("alpha", target.id, [transport.id]);
+        expect(result.ok && result.combat).toMatchObject({
+            outcome: "attacker_destroyed",
+            attackerMovedIn: false,
+            captured: false,
+            rounds: 3,
+            destroyedUnitIds: ids
         });
         expect(target.sideId).toBe("beta");
         expect(target.garrison).toEqual([defender.id]);
+        expect(defender.hp).toBe(13);
+        expect(transport.carriedUnitIds).toEqual([]);
         expect(economy.stateFor("alpha").groundUnits).toEqual([]);
 
         const before = economy.stockpile(home.id).population;
         supply.returnPopulation();
         expect(economy.stockpile(home.id).population).toBe(
-            before + 2 * DEFAULTS.groundUnits.infantry.cost.population
+            before + DEFAULTS.groundUnits.infantry.cost.population
         );
+    });
+
+    it("re-embarks undecided invaders after the last round, keeping their damage", () => {
+        // Low rolls: infantry deal round(2 * 0.75 * 10 / 13) = 1 a round, so six rounds decide nothing.
+        const world = groundWorld(() => 0);
+        const { economy, ground, target, transport, infantry } = world;
+        const defender = infantry("beta", target.id);
+        const ids = embark(world, 1);
+
+        const first = ground.invade("alpha", target.id, [transport.id]);
+        expect(first.ok && first.combat).toMatchObject({
+            outcome: "inconclusive",
+            attackerMovedIn: false,
+            captured: false,
+            rounds: DEFAULTS.combat.groundMaxRounds,
+            destroyedUnitIds: []
+        });
+        expect(first.ok && first.landedUnitIds).toEqual([]);
+        expect(target.sideId).toBe("beta");
+        expect(transport.carriedUnitIds).toEqual(ids);
+        expect(economy.units.get(ids[0])).toMatchObject({
+            hp: 4,
+            location: { kind: "transport", shipId: transport.id }
+        });
+        expect(defender.hp).toBe(4);
+
+        const second = ground.invade("alpha", target.id, [transport.id]);
+        expect(second.ok && second.combat.participants.map((p) => p.hpBefore)).toEqual([4, 4]);
     });
 });
