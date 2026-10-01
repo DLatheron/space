@@ -71,6 +71,26 @@
     font-weight: 600;
 }
 
+.info-pane__orders {
+    display: grid;
+    gap: 0.45rem;
+}
+
+.info-pane__cancel-order {
+    border-color: #ff6b8a;
+    color: #ff6b8a;
+}
+
+.info-pane__hyperdrive {
+    border-color: #7fe8ff;
+    color: #7fe8ff;
+    font-weight: 600;
+}
+
+.info-pane__orders .info-pane__hint {
+    margin: 0;
+}
+
 .info-pane__stack-item {
     display: flex;
     width: 100%;

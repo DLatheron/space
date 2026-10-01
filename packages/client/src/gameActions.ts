@@ -1,4 +1,5 @@
 import type {
+    AxialCoord,
     BattleId,
     BuildItem,
     BuildPriority,
@@ -18,6 +19,9 @@ export type GameActions = {
     load: (shipId: EntityId, unitIds: EntityId[]) => void;
     unload: (shipId: EntityId, locationId: EntityId, unitIds: EntityId[]) => void;
     invade: (locationId: EntityId, shipIds: EntityId[]) => void;
+    cancelMoveOrder: (shipId: EntityId) => void;
+    hyperjump: (shipId: EntityId, target: AxialCoord) => void;
+    cancelHyperjump: (shipId: EntityId) => void;
     resolveBattle: (battleId: BattleId, winnerSideId: SideId) => void;
     resolveGroundBattle: (battleId: BattleId, winnerSideId: SideId) => void;
 };

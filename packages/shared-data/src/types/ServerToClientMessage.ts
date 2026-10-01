@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { EconomyBalance, EconomyState } from "./Economy.js";
 import { GroundBattleInfo } from "./GroundUnitTypes.js";
+import { HyperjumpOutcome } from "./Hyperspace.js";
 import {
     AxialCoord,
     BattleId,
@@ -81,6 +82,25 @@ export const ServerToClientMessage = z.discriminatedUnion("type", [
         })
     }),
     z.object({
+        /**
+         * A hyperspace jump resolved at end of turn; sent before the tiles update to the owner,
+         * sides that could see `from` or `to`, and sides that lost ships.
+         */
+        type: z.literal("server:ship:jumped"),
+        payload: z.object({
+            shipId: EntityId,
+            from: AxialCoord,
+            /** Landing hex after scatter. */
+            to: AxialCoord,
+            /** `damaged`: survived a hazard with hp lost; `destroyed`: the jumper was lost. */
+            outcome: HyperjumpOutcome,
+            /** Ship it collided with on landing, if any. */
+            collidedWithId: EntityId.optional(),
+            /** Every ship destroyed by this jump (the jumper and/or the ship hit). */
+            destroyedIds: z.array(EntityId)
+        })
+    }),
+    z.object({
         type: z.literal("server:tiles:update"),
         payload: z.object({
             tiles: z.array(TileView),
@@ -90,7 +110,10 @@ export const ServerToClientMessage = z.discriminatedUnion("type", [
         })
     }),
     z.object({
-        /** Sent to both combatant sides. */
+        /**
+         * Sent to both combatant sides. Sent again with the same `battleId` when the ships
+         * involved change (a hyperspace arrival joins, or a collision destroys some).
+         */
         type: z.literal("server:battle:start"),
         payload: BattleInfo.extend({ youAreAttacker: z.boolean() })
     }),

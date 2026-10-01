@@ -12,8 +12,25 @@ export const ClientToServerMessage = z.discriminatedUnion("type", [
         payload: z.object({ name: z.string().nonempty().max(64) })
     }),
     z.object({
+        /**
+         * Move towards any explored hex: the ship goes as far as its movement allows now and
+         * the rest becomes a move order (`ShipEntity.moveOrder`) run at each end of turn.
+         */
         type: z.literal("client:ship:move"),
         payload: z.object({ shipId: EntityId, to: AxialCoord })
+    }),
+    z.object({
+        type: z.literal("client:ship:order:cancel"),
+        payload: z.object({ shipId: EntityId })
+    }),
+    z.object({
+        /** Engage the hyperdrive to jump to an explored hex at end of turn; clears any move order. */
+        type: z.literal("client:ship:hyperjump"),
+        payload: z.object({ shipId: EntityId, target: AxialCoord })
+    }),
+    z.object({
+        type: z.literal("client:ship:hyperjump:cancel"),
+        payload: z.object({ shipId: EntityId })
     }),
     z.object({
         type: z.literal("client:turn:end"),

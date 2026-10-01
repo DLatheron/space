@@ -79,6 +79,8 @@ function createGame() {
 }
 
 async function moveShip(game: Game, from: Connection, shipId: string, to: AxialCoord) {
+    // Ships are placed without a visibility refresh; moves need the destination explored.
+    game.side(from.client.sideId!)!.recomputeVisibility(game.entities, mockConfig.visionRange);
     const mark = from.messages.length;
     game.queueMessage({ type: "client:ship:move", payload: { shipId, to } }, from.client);
     await vi.waitFor(() => expect(from.all("server:tiles:update", mark).length).toBeGreaterThan(0));

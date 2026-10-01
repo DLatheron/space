@@ -1,6 +1,8 @@
 import {
     GROUND_UNIT_TYPE_INFO,
     isFullyFunded,
+    MAX_SCATTER_RING,
+    MOVE_COST_PER_HEX,
     resourceUnits,
     SHIP_TYPE_INFO,
     slotsForEntity,
@@ -16,7 +18,8 @@ import {
     isLocationEntity,
     isTransport,
     sideColour,
-    type MapFocus
+    type MapFocus,
+    type ShipEntity
 } from "../world/HexWorld.js";
 import { formatNumber, formatResources } from "./format.js";
 import { Thumbnail } from "./Thumbnail.js";
@@ -38,7 +41,7 @@ const KIND_LABELS: Record<EntityKind, string> = {
 type InfoPaneProps = {
     world: HexWorld;
     onEndTurn: () => void;
-    actions: Pick<GameActions, "colonise" | "invade">;
+    actions: Pick<GameActions, "colonise" | "invade" | "cancelMoveOrder" | "cancelHyperjump">;
     onOpenLocation: (locationId: string) => void;
 };
 
@@ -114,7 +117,12 @@ export function InfoPane({ world, onEndTurn, actions, onOpenLocation }: InfoPane
                         </span>
                     )}
                 </header>
-                <FocusBody world={world} focus={focus} onOpenLocation={onOpenLocation} />
+                <FocusBody
+                    world={world}
+                    focus={focus}
+                    actions={actions}
+                    onOpenLocation={onOpenLocation}
+                />
             </section>
         </aside>
     );
@@ -141,10 +149,12 @@ function entityName(world: HexWorld, id: string): string {
 function FocusBody({
     world,
     focus,
+    actions,
     onOpenLocation
 }: {
     world: HexWorld;
     focus: MapFocus;
+    actions: InfoPaneProps["actions"];
     onOpenLocation: (locationId: string) => void;
 }) {
     if (focus.mode === "none") {
@@ -181,6 +191,10 @@ function FocusBody({
                 >
                     Open {entityTitle(entity)}
                 </button>
+            )}
+
+            {entity?.kind === "ship" && entity.id === world.selectedShipId && (
+                <ShipOrders world={world} ship={entity} actions={actions} />
             )}
 
             {entity ? (
@@ -224,6 +238,127 @@ function FocusBody({
                         <p className="info-pane__hint">Click the hex again to cycle.</p>
                     )}
                 </div>
+            )}
+        </div>
+    );
+}
+
+function plural(count: number, word: string): string {
+    return `${count} ${word}${count === 1 ? "" : "s"}`;
+}
+
+/** Move order and hyperdrive status and controls for one of our selected ships. */
+function ShipOrders({
+    world,
+    ship,
+    actions
+}: {
+    world: HexWorld;
+    ship: ShipEntity;
+    actions: InfoPaneProps["actions"];
+}) {
+    const order = ship.moveOrder;
+    const hyperdrive = world.hyperdriveOf(ship);
+    if (!order && !hyperdrive) return null;
+
+    const accuracy = world.jumpAccuracy(ship);
+    const jump = ship.hyperjump;
+    const targeting = world.hyperjumpTargeting?.id === ship.id;
+    const cooldown = ship.hyperdriveCooldown ?? 0;
+    const blocked =
+        cooldown > 0
+            ? `Hyperdrive cooling down for ${plural(cooldown, "more turn")}`
+            : world.shipInBattle(ship.id)
+              ? "Locked in battle"
+              : undefined;
+    const routeLength = order?.route?.length ?? 0;
+    const perTurn = Math.max(1, Math.floor(ship.maxMovementPoints / MOVE_COST_PER_HEX));
+    const percent = (value: number) => `${Math.round(value)}%`;
+
+    return (
+        <div className="info-pane__orders">
+            <dl className="info-pane__facts">
+                {order && (
+                    <div>
+                        <dt>Move order</dt>
+                        <dd>
+                            To {order.destination.q}, {order.destination.r}
+                            {routeLength > 0 && (
+                                <span className="info-pane__muted-inline">
+                                    {" "}
+                                    · {plural(routeLength, "hex")} · ~
+                                    {plural(Math.ceil(routeLength / perTurn), "turn")}
+                                </span>
+                            )}
+                        </dd>
+                    </div>
+                )}
+                {hyperdrive && (
+                    <div>
+                        <dt>Hyperdrive</dt>
+                        <dd>
+                            {jump
+                                ? `Charging · jumps to ${jump.target.q}, ${jump.target.r} at end of turn`
+                                : cooldown > 0
+                                  ? `Cooling down · ${plural(cooldown, "turn")}`
+                                  : `Ready · ${plural(hyperdrive.cooldownTurns, "turn")} cooldown`}
+                        </dd>
+                    </div>
+                )}
+                {accuracy && (
+                    <div>
+                        <dt>Accuracy</dt>
+                        <dd>
+                            {percent(accuracy.onTarget)} on target · {percent(accuracy.oneOff)} 1
+                            hex off · {percent(accuracy.twoOff)} 2 hexes off
+                        </dd>
+                    </div>
+                )}
+            </dl>
+            {order && (
+                <button
+                    type="button"
+                    className="info-pane__cancel-order"
+                    onClick={() => actions.cancelMoveOrder(ship.id)}
+                >
+                    Cancel move order
+                </button>
+            )}
+            {hyperdrive &&
+                (targeting ? (
+                    <button
+                        type="button"
+                        className="info-pane__hyperdrive"
+                        onClick={() => world.cancelHyperjumpTargeting()}
+                    >
+                        Cancel targeting
+                    </button>
+                ) : (
+                    <button
+                        type="button"
+                        className="info-pane__hyperdrive"
+                        disabled={!!blocked}
+                        title={blocked ?? "Pick an explored hex to jump to at end of turn"}
+                        onClick={() => world.startHyperjumpTargeting(ship.id)}
+                    >
+                        {jump ? "Change jump target" : "Engage hyperdrive"}
+                    </button>
+                ))}
+            {jump && (
+                <button
+                    type="button"
+                    className="info-pane__cancel-order"
+                    onClick={() => actions.cancelHyperjump(ship.id)}
+                >
+                    Cancel jump
+                </button>
+            )}
+            {hyperdrive && blocked && <p className="info-pane__hint">{blocked}</p>}
+            {targeting && (
+                <p className="info-pane__hint">
+                    Click an explored hex on the map. The jump may scatter up to{" "}
+                    {plural(MAX_SCATTER_RING, "hex")} from the target.
+                </p>
             )}
         </div>
     );
@@ -303,6 +438,12 @@ function EntityDetails({ world, entity }: { world: HexWorld; entity: EntitySumma
                             <dt>Tier</dt>
                             <dd>{entity.tier ?? 1}</dd>
                         </div>
+                        {entity.hyperdriveCharging && entity.sideId !== world.sideId && (
+                            <div>
+                                <dt>Hyperdrive</dt>
+                                <dd>Charging · jumps at end of turn</dd>
+                            </div>
+                        )}
                         {carried && (
                             <div>
                                 <dt>Aboard</dt>

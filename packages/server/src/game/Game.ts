@@ -21,11 +21,17 @@ import { ClientManager } from "./ClientManager.js";
 import { gameManager } from "./GameManager.js";
 import { axialKey } from "@space/maths";
 import { config } from "../config/config.schema.js";
-import { BattleManager } from "./Battle.js";
+import { BattleManager, type EndedBattle } from "./Battle.js";
 import { EconomyManager } from "./EconomyManager.js";
 import type { EntityManager } from "./EntityManager.js";
 import { GroundManager } from "./GroundManager.js";
+import { HyperspaceManager, type HyperjumpEvent } from "./HyperspaceManager.js";
 import { generateSpaceMap, type SpaceMap, type StarSystem } from "./map/generateSpaceMap.js";
+import {
+    MoveOrderManager,
+    type MoveOrderKnowledge,
+    type ShipMoveEvent
+} from "./MoveOrderManager.js";
 import { ResearchManager } from "./ResearchManager.js";
 import { Side, type VisibilityDiff } from "./Side.js";
 import { SupplyManager, type SupplyKnowledge } from "./SupplyManager.js";
@@ -45,6 +51,11 @@ function randomSegment(length: number): string {
 function generateGameId(): GameId {
     return `${randomSegment(4)}-${randomSegment(4)}`;
 }
+
+export type GameOptions = {
+    /** Random numbers in [0, 1) for hyperspace jumps; defaults to `Math.random`. */
+    rng?: () => number;
+};
 
 interface ClientMessageContext {
     game: Game;
@@ -75,10 +86,12 @@ export class Game {
     private readonly _economy: EconomyManager;
     private readonly _supply: SupplyManager;
     private readonly _ground: GroundManager;
+    private readonly _moveOrders: MoveOrderManager;
+    private readonly _hyperspace: HyperspaceManager;
     private _isDestroying = false;
     private _nextSideIndex = 0;
 
-    constructor(ownerId: ClientId) {
+    constructor(ownerId: ClientId, options: GameOptions = {}) {
         const gameId = generateGameId();
 
         this.logger = new Logger(`Game-${gameId}`, config.logLevels?.game);
@@ -119,11 +132,24 @@ export class Game {
             knowledge: (sideId) => this._supplyKnowledge(sideId)
         });
         this._ground = new GroundManager(this._entities, this._economy, this._battles);
+        this._moveOrders = new MoveOrderManager(this._entities, {
+            battles: this._battles,
+            economy: this._economy,
+            knowledge: (sideId) => this._moveKnowledge(sideId)
+        });
+        this._hyperspace = new HyperspaceManager(this._entities, {
+            battles: this._battles,
+            economy: this._economy,
+            rng: options.rng,
+            isExplored: (sideId, hex) =>
+                this._sides.get(sideId)?.explored.has(axialKey(hex.q, hex.r)) ?? false
+        });
         this._turns = new TurnManager(
             this._sides.keys(),
             this._entities,
             this._economy,
-            this._supply
+            this._supply,
+            { hyperspace: this._hyperspace, moveOrders: this._moveOrders }
         );
 
         for (const side of this._sides.values()) {
@@ -198,6 +224,18 @@ export class Game {
         return this._ground;
     }
 
+    get moveOrders(): MoveOrderManager {
+        return this._moveOrders;
+    }
+
+    get hyperspace(): HyperspaceManager {
+        return this._hyperspace;
+    }
+
+    side(sideId: SideId): Side | undefined {
+        return this._sides.get(sideId);
+    }
+
     private _registerMessageHandlers() {
         this._messageManager.registerHandler("client:ping", (_context, payload, from) => {
             from.sendMessage({ type: "server:pong", payload: { nonce: payload.nonce } });
@@ -210,6 +248,31 @@ export class Game {
         this._messageManager.registerHandler("client:ship:move", (_context, payload, from) => {
             this._handleShipMove(from, payload.shipId, payload.to);
         });
+
+        this._messageManager.registerHandler(
+            "client:ship:order:cancel",
+            (_context, payload, from) => {
+                const result = this._moveOrders.cancel(from.sideId, payload.shipId);
+                if (!result.ok) return this._reject(from, "order cancel", result.error);
+                this._refreshShipHex(payload.shipId);
+            }
+        );
+
+        this._messageManager.registerHandler("client:ship:hyperjump", (_context, payload, from) => {
+            const result = this._hyperspace.activate(from.sideId, payload.shipId, payload.target);
+            if (!result.ok) return this._reject(from, "hyperjump", result.error);
+            this.logger.info("Ship", payload.shipId, "engaged hyperdrive to", payload.target);
+            this._refreshShipHex(payload.shipId);
+        });
+
+        this._messageManager.registerHandler(
+            "client:ship:hyperjump:cancel",
+            (_context, payload, from) => {
+                const result = this._hyperspace.cancel(from.sideId, payload.shipId);
+                if (!result.ok) return this._reject(from, "hyperjump cancel", result.error);
+                this._refreshShipHex(payload.shipId);
+            }
+        );
 
         this._messageManager.registerHandler("client:turn:end", (_context, _payload, from) => {
             this._handleTurnEnd(from);
@@ -281,15 +344,33 @@ export class Game {
         };
     }
 
+    /** Planning knowledge for a side's ships: explored hexes only, around known obstacles. */
+    private _moveKnowledge(sideId: SideId): MoveOrderKnowledge {
+        const side = this._sides.get(sideId);
+        if (!side) return {};
+        return {
+            isObstacle: (hex) => side.knowsObstacleAt(this._entities, hex),
+            isExplored: (hex) => side.explored.has(axialKey(hex.q, hex.r))
+        };
+    }
+
     private _sendError(client: Client, message: string) {
         client.sendMessage({ type: "server:error", payload: { message } });
     }
 
+    /** Resend a ship's hex so its owner sees order / hyperdrive changes. */
+    private _refreshShipHex(shipId: EntityId) {
+        const ship = this._entities.get(shipId);
+        if (ship) this._refreshVisibility([axialKey(ship.q, ship.r)]);
+    }
+
     private _handleShipMove(client: Client, shipId: EntityId, to: AxialCoord) {
-        const side = client.sideId ? this._sides.get(client.sideId) : undefined;
-        const outcome = this._battles.moveShip(client.sideId, shipId, to, {
-            isObstacle: side ? (hex) => side.knowsObstacleAt(this._entities, hex) : undefined
-        });
+        const outcome = this._battles.moveShip(
+            client.sideId,
+            shipId,
+            to,
+            client.sideId ? this._moveKnowledge(client.sideId) : {}
+        );
         if (!outcome.ok) {
             this.logger.warn("Rejected move from", client.id, outcome.error);
             this._sendError(client, outcome.error);
@@ -297,28 +378,14 @@ export class Game {
         }
 
         const result = outcome.move;
-        const { ship, from, path, cost } = result;
-        this.logger.info("Ship", ship.id, "moved", from, "->", result.to, "cost", cost);
-
-        // Sent before the tiles update so clients animate along the real path. Other
-        // sides only get it when they can see every hex of the route (their own
-        // visibility doesn't depend on this ship); otherwise they infer from tiles.
-        const moved: ServerToClientMessage = {
-            type: "server:ship:moved",
-            payload: {
-                shipId: ship.id,
-                from,
-                to: result.to,
-                path,
-                facing: ship.facing,
-                movementPoints: ship.movementPoints
-            }
-        };
-        for (const other of this._sides.values()) {
-            if (other.id === ship.sideId || other.seesAll([from, ...path])) {
-                this.broadcastToSide(other.id, moved);
-            }
+        if (!result) {
+            this.logger.info("Ship", shipId, "ordered to", outcome.moveOrder?.destination);
+            this._refreshShipHex(shipId);
+            return;
         }
+        const { ship, from, cost } = result;
+        this.logger.info("Ship", ship.id, "moved", from, "->", result.to, "cost", cost);
+        this._broadcastShipMoves([{ ship, from, to: result.to, path: result.path }]);
 
         this._refreshVisibility([axialKey(from.q, from.r), axialKey(result.to.q, result.to.r)]);
         if (this._economy.onShipMoved(ship)) this._sendEconomyState(ship.sideId);
@@ -326,6 +393,87 @@ export class Game {
         if (outcome.battle) {
             this.logger.info("Battle", outcome.battle.battleId, "started", outcome.battle);
             this._sendBattleStart(outcome.battle);
+        }
+    }
+
+    /**
+     * Sent before the tiles update so clients animate along the real path. Other sides only
+     * get a move when they can see every hex of the route (their own visibility doesn't
+     * depend on this ship); otherwise they infer from tiles.
+     */
+    private _broadcastShipMoves(moves: ShipMoveEvent[]) {
+        for (const { ship, from, to, path } of moves) {
+            const moved: ServerToClientMessage = {
+                type: "server:ship:moved",
+                payload: {
+                    shipId: ship.id,
+                    from,
+                    to,
+                    path,
+                    facing: ship.facing,
+                    movementPoints: ship.movementPoints
+                }
+            };
+            for (const other of this._sides.values()) {
+                if (other.id === ship.sideId || other.seesAll([from, ...path])) {
+                    this.broadcastToSide(other.id, moved);
+                }
+            }
+        }
+    }
+
+    /**
+     * Sent before the tiles update to the owner, sides that could see the origin or landing
+     * hex, and sides that lost ships.
+     */
+    private _broadcastJumps(jumps: HyperjumpEvent[]) {
+        for (const jump of jumps) {
+            const message: ServerToClientMessage = {
+                type: "server:ship:jumped",
+                payload: {
+                    shipId: jump.shipId,
+                    from: jump.from,
+                    to: jump.to,
+                    outcome: jump.outcome,
+                    ...(jump.collidedWithId ? { collidedWithId: jump.collidedWithId } : {}),
+                    destroyedIds: jump.destroyedIds
+                }
+            };
+            for (const side of this._sides.values()) {
+                if (
+                    side.id === jump.sideId ||
+                    jump.lossSideIds.includes(side.id) ||
+                    side.seesAll([jump.from]) ||
+                    side.seesAll([jump.to])
+                ) {
+                    this.broadcastToSide(side.id, message);
+                }
+            }
+        }
+    }
+
+    /** A pending battle ended without a fight because one side's vessels were all lost. */
+    private _broadcastBattleEnded({ battle, winnerSideId, loserSideId }: EndedBattle) {
+        const resolved: ServerToClientMessage = {
+            type: "server:battle:resolved",
+            payload: {
+                battleId: battle.battleId,
+                q: battle.q,
+                r: battle.r,
+                winnerSideId,
+                loserSideId,
+                destroyedShipIds: [],
+                destroyedUnitIds: []
+            }
+        };
+        for (const side of this._sides.values()) {
+            if (
+                side.id === battle.attackerSideId ||
+                side.id === battle.defenderSideId ||
+                side.seesAll([battle])
+            ) {
+                this.broadcastToSide(side.id, resolved);
+            }
         }
     }
 
@@ -393,15 +541,28 @@ export class Game {
     }
 
     /**
-     * After an advance: supply ship moves (visibility-filtered like ship moves), battles
-     * started by supply ships, then tiles and every side's economy.
+     * After an advance: hyperspace jumps, move order steps and supply ship moves (each
+     * visibility-filtered), then tiles, battles started or changed by jumps and started by
+     * supply ships, battles ended by jumps, and every side's economy.
      */
-    private _broadcastAdvance({ economy, supply }: EndTurnResult) {
+    private _broadcastAdvance({ jumps, orders, economy, supply }: EndTurnResult) {
         if (economy && economy.completed.length > 0) {
             this.logger.info("Builds completed", economy.completed);
         }
         const touched: HexKey[] = [];
         const removed: EntityId[] = [];
+        if (jumps && jumps.length > 0) {
+            this.logger.info("Hyperspace jumps", jumps);
+            this._broadcastJumps(jumps);
+            for (const jump of jumps) {
+                touched.push(axialKey(jump.from.q, jump.from.r), axialKey(jump.to.q, jump.to.r));
+                removed.push(...jump.destroyedIds);
+            }
+        }
+        if (orders) {
+            this._broadcastShipMoves(orders.moves);
+            for (const move of orders.moves) touched.push(axialKey(move.from.q, move.from.r));
+        }
         if (supply) {
             const launched = new Set([...supply.returning, ...supply.dispatched].map((s) => s.id));
             for (const move of supply.moves) {
@@ -446,6 +607,17 @@ export class Game {
             if (location) touched.push(axialKey(location.q, location.r));
         }
         this._refreshVisibility(touched, removed);
+        for (const jump of jumps ?? []) {
+            if (jump.battle) {
+                this.logger.info("Battle", jump.battle.battleId, "started by jump", jump.battle);
+                this._sendBattleStart(jump.battle);
+            }
+            for (const battle of jump.updatedBattles) {
+                this.logger.info("Battle", battle.battleId, "changed by jump", battle);
+                this._sendBattleStart(battle);
+            }
+            for (const ended of jump.endedBattles) this._broadcastBattleEnded(ended);
+        }
         for (const battle of supply?.battles ?? []) {
             this.logger.info("Battle", battle.battleId, "started by supply ship", battle);
             this._sendBattleStart(battle);

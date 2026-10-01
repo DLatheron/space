@@ -14,7 +14,9 @@ export const TechId = z.enum([
     "advanced_shipyard",
     "transports",
     "enhancement_tier_2",
-    "enhancement_tier_3"
+    "enhancement_tier_3",
+    "hyperdrive_calibration_1",
+    "hyperdrive_calibration_2"
 ]);
 export type TechId = z.infer<typeof TechId>;
 
@@ -105,6 +107,20 @@ export const TECHS: Record<TechId, TechDefinition> = {
         buildTurns: 5,
         requires: ["enhancement_tier_2"],
         enhancementTier: 3
+    },
+    hyperdrive_calibration_1: {
+        name: "Hyperdrive Calibration I",
+        description: "Hyperspace jumps land closer to their target.",
+        cost: { money: 100, materials: 0, population: 0, science: 150 },
+        buildTurns: 3,
+        requires: ["advanced_shipyard"]
+    },
+    hyperdrive_calibration_2: {
+        name: "Hyperdrive Calibration II",
+        description: "Hyperspace jumps land much closer to their target.",
+        cost: { money: 150, materials: 0, population: 0, science: 300 },
+        buildTurns: 5,
+        requires: ["hyperdrive_calibration_1"]
     }
 };
 

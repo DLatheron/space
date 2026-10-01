@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { useHexWorldVersion } from "../hooks/index.js";
 import { HexWorld, type HexClickAction } from "../world/HexWorld.js";
 import { ParallaxBackground } from "../world/ParallaxBackground.js";
 import { CanvasLoop } from "./CanvasLoop.js";
@@ -6,6 +7,7 @@ import "./HexMapView.css";
 
 /** CSS pixels the pointer may travel before a press becomes a pan instead of a click. */
 const CLICK_DRAG_THRESHOLD = 5;
+const NOTICE_MS = 3500;
 
 type HexMapViewProps = {
     world: HexWorld;
@@ -13,6 +15,7 @@ type HexMapViewProps = {
 };
 
 export function HexMapView({ world, onAction }: HexMapViewProps) {
+    useHexWorldVersion(world);
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const parallaxRef = useRef(new ParallaxBackground());
     const onActionRef = useRef(onAction);
@@ -49,8 +52,7 @@ export function HexMapView({ world, onAction }: HexMapViewProps) {
 
         resize();
         window.addEventListener("resize", resize);
-        const observer =
-            typeof ResizeObserver !== "undefined" ? new ResizeObserver(resize) : null;
+        const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(resize) : null;
         if (canvas.parentElement && observer) {
             observer.observe(canvas.parentElement);
         }
@@ -147,6 +149,10 @@ export function HexMapView({ world, onAction }: HexMapViewProps) {
             world.setHoveredHex(null);
         };
         const onKeyDown = (e: KeyboardEvent) => {
+            if (e.key === "Escape" && world.hyperjumpTargetingId) {
+                world.cancelHyperjumpTargeting();
+                return;
+            }
             if (e.key === "Escape" && (world.selectedShipId || world.inspectedEntityId)) {
                 world.selectShip(null);
                 onActionRef.current?.({ type: "deselect" });
@@ -184,11 +190,49 @@ export function HexMapView({ world, onAction }: HexMapViewProps) {
         };
     }, [world]);
 
+    const notice = world.notice;
+    useEffect(() => {
+        if (!notice) return;
+        const timer = window.setTimeout(() => world.clearNotice(notice.id), NOTICE_MS);
+        return () => window.clearTimeout(timer);
+    }, [world, notice]);
+
+    const targeting = world.hyperjumpTargeting;
+
     return (
         <div className="hex-map-view">
-            <canvas ref={canvasRef} className="hex-map-view__canvas" />
+            <canvas
+                ref={canvasRef}
+                className={`hex-map-view__canvas${targeting ? " hex-map-view__canvas--targeting" : ""}`}
+            />
+            {(targeting || notice) && (
+                <div className="hex-map-view__banners">
+                    {targeting && (
+                        <div className="hex-map-view__banner hex-map-view__banner--targeting">
+                            <span>
+                                Hyperdrive targeting: click an explored hex to jump to · Esc to
+                                cancel
+                            </span>
+                            <button type="button" onClick={() => world.cancelHyperjumpTargeting()}>
+                                Cancel
+                            </button>
+                        </div>
+                    )}
+                    {notice && (
+                        <div
+                            key={notice.id}
+                            className="hex-map-view__banner hex-map-view__banner--notice"
+                            role="status"
+                        >
+                            {notice.text}
+                        </div>
+                    )}
+                </div>
+            )}
             <div className="hex-map-view__hint">
-                Drag to pan · Scroll to zoom · Click to select / inspect (again to cycle) · Esc to clear
+                {world.selectedShipId
+                    ? "Click an explored hex to move there (multi-turn routes continue at end of turn) · Esc to clear"
+                    : "Drag to pan · Scroll to zoom · Click to select / inspect (again to cycle) · Esc to clear"}
             </div>
         </div>
     );

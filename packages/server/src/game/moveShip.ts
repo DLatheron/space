@@ -1,4 +1,4 @@
-import { axialDirectionTowards, planHexPath } from "@space/maths";
+import { axialDirectionTowards, findHexPath, planHexPath } from "@space/maths";
 import {
     hexHasObstacle,
     MOVE_COST_PER_HEX,
@@ -20,6 +20,21 @@ export type MoveValidation =
           /** Hexes stepped into, in order; stops early when MP run out. */
           path: AxialCoord[];
           cost: number;
+          /** Hex the move was planned towards. */
+          destination: AxialCoord;
+          /** Planned hexes after `to`, ending at `destination`; empty once it is reached. */
+          remaining: AxialCoord[];
+      }
+    | { ok: false; error: string };
+
+export type RoutePlan =
+    | {
+          ok: true;
+          ship: EntityOf<"ship">;
+          from: AxialCoord;
+          destination: AxialCoord;
+          /** Planned hexes from `from` (excluded) to `destination` (included). */
+          route: AxialCoord[];
       }
     | { ok: false; error: string };
 
@@ -29,17 +44,25 @@ export type MovePlanOptions = {
      * knowledge so plans don't leak hidden contents; defaults to the true map.
      */
     isObstacle?: (hex: AxialCoord) => boolean;
+    /**
+     * Whether the mover has explored `hex`. When given, the destination must be explored and
+     * the route only passes through explored hexes; otherwise anything goes.
+     */
+    isExplored?: (hex: AxialCoord) => boolean;
     /** The move ends early on the first stepped-into hex for which this returns true. */
     stopAt?: (hex: AxialCoord) => boolean;
+    /** The move ends just before the first hex for which this returns true. */
+    stopBefore?: (hex: AxialCoord) => boolean;
 };
 
-export function validateShipMove(
+/** Route from the ship's hex to `to` using the mover's knowledge; movement points aren't checked. */
+export function planShipRoute(
     entities: EntityManager,
     sideId: SideId | null,
     shipId: EntityId,
     to: AxialCoord,
     options: MovePlanOptions = {}
-): MoveValidation {
+): RoutePlan {
     if (!sideId) return { ok: false, error: "You are not assigned to a side" };
 
     const ship = entities.getOfKind(shipId, "ship");
@@ -48,41 +71,97 @@ export function validateShipMove(
 
     const target = findTileByAxial(entities.map, to.q, to.r);
     if (!target) return { ok: false, error: `Destination ${to.q},${to.r} is off the map` };
+    const destination = { q: target.q, r: target.r };
 
     const from = { q: ship.q, r: ship.r };
-    if (from.q === target.q && from.r === target.r) {
+    if (from.q === destination.q && from.r === destination.r) {
         return { ok: false, error: "Ship is already at that hex" };
     }
-    const maxSteps = Math.floor(ship.movementPoints / MOVE_COST_PER_HEX);
-    if (maxSteps <= 0) return { ok: false, error: `Ship ${shipId} has no movement left` };
+    const { isExplored } = options;
+    if (isExplored && !isExplored(destination)) {
+        return { ok: false, error: `Destination ${to.q},${to.r} is unexplored` };
+    }
 
     const isObstacle =
         options.isObstacle ??
         ((hex: AxialCoord) => hexHasObstacle(entities.entitiesAt(hex.q, hex.r)));
     const inBounds = (hex: AxialCoord) => !!findTileByAxial(entities.map, hex.q, hex.r);
-    const route = planHexPath(from, target, { inBounds, passable: (hex) => !isObstacle(hex) });
+    const pathOptions = {
+        inBounds,
+        passable: (hex: AxialCoord) => !isObstacle(hex) && (!isExplored || isExplored(hex))
+    };
+    const path = isExplored
+        ? findHexPath(from, destination, pathOptions)
+        : planHexPath(from, destination, pathOptions);
+    if (!path) return { ok: false, error: `No known route to ${to.q},${to.r}` };
 
-    const path: AxialCoord[] = [];
-    for (const hex of route.slice(1, maxSteps + 1)) {
+    const route: AxialCoord[] = [];
+    for (const hex of path.slice(1)) {
         if (!inBounds(hex)) break;
-        path.push({ q: hex.q, r: hex.r });
+        route.push({ q: hex.q, r: hex.r });
+    }
+    if (route.length === 0) return { ok: false, error: `No route towards ${to.q},${to.r}` };
+    return { ok: true, ship, from, destination, route };
+}
+
+/**
+ * Steps along a planned route for at most `maxSteps` hexes, honouring `stopAt` and
+ * `stopBefore`. `path` may be empty when the first hex is blocked.
+ */
+export function stepAlongRoute(
+    plan: Extract<RoutePlan, { ok: true }>,
+    maxSteps: number,
+    options: Pick<MovePlanOptions, "stopAt" | "stopBefore"> = {}
+): { path: AxialCoord[]; remaining: AxialCoord[] } {
+    const path: AxialCoord[] = [];
+    for (const hex of plan.route.slice(0, Math.max(0, maxSteps))) {
+        if (options.stopBefore?.(hex)) break;
+        path.push(hex);
         if (options.stopAt?.(hex)) break;
     }
-    const end = path.at(-1);
+    return { path, remaining: plan.route.slice(path.length) };
+}
+
+/** Turn a stepped route into a move, checking the ship may end on its final hex. */
+export function moveFromSteps(
+    entities: EntityManager,
+    plan: Extract<RoutePlan, { ok: true }>,
+    steps: { path: AxialCoord[]; remaining: AxialCoord[] }
+): MoveValidation {
+    const end = steps.path.at(-1);
     const endTile = end && findTileByAxial(entities.map, end.q, end.r);
-    if (!endTile) return { ok: false, error: `No route towards ${to.q},${to.r}` };
-    if (!entities.canEnter(ship, endTile)) {
+    if (!endTile) {
+        const next = plan.route[0]!;
+        return { ok: false, error: `Route blocked at ${next.q},${next.r}` };
+    }
+    if (!entities.canEnter(plan.ship, endTile)) {
         return { ok: false, error: `Ship cannot enter ${endTile.q},${endTile.r}` };
     }
-
     return {
         ok: true,
-        ship,
-        from,
+        ship: plan.ship,
+        from: plan.from,
         to: { q: endTile.q, r: endTile.r },
-        path,
-        cost: path.length * MOVE_COST_PER_HEX
+        path: steps.path,
+        cost: steps.path.length * MOVE_COST_PER_HEX,
+        destination: plan.destination,
+        remaining: steps.remaining
     };
+}
+
+/** This turn's part of a move towards `to`: the route is cut where MP run out. */
+export function validateShipMove(
+    entities: EntityManager,
+    sideId: SideId | null,
+    shipId: EntityId,
+    to: AxialCoord,
+    options: MovePlanOptions = {}
+): MoveValidation {
+    const plan = planShipRoute(entities, sideId, shipId, to, options);
+    if (!plan.ok) return plan;
+    const maxSteps = Math.floor(plan.ship.movementPoints / MOVE_COST_PER_HEX);
+    if (maxSteps <= 0) return { ok: false, error: `Ship ${shipId} has no movement left` };
+    return moveFromSteps(entities, plan, stepAlongRoute(plan, maxSteps, options));
 }
 
 /** Direction of the last step of a move from `from` along `path`. */

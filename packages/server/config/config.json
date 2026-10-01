@@ -202,7 +202,11 @@
                 "requiresTech": null,
                 "maxTier": 3,
                 "unitCapacity": 0,
-                "canColonise": false
+                "canColonise": false,
+                "hyperdrive": {
+                    "cooldownTurns": 3,
+                    "accuracy": { "onTarget": 20, "oneOff": 50, "twoOff": 30 }
+                }
             },
             "colony_ship": {
                 "cost": { "money": 200, "materials": 200, "population": 50, "science": 0 },
@@ -257,12 +261,29 @@
                 "requiresTech": null,
                 "maxTier": 3,
                 "unitCapacity": 0,
-                "canColonise": false
+                "canColonise": false,
+                "hyperdrive": {
+                    "cooldownTurns": 4,
+                    "accuracy": { "onTarget": 30, "oneOff": 50, "twoOff": 20 }
+                }
             }
         },
         "shipTiers": {
             "hpMultiplier": [1, 1.5, 2],
-            "movementBonus": [0, 0, 1]
+            "movementBonus": [0, 0, 1],
+            "hyperdriveAccuracyBonus": [0, 10, 20]
+        },
+        "hyperspace": {
+            "hazards": {
+                "sun": { "destroyChance": 0.5, "damageFraction": 0.6 },
+                "planet": { "destroyChance": 0.3, "damageFraction": 0.4 },
+                "moon": { "destroyChance": 0.25, "damageFraction": 0.35 },
+                "large_asteroid": { "destroyChance": 0.2, "damageFraction": 0.3 },
+                "asteroid_belt": { "destroyChance": 0.15, "damageFraction": 0.25 },
+                "black_hole": { "destroyChance": 0.9, "damageFraction": 0.9 }
+            },
+            "collision": { "bothDestroyedChance": 0.25 },
+            "techAccuracyBonus": { "hyperdrive_calibration_1": 10, "hyperdrive_calibration_2": 15 }
         },
         "groundUnits": {
             "infantry": {

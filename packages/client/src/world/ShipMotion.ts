@@ -90,6 +90,20 @@ export class ShipMotion {
         this._end = { x: at.x, y: at.y, heading };
     }
 
+    /** Stay at the end pose until `until`, after anything already queued. */
+    holdUntil(until: number) {
+        const end = this._startedAt + this._totalMs;
+        if (until <= end) return;
+        const at = { x: this._end.x, y: this._end.y };
+        this._push({
+            kind: "rotate",
+            at,
+            from: this._end.heading,
+            delta: 0,
+            duration: until - end
+        });
+    }
+
     poseAt(now: number): ShipPose {
         let t = now - this._startedAt;
         for (const segment of this._segments) {

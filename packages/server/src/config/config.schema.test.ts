@@ -92,7 +92,11 @@ describe("economy balance config", () => {
             requires: ["advanced_shipyard", "docks"],
             maxTier: 3
         });
-        expect(economy.shipTiers).toEqual({ hpMultiplier: [1, 1.5, 2], movementBonus: [0, 0, 1] });
+        expect(economy.shipTiers).toEqual({
+            hpMultiplier: [1, 1.5, 2],
+            movementBonus: [0, 0, 1],
+            hyperdriveAccuracyBonus: [0, 10, 20]
+        });
         expect(economy.groundUnits.armour).toEqual({
             cost: { money: 120, materials: 150, population: 10, science: 0 },
             buildTurns: 3,
@@ -175,9 +179,85 @@ describe("economy balance config", () => {
             hp: 3
         });
         expect(economy.ships.frigate).toEqual(defaults.ships.frigate);
-        expect(economy.shipTiers).toEqual({ hpMultiplier: [1, 1.5, 2], movementBonus: [0, 1, 2] });
+        expect(economy.shipTiers).toEqual({
+            hpMultiplier: [1, 1.5, 2],
+            movementBonus: [0, 1, 2],
+            hyperdriveAccuracyBonus: [0, 10, 20]
+        });
         expect(economy.groundUnits.infantry).toMatchObject({ attack: 4, defence: 3, requires: [] });
         expect(economy.groundUnits.armour).toEqual(defaults.groundUnits.armour);
+    });
+
+    it("defaults hyperdrives, hyperspace hazards, collisions and accuracy bonuses", () => {
+        const economy = defaultEconomyBalance();
+        expect(economy.ships.frigate.hyperdrive).toEqual({
+            cooldownTurns: 3,
+            accuracy: { onTarget: 20, oneOff: 50, twoOff: 30 }
+        });
+        expect(economy.ships.star_destroyer.hyperdrive).toEqual({
+            cooldownTurns: 4,
+            accuracy: { onTarget: 30, oneOff: 50, twoOff: 20 }
+        });
+        for (const type of [
+            "scout",
+            "colony_ship",
+            "transport",
+            "fighter_squadron",
+            "advanced_fighter_squadron"
+        ] as const) {
+            expect(economy.ships[type].hyperdrive).toBeUndefined();
+        }
+        expect(economy.hyperspace).toEqual({
+            hazards: {
+                sun: { destroyChance: 0.5, damageFraction: 0.6 },
+                planet: { destroyChance: 0.3, damageFraction: 0.4 },
+                moon: { destroyChance: 0.25, damageFraction: 0.35 },
+                large_asteroid: { destroyChance: 0.2, damageFraction: 0.3 },
+                asteroid_belt: { destroyChance: 0.15, damageFraction: 0.25 },
+                black_hole: { destroyChance: 0.9, damageFraction: 0.9 }
+            },
+            collision: { bothDestroyedChance: 0.25 },
+            techAccuracyBonus: { hyperdrive_calibration_1: 10, hyperdrive_calibration_2: 15 }
+        });
+    });
+
+    it("merges hyperdrive and hyperspace overrides, adding or removing hyperdrives", () => {
+        const economy = Config.parse({
+            economy: {
+                ships: {
+                    frigate: { hyperdrive: { accuracy: { onTarget: 60 } } },
+                    star_destroyer: { hyperdrive: null },
+                    scout: { hyperdrive: { cooldownTurns: 1 } }
+                },
+                hyperspace: {
+                    hazards: { sun: { destroyChance: 1 } },
+                    collision: { bothDestroyedChance: 0 }
+                }
+            }
+        }).economy;
+        expect(economy.ships.frigate.hyperdrive).toEqual({
+            cooldownTurns: 3,
+            accuracy: { onTarget: 60, oneOff: 50, twoOff: 30 }
+        });
+        expect(economy.ships.star_destroyer.hyperdrive).toBeUndefined();
+        expect(economy.ships.scout.hyperdrive).toEqual({
+            cooldownTurns: 1,
+            accuracy: { onTarget: 20, oneOff: 50, twoOff: 30 }
+        });
+        expect(economy.hyperspace.hazards.sun).toEqual({ destroyChance: 1, damageFraction: 0.6 });
+        expect(economy.hyperspace.hazards.planet).toEqual({
+            destroyChance: 0.3,
+            damageFraction: 0.4
+        });
+        expect(economy.hyperspace.collision.bothDestroyedChance).toBe(0);
+        expect(EconomyBalance.parse(economy)).toEqual(economy);
+
+        const parse = (value: unknown) => () => Config.parse({ economy: value });
+        expect(parse({ hyperspace: { hazards: { wormhole: {} } } })).toThrow();
+        expect(parse({ hyperspace: { hazards: { sun: { destroyChance: 1.5 } } } })).toThrow();
+        expect(parse({ hyperspace: { techAccuracyBonus: { warp: 5 } } })).toThrow();
+        expect(parse({ ships: { frigate: { hyperdrive: { cooldownTurns: -1 } } } })).toThrow();
+        expect(parse({ shipTiers: { hyperdriveAccuracyBonus: [0, 10] } })).toThrow();
     });
 
     it("rejects out-of-range and unknown values", () => {

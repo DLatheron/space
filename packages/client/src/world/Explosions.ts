@@ -157,3 +157,165 @@ export class Explosions {
         }
     }
 }
+
+/** Time a jumping ship spends collapsing into hyperspace at its origin. */
+export const JUMP_DEPART_MS = 700;
+/** Arrival flash length; the ship scales in over its first part. */
+export const JUMP_ARRIVE_MS = 650;
+const JUMP_DAMAGE_MS = 1600;
+const JUMP_STREAKS = 14;
+const JUMP_COLOUR = "127, 232, 255";
+
+type JumpFlash = {
+    from: Pixel | null;
+    to: Pixel;
+    departAt: number;
+    arriveAt: number;
+    damaged: boolean;
+    /** Hex size in world pixels. */
+    scale: number;
+    /** Angles of the inward streaks at the origin. */
+    streaks: number[];
+};
+
+/**
+ * Hyperspace jump effects in world space: an implosion with inward streaks at the origin,
+ * then a flash and shockwave at the landing hex, plus a red flicker when the ship was damaged.
+ */
+export class JumpFlashes {
+    private _flashes: JumpFlash[] = [];
+
+    spawn(flash: Omit<JumpFlash, "streaks">) {
+        const streaks = Array.from({ length: JUMP_STREAKS }, () => Math.random() * Math.PI * 2);
+        this._flashes.push({ ...flash, streaks });
+    }
+
+    clear() {
+        this._flashes = [];
+    }
+
+    render(
+        ctx: CanvasRenderingContext2D,
+        now: number,
+        toScreen: (world: Pixel) => Pixel,
+        zoom: number
+    ) {
+        this._flashes = this._flashes.filter(
+            (f) => now - f.arriveAt < Math.max(JUMP_ARRIVE_MS, f.damaged ? JUMP_DAMAGE_MS : 0)
+        );
+        if (!this._flashes.length) return;
+
+        ctx.save();
+        for (const flash of this._flashes) {
+            if (now < flash.departAt) continue;
+            const scale = flash.scale * zoom;
+            ctx.globalCompositeOperation = "lighter";
+            if (flash.from && now < flash.arriveAt + 160) {
+                this._drawImplosion(ctx, flash, toScreen(flash.from), scale, now);
+            }
+            if (now >= flash.arriveAt) {
+                this._drawArrival(ctx, toScreen(flash.to), scale, now - flash.arriveAt);
+                ctx.globalCompositeOperation = "source-over";
+                if (flash.damaged) {
+                    this._drawDamage(ctx, toScreen(flash.to), scale, now - flash.arriveAt);
+                }
+            }
+        }
+        ctx.restore();
+    }
+
+    private _drawImplosion(
+        ctx: CanvasRenderingContext2D,
+        flash: JumpFlash,
+        center: Pixel,
+        scale: number,
+        now: number
+    ) {
+        const span = flash.arriveAt - flash.departAt;
+        const t = Math.min(1, (now - flash.departAt) / span);
+        if (t < 1) {
+            const radius = scale * (1.3 * (1 - t) + 0.05);
+            ctx.globalAlpha = 0.35 + 0.6 * t;
+            ctx.strokeStyle = `rgb(${JUMP_COLOUR})`;
+            ctx.lineWidth = Math.max(1, scale * 0.06);
+            ctx.beginPath();
+            ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
+            ctx.stroke();
+
+            ctx.lineWidth = Math.max(0.75, scale * 0.025);
+            for (const angle of flash.streaks) {
+                const outer = scale * (0.4 + 1.1 * (1 - t));
+                const inner = outer * 0.45;
+                ctx.beginPath();
+                ctx.moveTo(center.x + Math.cos(angle) * outer, center.y + Math.sin(angle) * outer);
+                ctx.lineTo(center.x + Math.cos(angle) * inner, center.y + Math.sin(angle) * inner);
+                ctx.stroke();
+            }
+        }
+        // Brief white pinch as the ship vanishes.
+        const pinch = (now - flash.arriveAt + 160) / 320;
+        if (pinch > 0 && pinch < 1) {
+            const k = 1 - Math.abs(pinch * 2 - 1);
+            const radius = scale * 0.45 * k + 1;
+            const g = ctx.createRadialGradient(center.x, center.y, 0, center.x, center.y, radius);
+            g.addColorStop(0, `rgba(255, 255, 255, ${k})`);
+            g.addColorStop(1, `rgba(${JUMP_COLOUR}, 0)`);
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = g;
+            ctx.beginPath();
+            ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    private _drawArrival(ctx: CanvasRenderingContext2D, center: Pixel, scale: number, age: number) {
+        if (age >= JUMP_ARRIVE_MS) return;
+        const t = age / JUMP_ARRIVE_MS;
+        const k = 1 - t;
+        const radius = scale * (0.3 + 0.9 * Math.sqrt(t));
+        const g = ctx.createRadialGradient(center.x, center.y, 0, center.x, center.y, radius);
+        g.addColorStop(0, `rgba(255, 255, 255, ${k})`);
+        g.addColorStop(0.35, `rgba(${JUMP_COLOUR}, ${0.7 * k})`);
+        g.addColorStop(1, `rgba(${JUMP_COLOUR}, 0)`);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.globalAlpha = k * 0.85;
+        ctx.strokeStyle = `rgb(${JUMP_COLOUR})`;
+        ctx.lineWidth = Math.max(1, scale * 0.07 * k);
+        ctx.beginPath();
+        ctx.arc(center.x, center.y, scale * (0.25 + 1.5 * Math.sqrt(t)), 0, Math.PI * 2);
+        ctx.stroke();
+    }
+
+    private _drawDamage(ctx: CanvasRenderingContext2D, center: Pixel, scale: number, age: number) {
+        if (age >= JUMP_DAMAGE_MS) return;
+        const t = age / JUMP_DAMAGE_MS;
+        const flicker = 0.6 + 0.4 * Math.sin(age / 40);
+        ctx.globalAlpha = (1 - t) * flicker;
+        ctx.strokeStyle = "#ff5a5a";
+        ctx.lineWidth = Math.max(1, scale * 0.06);
+        ctx.setLineDash([scale * 0.14, scale * 0.1]);
+        ctx.beginPath();
+        ctx.arc(center.x, center.y, scale * 0.7, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        if (scale >= 20) {
+            const fontSize = Math.round(Math.min(18, scale * 0.26));
+            const y = center.y - scale * (0.85 + 0.5 * t);
+            ctx.globalAlpha = 1 - t;
+            ctx.font = `700 ${fontSize}px "IBM Plex Sans", "Segoe UI", sans-serif`;
+            ctx.textAlign = "center";
+            ctx.textBaseline = "bottom";
+            ctx.lineWidth = Math.max(2, fontSize * 0.25);
+            ctx.strokeStyle = "rgba(4, 8, 18, 0.85)";
+            ctx.fillStyle = "#ff8a8a";
+            ctx.strokeText("Damaged", center.x, y);
+            ctx.fillText("Damaged", center.x, y);
+        }
+    }
+}

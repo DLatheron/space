@@ -7,6 +7,7 @@ import {
     TechId,
     type EconomyBalance,
     type GroundUnitBalance,
+    type HyperdriveBalance,
     type Resources,
     type ShipBalance,
     type StorageStructureBalance,
@@ -86,6 +87,54 @@ function structure(defaults: StructureBalance) {
         .prefault({});
 }
 
+/** Used when a ship type without a default hyperdrive is given one in config. */
+const GENERIC_HYPERDRIVE: HyperdriveBalance = {
+    cooldownTurns: 3,
+    accuracy: { onTarget: 20, oneOff: 50, twoOff: 30 }
+};
+
+function hyperdriveSchema(defaults: HyperdriveBalance) {
+    return z
+        .object({
+            /** Turns after a jump before it can be engaged again. */
+            cooldownTurns: z.int().min(0).default(defaults.cooldownTurns),
+            /** Percentage chances of landing on target, 1 hex off or 2 hexes off. */
+            accuracy: z
+                .object({
+                    onTarget: z.number().min(0).default(defaults.accuracy.onTarget),
+                    oneOff: z.number().min(0).default(defaults.accuracy.oneOff),
+                    twoOff: z.number().min(0).default(defaults.accuracy.twoOff)
+                })
+                .strict()
+                .prefault({})
+        })
+        .strict();
+}
+
+/**
+ * Ship types with a default hyperdrive may set `null` to remove it; others may add one,
+ * missing values taking `GENERIC_HYPERDRIVE`.
+ */
+function hyperdrive(defaults: HyperdriveBalance | undefined) {
+    if (!defaults) return hyperdriveSchema(GENERIC_HYPERDRIVE).optional();
+    return hyperdriveSchema(defaults)
+        .nullable()
+        .prefault({})
+        .transform((value) => value ?? undefined);
+}
+
+function hazard(destroyChance: number, damageFraction: number) {
+    return z
+        .object({
+            /** Chance (0-1) a ship landing here is destroyed. */
+            destroyChance: z.number().min(0).max(1).default(destroyChance),
+            /** Otherwise the share (0-1) of its full hp it loses, never dropping below 1 hp. */
+            damageFraction: z.number().min(0).max(1).default(damageFraction)
+        })
+        .strict()
+        .prefault({});
+}
+
 function ship(defaults: ShipBalance) {
     return z
         .object({
@@ -102,7 +151,8 @@ function ship(defaults: ShipBalance) {
             maxTier: maxTier(defaults.maxTier),
             /** Ground units it can carry; 0 for none. */
             unitCapacity: z.int().min(0).default(defaults.unitCapacity),
-            canColonise: z.boolean().default(defaults.canColonise)
+            canColonise: z.boolean().default(defaults.canColonise),
+            hyperdrive: hyperdrive(defaults.hyperdrive)
         })
         .strict()
         .prefault({});
@@ -267,7 +317,11 @@ export const EconomyBalanceConfig = z
                     maxMovementPoints: 3,
                     hp: 12,
                     requires: ["advanced_shipyard"],
-                    maxTier: 3
+                    maxTier: 3,
+                    hyperdrive: {
+                        cooldownTurns: 3,
+                        accuracy: { onTarget: 20, oneOff: 50, twoOff: 30 }
+                    }
                 }),
                 colony_ship: ship({
                     ...SHIP_DEFAULTS,
@@ -312,16 +366,60 @@ export const EconomyBalanceConfig = z
                     maxMovementPoints: 2,
                     hp: 30,
                     requires: ["advanced_shipyard", "docks"],
-                    maxTier: 3
+                    maxTier: 3,
+                    hyperdrive: {
+                        cooldownTurns: 4,
+                        accuracy: { onTarget: 30, oneOff: 50, twoOff: 20 }
+                    }
                 })
             })
             .strict()
             .prefault({}),
-        /** Ship stat changes at tiers 1, 2 and 3: hp is multiplied (rounded up), movement added. */
+        /**
+         * Ship stat changes at tiers 1, 2 and 3: hp is multiplied (rounded up), movement added,
+         * and hyperjump accuracy improved by percentage points (see `hyperjumpAccuracy`).
+         */
         shipTiers: z
             .object({
                 hpMultiplier: perTier(z.number().positive(), [1, 1.5, 2]),
-                movementBonus: perTier(z.int(), [0, 0, 1])
+                movementBonus: perTier(z.int(), [0, 0, 1]),
+                hyperdriveAccuracyBonus: perTier(z.number().min(0), [0, 10, 20])
+            })
+            .strict()
+            .prefault({}),
+        /** Hyperspace jump risks; per-ship hyperdrives are under `ships.<type>.hyperdrive`. */
+        hyperspace: z
+            .object({
+                /** Rolled for each hazard on the landing hex. */
+                hazards: z
+                    .object({
+                        sun: hazard(0.5, 0.6),
+                        planet: hazard(0.3, 0.4),
+                        moon: hazard(0.25, 0.35),
+                        large_asteroid: hazard(0.2, 0.3),
+                        asteroid_belt: hazard(0.15, 0.25),
+                        black_hole: hazard(0.9, 0.9)
+                    })
+                    .strict()
+                    .prefault({}),
+                collision: z
+                    .object({
+                        /**
+                         * Chance (0-1) both ships are destroyed when a jump lands on a ship.
+                         * Otherwise one is: the jumper with chance otherHp / (otherHp + jumperHp).
+                         */
+                        bothDestroyedChance: z.number().min(0).max(1).default(0.25)
+                    })
+                    .strict()
+                    .prefault({}),
+                /** Percentage points of accuracy per calibration tech; they add up. */
+                techAccuracyBonus: z
+                    .object({
+                        hyperdrive_calibration_1: z.number().min(0).default(10),
+                        hyperdrive_calibration_2: z.number().min(0).default(15)
+                    })
+                    .strict()
+                    .prefault({})
             })
             .strict()
             .prefault({}),

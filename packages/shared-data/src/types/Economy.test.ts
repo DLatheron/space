@@ -155,7 +155,8 @@ const balance: EconomyBalance = {
             cost: res(200, 300, 15),
             buildTurns: 3,
             hp: 12,
-            requires: ["advanced_shipyard"]
+            requires: ["advanced_shipyard"],
+            hyperdrive: { cooldownTurns: 3, accuracy: { onTarget: 20, oneOff: 50, twoOff: 30 } }
         }),
         colony_ship: ship({
             cost: res(200, 200, 50),
@@ -184,10 +185,27 @@ const balance: EconomyBalance = {
             buildTurns: 6,
             maxMovementPoints: 2,
             hp: 30,
-            requires: ["advanced_shipyard", "docks"]
+            requires: ["advanced_shipyard", "docks"],
+            hyperdrive: { cooldownTurns: 4, accuracy: { onTarget: 30, oneOff: 50, twoOff: 20 } }
         })
     },
-    shipTiers: { hpMultiplier: [1, 1.5, 2], movementBonus: [0, 0, 1] },
+    shipTiers: {
+        hpMultiplier: [1, 1.5, 2],
+        movementBonus: [0, 0, 1],
+        hyperdriveAccuracyBonus: [0, 10, 20]
+    },
+    hyperspace: {
+        hazards: {
+            sun: { destroyChance: 0.5, damageFraction: 0.6 },
+            planet: { destroyChance: 0.3, damageFraction: 0.4 },
+            moon: { destroyChance: 0.25, damageFraction: 0.35 },
+            large_asteroid: { destroyChance: 0.2, damageFraction: 0.3 },
+            asteroid_belt: { destroyChance: 0.15, damageFraction: 0.25 },
+            black_hole: { destroyChance: 0.9, damageFraction: 0.9 }
+        },
+        collision: { bothDestroyedChance: 0.25 },
+        techAccuracyBonus: { hyperdrive_calibration_1: 10, hyperdrive_calibration_2: 15 }
+    },
     groundUnits: {
         infantry: {
             cost: res(50, 30, 20),
@@ -528,7 +546,11 @@ describe("tier stats", () => {
         const custom: EconomyBalance = {
             ...balance,
             structureTierOutput: [1, 3, 5],
-            shipTiers: { hpMultiplier: [1, 1, 3], movementBonus: [0, 2, 2] },
+            shipTiers: {
+                hpMultiplier: [1, 1, 3],
+                movementBonus: [0, 2, 2],
+                hyperdriveAccuracyBonus: [0, 0, 0]
+            },
             groundUnitTiers: { attackBonus: [0, 0, 4], defenceBonus: [0, 5, 5] },
             enhancementCostFactor: { "2": 0.25, "3": 2 }
         };

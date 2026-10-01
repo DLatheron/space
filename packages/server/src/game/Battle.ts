@@ -1,10 +1,21 @@
-import type { AxialCoord, BattleId, BattleInfo, EntityId, SideId } from "@space/shared-data";
+import {
+    MOVE_COST_PER_HEX,
+    type AxialCoord,
+    type BattleId,
+    type BattleInfo,
+    type EntityId,
+    type ShipMoveOrder,
+    type SideId
+} from "@space/shared-data";
+import { destroyVessels, type Vessel } from "./destroyShips.js";
 import type { EconomyManager } from "./EconomyManager.js";
 import type { EntityManager } from "./EntityManager.js";
 import type { EntityOf } from "./map/types.js";
 import {
     applyShipMove,
-    validateShipMove,
+    moveFromSteps,
+    planShipRoute,
+    stepAlongRoute,
     type MovePlanOptions,
     type MoveValidation
 } from "./moveShip.js";
@@ -12,9 +23,12 @@ import {
 export type BattleMoveResult =
     | {
           ok: true;
-          move: Extract<MoveValidation, { ok: true }>;
+          /** Null when the ship couldn't move this turn (no MP, or the next hex is blocked). */
+          move: Extract<MoveValidation, { ok: true }> | null;
           /** Battle started by this move, if it ended in a hex holding enemy vessels. */
           battle: BattleInfo | null;
+          /** Order left for the rest of the route, if the destination wasn't reached. */
+          moveOrder: ShipMoveOrder | null;
       }
     | { ok: false; error: string };
 
@@ -30,7 +44,8 @@ export type BattleResolveResult =
       }
     | { ok: false; error: string };
 
-type Vessel = EntityOf<"ship"> | EntityOf<"supply_ship">;
+/** A pending battle that ended because one side had no vessels left in the hex. */
+export type EndedBattle = { battle: BattleInfo; winnerSideId: SideId; loserSideId: SideId };
 
 function shipsAt(entities: EntityManager, hex: AxialCoord): EntityOf<"ship">[] {
     return entities
@@ -113,8 +128,10 @@ export class BattleManager {
     }
 
     /**
-     * Validate and apply a move. The path is cut at the first hex holding enemy
-     * vessels (or an ongoing battle); ending in enemy vessels starts a battle.
+     * Validate and apply a move towards `to`, as far as movement allows this turn. The path
+     * is cut at the first hex holding enemy vessels (ending there starts a battle) and just
+     * before a hex with a pending battle. If the destination isn't reached, the rest of the
+     * route is stored as the ship's `moveOrder`; otherwise any order is cleared.
      */
     moveShip(
         sideId: SideId | null,
@@ -125,18 +142,37 @@ export class BattleManager {
         if (this.findByShip(shipId)) {
             return { ok: false, error: `Ship ${shipId} is locked in battle` };
         }
-        const move = validateShipMove(this._entities, sideId, shipId, to, {
-            ...options,
-            stopAt: (hex) =>
-                !!this.findAt(hex) || (!!sideId && hasEnemyVessels(this._entities, hex, sideId))
+        if (this._entities.getOfKind(shipId, "ship")?.hyperjump) {
+            return { ok: false, error: `Ship ${shipId} is preparing a hyperspace jump` };
+        }
+        if (this.findAt(to)) {
+            return { ok: false, error: `A battle is in progress at ${to.q},${to.r}` };
+        }
+        const plan = planShipRoute(this._entities, sideId, shipId, to, options);
+        if (!plan.ok) return plan;
+
+        const ship = plan.ship;
+        const maxSteps = Math.floor(ship.movementPoints / MOVE_COST_PER_HEX);
+        const steps = stepAlongRoute(plan, maxSteps, {
+            stopAt: (hex) => hasEnemyVessels(this._entities, hex, ship.sideId),
+            stopBefore: (hex) => !!this.findAt(hex)
         });
-        if (!move.ok) return move;
-        if (this.findAt(move.to)) {
-            return { ok: false, error: `A battle is in progress at ${move.to.q},${move.to.r}` };
+        let move: Extract<MoveValidation, { ok: true }> | null = null;
+        let battle: BattleInfo | null = null;
+        if (steps.path.length > 0) {
+            const validated = moveFromSteps(this._entities, plan, steps);
+            if (!validated.ok) return validated;
+            move = validated;
+            applyShipMove(this._entities, move);
+            battle = this._startIfContested(ship);
         }
 
-        applyShipMove(this._entities, move);
-        return { ok: true, move, battle: this._startIfContested(move.ship) };
+        if (steps.remaining.length > 0) {
+            ship.moveOrder = { destination: plan.destination, route: steps.remaining };
+        } else {
+            delete ship.moveOrder;
+        }
+        return { ok: true, move, battle, moveOrder: ship.moveOrder ?? null };
     }
 
     /**
@@ -150,6 +186,47 @@ export class BattleManager {
         )?.sideId;
         if (!attackerSideId) return null;
         return this._create(supplyShip, attackerSideId, supplyShip.sideId);
+    }
+
+    /**
+     * A ship arrived out of hyperspace. With a battle already pending in the hex it joins its
+     * side if that side is a combatant (returning null); otherwise enemy vessels there start
+     * a battle with the arrival as attacker.
+     */
+    startArrivalBattle(ship: EntityOf<"ship">): BattleInfo | null {
+        const pending = this.findAt(ship);
+        if (pending) {
+            if (pending.attackerSideId === ship.sideId) pending.attackerShipIds.push(ship.id);
+            else if (pending.defenderSideId === ship.sideId) pending.defenderShipIds.push(ship.id);
+            return null;
+        }
+        return this._startIfContested(ship);
+    }
+
+    /**
+     * Drop destroyed vessels from pending battles. A battle left with no vessels on one side
+     * ends, won by the other side.
+     */
+    removeDestroyed(ids: Iterable<EntityId>): EndedBattle[] {
+        const gone = new Set(ids);
+        const ended: EndedBattle[] = [];
+        for (const battle of [...this._battles.values()]) {
+            battle.attackerShipIds = battle.attackerShipIds.filter((id) => !gone.has(id));
+            battle.defenderShipIds = battle.defenderShipIds.filter((id) => !gone.has(id));
+            const present = (sideId: SideId) =>
+                vesselsAt(this._entities, battle).some((v) => v.sideId === sideId);
+            const attackerLeft = present(battle.attackerSideId);
+            const defenderLeft = present(battle.defenderSideId);
+            if (attackerLeft && defenderLeft) continue;
+            this._battles.delete(battle.battleId);
+            const attackerWon = attackerLeft || !defenderLeft;
+            ended.push({
+                battle,
+                winnerSideId: attackerWon ? battle.attackerSideId : battle.defenderSideId,
+                loserSideId: attackerWon ? battle.defenderSideId : battle.attackerSideId
+            });
+        }
+        return ended;
     }
 
     private _startIfContested(attacker: EntityOf<"ship">): BattleInfo | null {
@@ -177,8 +254,7 @@ export class BattleManager {
 
     /**
      * Resolve a battle on behalf of `bySideId` (must be the attacker). Every ship and supply
-     * ship of the losing side in the hex is removed: supply ship cargo is lost, crews go
-     * home and units aboard transports are destroyed.
+     * ship of the losing side in the hex is destroyed (see `destroyVessels`).
      */
     resolve(
         battleId: BattleId,
@@ -197,14 +273,9 @@ export class BattleManager {
 
         const loserSideId = winnerSideId === attackerSideId ? defenderSideId : attackerSideId;
         const losers = vesselsAt(this._entities, battle).filter((v) => v.sideId === loserSideId);
-        const destroyedUnitIds =
-            this._economy?.onShipsDestroyed(
-                losers.filter((v): v is EntityOf<"ship"> => v.kind === "ship")
-            ) ?? [];
-        const destroyedShipIds = losers.map((v) => v.id);
-        for (const id of destroyedShipIds) this._entities.remove(id);
+        const destroyed = destroyVessels(this._entities, this._economy, losers);
         this._battles.delete(battleId);
 
-        return { ok: true, battle, loserSideId, destroyedShipIds, destroyedUnitIds };
+        return { ok: true, battle, loserSideId, ...destroyed };
     }
 }

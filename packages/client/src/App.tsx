@@ -58,6 +58,7 @@ export function App() {
             }),
             messageManager.registerHandler("server:error", (_ctx, payload) => {
                 appendLog(`error — ${payload.message}`);
+                if (world.ready) world.showNotice(payload.message);
             }),
             messageManager.registerHandler("server:map:init", (_ctx, payload) => {
                 world.applyMapInit(payload);
@@ -93,6 +94,12 @@ export function App() {
                 world.applyShipMoved(payload);
                 appendLog(
                     `ship moved — ${payload.shipId} ${payload.from.q},${payload.from.r} → ${payload.to.q},${payload.to.r} in ${payload.path.length} steps (MP ${payload.movementPoints})`
+                );
+            }),
+            messageManager.registerHandler("server:ship:jumped", (_ctx, payload) => {
+                world.applyShipJumped(payload);
+                appendLog(
+                    `ship jumped — ${payload.shipId} ${payload.from.q},${payload.from.r} → ${payload.to.q},${payload.to.r} (${payload.outcome})${payload.destroyedIds.length ? `, destroyed ${payload.destroyedIds.join(", ")}` : ""}`
                 );
             }),
             messageManager.registerHandler("server:battle:start", (_ctx, payload) => {
@@ -249,6 +256,18 @@ export function App() {
                 sendMessage({ type: "client:invade", payload: { locationId, shipIds } });
                 appendLog(`invade — ${locationId} from ${shipIds.join(", ")}`);
             },
+            cancelMoveOrder: (shipId) => {
+                sendMessage({ type: "client:ship:order:cancel", payload: { shipId } });
+                appendLog(`cancel move order — ${shipId}`);
+            },
+            hyperjump: (shipId, target) => {
+                sendMessage({ type: "client:ship:hyperjump", payload: { shipId, target } });
+                appendLog(`hyperjump — ${shipId} → ${target.q},${target.r}`);
+            },
+            cancelHyperjump: (shipId) => {
+                sendMessage({ type: "client:ship:hyperjump:cancel", payload: { shipId } });
+                appendLog(`cancel hyperjump — ${shipId}`);
+            },
             resolveBattle: (battleId, winnerSideId) => {
                 sendMessage({ type: "client:battle:resolve", payload: { battleId, winnerSideId } });
                 appendLog(`resolve battle — ${battleId} → ${winnerSideId} wins`);
@@ -283,6 +302,13 @@ export function App() {
                     });
                     appendLog(`move — ${action.shipId} → ${action.to.q},${action.to.r}`);
                     break;
+                case "hyperjump":
+                    actions.hyperjump(action.shipId, action.target);
+                    break;
+                case "rejected":
+                    world.showNotice(action.reason);
+                    appendLog(`rejected — ${action.reason}`);
+                    break;
                 case "open-location":
                     openLocation(action.locationId);
                     break;
@@ -295,7 +321,7 @@ export function App() {
                     break;
             }
         },
-        [sendMessage, appendLog, openLocation]
+        [sendMessage, appendLog, openLocation, actions, world]
     );
 
     useEffect(() => {

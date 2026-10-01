@@ -3,6 +3,7 @@ import {
     axialDirectionTowards,
     axialToOffset,
     axialToPixel,
+    findHexPath,
     hexCorners,
     hexHorizSpacing,
     hexReachable,
@@ -14,9 +15,13 @@ import {
 } from "@space/maths";
 import {
     hexHasObstacle,
+    hyperdriveFor,
+    hyperjumpAccuracy,
+    MAX_SCATTER_RING,
     MOVE_COST_PER_HEX,
     PLANET_LEVEL_MAX,
     RESOURCE_KEYS,
+    ringHexes,
     SHIP_TYPE_INFO,
     siteForEntity,
     stockpileCap,
@@ -35,15 +40,19 @@ import {
     type GroundBattleInfo,
     type GroundUnit,
     type HexKey,
+    type HyperdriveAccuracy,
+    type HyperdriveBalance,
     type LocationEconomy,
     type LocationEntity,
     type Resources,
+    type ServerToClientMessage,
+    type ShipMoveOrder,
     type SideId,
     type TechId,
     type TileView,
     type TurnState
 } from "@space/shared-data";
-import { Explosions } from "./Explosions.js";
+import { Explosions, JUMP_ARRIVE_MS, JUMP_DEPART_MS, JumpFlashes } from "./Explosions.js";
 import { ShipMotion, SUPPLY_SHIP_MOTION, type MotionSpeeds, type ShipPose } from "./ShipMotion.js";
 
 export type Camera = {
@@ -71,6 +80,14 @@ type DeferredShip = { entity: MobileEntity; pose: ShipPose; fullColour: boolean 
  */
 type DyingShip = { entity: MobileEntity; motion: ShipMotion; colour?: string };
 
+/** Ship collapsing into hyperspace at its origin; its entity has already left the map. */
+type DepartingShip = { entity: MobileEntity; pose: ShipPose; departAt: number; arriveAt: number };
+
+/** Gap between consecutive jumps in one end of turn, so they read in resolution order. */
+const JUMP_STAGGER_MS = 450;
+/** Arriving ships grow to full size over this part of the arrival flash. */
+const JUMP_SCALE_IN_MS = JUMP_ARRIVE_MS * 0.5;
+
 export type BattleResolved = {
     battleId: BattleId;
     q: number;
@@ -92,6 +109,8 @@ export type GroundBattleResolved = {
     captured: boolean;
 };
 
+export type ShipJumped = Extract<ServerToClientMessage, { type: "server:ship:jumped" }>["payload"];
+
 export type ShipEntity = EntityOfKind<"ship">;
 export type SupplyShipEntity = EntityOfKind<"supply_ship">;
 export type PlanetEntity = EntityOfKind<"planet">;
@@ -106,6 +125,17 @@ function isMobile(entity: EntitySummary): entity is MobileEntity {
 
 function motionSpeeds(entity: MobileEntity): MotionSpeeds {
     return entity.kind === "ship" ? SHIP_TYPE_INFO[entity.shipType] : SUPPLY_SHIP_MOTION;
+}
+
+/** A move order after its ship reached `at`: the walked part of the route is dropped. */
+function advanceMoveOrder(
+    order: ShipMoveOrder | undefined,
+    at: AxialCoord
+): ShipMoveOrder | undefined {
+    if (!order) return undefined;
+    if (order.destination.q === at.q && order.destination.r === at.r) return undefined;
+    const index = order.route?.findIndex((h) => h.q === at.q && h.r === at.r) ?? -1;
+    return index >= 0 ? { ...order, route: order.route?.slice(index + 1) } : order;
 }
 
 export function isLocationEntity(entity: EntitySummary): entity is LocationEntity {
@@ -131,7 +161,10 @@ export type HexClickAction =
     | { type: "inspect"; entityId: EntityId }
     | { type: "deselect" }
     | { type: "open-location"; locationId: EntityId }
-    | { type: "move"; shipId: EntityId; to: AxialCoord };
+    | { type: "move"; shipId: EntityId; to: AxialCoord }
+    | { type: "hyperjump"; shipId: EntityId; target: AxialCoord }
+    /** Nothing was sent; `reason` is shown to the player. */
+    | { type: "rejected"; reason: string };
 
 /** What the right-hand info pane should display. */
 export type MapFocus =
@@ -218,6 +251,10 @@ export class HexWorld {
     inspectedEntityId: EntityId | null = null;
     /** Hex currently under the pointer, or `null` when the cursor left the map. */
     hoveredHex: Axial | null = null;
+    /** Selected ship whose next map click picks a hyperspace jump target. */
+    hyperjumpTargetingId: EntityId | null = null;
+    /** Short message over the map (rejected orders, server errors); `id` changes per message. */
+    notice: { text: string; id: number } | null = null;
     /** Our side's private economy; `null` until the first map init. */
     economy: EconomyState | null = null;
     /** Server-configured caps and build limits; `null` until the first map init. */
@@ -233,6 +270,14 @@ export class HexWorld {
     private readonly _framePoses = new Map<EntityId, ShipPose>();
     private readonly _explosions = new Explosions();
     private _dying: DyingShip[] = [];
+    private readonly _jumpFlashes = new JumpFlashes();
+    private _departing: DepartingShip[] = [];
+    /** Ships that jumped in: hidden until their arrival time, then scaled in. */
+    private readonly _arrivals = new Map<EntityId, number>();
+    private _lastJumpAt = -Infinity;
+    private _previewCache: { key: string; route: Axial[] | null } | null = null;
+    /** `performance.now()` of the frame being rendered. */
+    private _frameNow = 0;
     /** Pending battles involving our side. */
     private readonly _battles = new Map<BattleId, BattleInfo>();
     private readonly _groundBattles = new Map<BattleId, GroundBattleInfo>();
@@ -283,11 +328,15 @@ export class HexWorld {
         this.selectedShipId = null;
         this.inspectedEntityId = null;
         this.hoveredHex = null;
+        this.hyperjumpTargetingId = null;
         this._tiles.clear();
         this._visible.clear();
         this._motions.clear();
         this._explosions.clear();
         this._dying = [];
+        this._jumpFlashes.clear();
+        this._departing = [];
+        this._arrivals.clear();
         this._battles.clear();
         for (const battle of payload.battles) {
             this._battles.set(battle.battleId, battle);
@@ -372,7 +421,11 @@ export class HexWorld {
         const ship = this.findEntity(payload.shipId, "ship");
         if (!ship) return;
         this._applyMoved(
-            { ...ship, movementPoints: payload.movementPoints },
+            {
+                ...ship,
+                movementPoints: payload.movementPoints,
+                moveOrder: advanceMoveOrder(ship.moveOrder, payload.to)
+            },
             payload.from,
             payload.to,
             payload.path,
@@ -430,6 +483,78 @@ export class HexWorld {
         dest.entities = [...dest.entities, moved];
 
         this._animateMovedShips(before, new Map([[entity.id, [from, ...path]]]));
+        this._validateSelection();
+        this._notify();
+    }
+
+    /**
+     * Play a resolved hyperspace jump. The ship collapses at its origin, then flashes in at
+     * its landing hex; ships it destroyed keep drawing until then and explode on arrival.
+     * Positions update now so the tiles update that follows doesn't animate a normal move.
+     */
+    applyShipJumped(payload: ShipJumped) {
+        const now = performance.now();
+        const departAt = Math.max(now, this._lastJumpAt + JUMP_STAGGER_MS);
+        this._lastJumpAt = departAt;
+        const arriveAt = departAt + JUMP_DEPART_MS;
+        const landing = axialToPixel(payload.to.q, payload.to.r, this.hexSize);
+
+        const jumper = this.findEntity(payload.shipId, "ship");
+        if (jumper) {
+            const pose =
+                this._motions.get(jumper.id)?.poseAt(now) ??
+                ShipMotion.poseAtHex(jumper, jumper.facing, this.hexSize);
+            this._motions.delete(jumper.id);
+            this._departing.push({ entity: jumper, pose, departAt, arriveAt });
+        }
+        const jumperDestroyed = payload.destroyedIds.includes(payload.shipId);
+        this._jumpFlashes.spawn({
+            from: jumper ? axialToPixel(payload.from.q, payload.from.r, this.hexSize) : null,
+            to: landing,
+            departAt,
+            arriveAt,
+            damaged: payload.outcome === "damaged",
+            scale: this.hexSize
+        });
+
+        for (const id of payload.destroyedIds) {
+            const found = this.findEntityById(id);
+            const colour = sideColour(
+                found && "sideId" in found ? found.sideId : jumper?.sideId,
+                "#ffd166"
+            );
+            if (id === payload.shipId || !found || !isMobile(found)) {
+                this._explosions.spawn(landing, colour, this.hexSize, arriveAt);
+                continue;
+            }
+            const motion =
+                this._motions.get(id) ??
+                new ShipMotion(ShipMotion.poseAtHex(found, found.facing, this.hexSize), now);
+            this._motions.delete(id);
+            motion.holdUntil(arriveAt);
+            this._dying.push({ entity: found, motion, colour });
+        }
+
+        this._removeEntities(new Set([payload.shipId, ...payload.destroyedIds]));
+        if (jumper && !jumperDestroyed) {
+            const arrived: ShipEntity = {
+                ...jumper,
+                q: payload.to.q,
+                r: payload.to.r,
+                moveOrder: undefined,
+                hyperjump: undefined,
+                hyperdriveCharging: undefined
+            };
+            const key = hexKey(payload.to.q, payload.to.r);
+            let dest = this._tiles.get(key);
+            if (!dest) {
+                dest = { q: payload.to.q, r: payload.to.r, fog: "visible", entities: [] };
+                this._tiles.set(key, dest);
+            }
+            dest.entities = [...dest.entities, arrived];
+        }
+        if (!jumperDestroyed) this._arrivals.set(payload.shipId, arriveAt);
+        if (this.hyperjumpTargetingId === payload.shipId) this.hyperjumpTargetingId = null;
         this._validateSelection();
         this._notify();
     }
@@ -707,17 +832,72 @@ export class HexWorld {
         return this.selectedShipId ? this.findEntity(this.selectedShipId, "ship") : undefined;
     }
 
+    /** Whether one of our ships is held in a pending battle. */
+    shipInBattle(shipId: EntityId): boolean {
+        return this.battles.some(
+            (b) => b.attackerShipIds.includes(shipId) || b.defenderShipIds.includes(shipId)
+        );
+    }
+
+    hyperdriveOf(ship: ShipEntity): HyperdriveBalance | undefined {
+        return this.balance ? hyperdriveFor(this.balance, ship.shipType) : undefined;
+    }
+
+    /** Landing chances for a jump by `ship` with our current techs. */
+    jumpAccuracy(ship: ShipEntity): HyperdriveAccuracy | undefined {
+        if (!this.balance) return undefined;
+        return hyperjumpAccuracy(
+            this.balance,
+            ship.shipType,
+            ship.tier ?? 1,
+            this.economy?.techs ?? []
+        );
+    }
+
+    /** Selected ship waiting for a hyperspace jump target click. */
+    get hyperjumpTargeting(): ShipEntity | undefined {
+        const ship = this.selectedShip;
+        return ship && ship.id === this.hyperjumpTargetingId ? ship : undefined;
+    }
+
+    /** Select `shipId` and make the next map click pick its jump target. */
+    startHyperjumpTargeting(shipId: EntityId) {
+        this.selectShip(shipId);
+        if (this.hyperjumpTargetingId === shipId) return;
+        this.hyperjumpTargetingId = shipId;
+        this._notify();
+    }
+
+    cancelHyperjumpTargeting() {
+        if (!this.hyperjumpTargetingId) return;
+        this.hyperjumpTargetingId = null;
+        this._notify();
+    }
+
+    showNotice(text: string) {
+        this.notice = { text, id: (this.notice?.id ?? 0) + 1 };
+        this._notify();
+    }
+
+    clearNotice(id: number) {
+        if (this.notice?.id !== id) return;
+        this.notice = null;
+        this._notify();
+    }
+
     selectShip(shipId: EntityId | null) {
         if (shipId === null) {
             if (!this.selectedShipId && !this.inspectedEntityId) return;
             this.selectedShipId = null;
             this.inspectedEntityId = null;
+            this.hyperjumpTargetingId = null;
             this._notify();
             return;
         }
         if (this.selectedShipId === shipId) return;
         this.selectedShipId = shipId;
         this.inspectedEntityId = null;
+        this.hyperjumpTargetingId = null;
         this._notify();
     }
 
@@ -731,6 +911,7 @@ export class HexWorld {
         if (this.inspectedEntityId === entityId) return;
         this.inspectedEntityId = entityId;
         this.selectedShipId = null;
+        this.hyperjumpTargetingId = null;
         this._notify();
     }
 
@@ -825,16 +1006,43 @@ export class HexWorld {
         };
     }
 
+    /** Ship routes, like the server's: explored hexes only, around known obstacles. */
+    private _routeOptions(): HexPathOptions {
+        return {
+            inBounds: (h) => this.isOnMap(h.q, h.r) && this._tiles.has(hexKey(h.q, h.r)),
+            passable: (h) => !this.isKnownObstacle(h)
+        };
+    }
+
+    isExplored(hex: Axial): boolean {
+        return this._tiles.has(hexKey(hex.q, hex.r));
+    }
+
     /**
      * Hexes the selected ship can reach this turn going around known obstacles
      * (excluding its own hex). Obstacles are included when they are the final step.
      */
     reachableHexes(): Axial[] {
         const ship = this.selectedShip;
-        if (!ship) return [];
+        if (!ship || ship.hyperdriveCharging) return [];
         const steps = Math.floor(ship.movementPoints / MOVE_COST_PER_HEX);
         if (steps <= 0) return [];
-        return hexReachable(ship, steps, this._pathOptions());
+        return hexReachable(ship, steps, this._routeOptions());
+    }
+
+    /**
+     * Route the selected ship would take to `hex` (its own hex excluded) through explored
+     * space, or null when there is none. Cosmetic: the server plans the real one.
+     */
+    previewRoute(hex: Axial): Axial[] | null {
+        const ship = this.selectedShip;
+        if (!ship || (ship.q === hex.q && ship.r === hex.r) || !this.isExplored(hex)) return null;
+        const key = `${ship.q},${ship.r}>${hex.q},${hex.r}@${this._version}`;
+        if (this._previewCache?.key !== key) {
+            const path = findHexPath(ship, hex, this._routeOptions());
+            this._previewCache = { key, route: path ? path.slice(1) : null };
+        }
+        return this._previewCache.route;
     }
 
     pickHex(screen: Pixel, canvas: HTMLCanvasElement): Axial | null {
@@ -847,6 +1055,9 @@ export class HexWorld {
     handleClick(screen: Pixel, canvas: HTMLCanvasElement): HexClickAction {
         if (this.battleToResolve || this.groundBattleToResolve) return { type: "none" };
         const hex = this.pickHex(screen, canvas);
+        if (this.hyperjumpTargetingId) {
+            return this._targetingClick(hex);
+        }
         if (!hex) {
             return this._deselect();
         }
@@ -872,19 +1083,44 @@ export class HexWorld {
             return this._pick(ownShip, false);
         }
 
-        const location = primaryEntity(entities.filter(isBuildSite));
+        // Any explored hex is a destination: the ship goes as far as its MP allow now and
+        // the server keeps the rest as a move order.
         const ship = this.selectedShip;
-        if (ship && ship.movementPoints >= MOVE_COST_PER_HEX) {
-            const inRange = this.reachableHexes().some((h) => h.q === hex.q && h.r === hex.r);
-            // Beyond range the ship heads that way and stops when MP run out, except
-            // that far locations still open their page.
-            if (inRange || !location) {
-                return { type: "move", shipId: ship.id, to: { q: hex.q, r: hex.r } };
+        if (ship) {
+            if (!tile) {
+                return { type: "rejected", reason: "Ships can only be sent to explored hexes" };
             }
+            if (ship.hyperdriveCharging) {
+                return {
+                    type: "rejected",
+                    reason: "Hyperdrive engaged: cancel the jump to move normally"
+                };
+            }
+            return { type: "move", shipId: ship.id, to: { q: hex.q, r: hex.r } };
         }
 
+        const location = primaryEntity(entities.filter(isBuildSite));
         const first = location ?? primaryEntity(entities);
         return first ? this._pick(first, true) : this._deselect();
+    }
+
+    /** While targeting, a click on an explored hex picks the jump target; nothing else changes. */
+    private _targetingClick(hex: Axial | null): HexClickAction {
+        const ship = this.hyperjumpTargeting;
+        if (!ship) {
+            this.cancelHyperjumpTargeting();
+            return { type: "none" };
+        }
+        if (!hex) return { type: "none" };
+        if (!this.isExplored(hex)) {
+            return { type: "rejected", reason: "Jump targets must be explored hexes" };
+        }
+        if (hex.q === ship.q && hex.r === ship.r) {
+            return { type: "rejected", reason: "Pick a hex other than the ship's own" };
+        }
+        this.hyperjumpTargetingId = null;
+        this._notify();
+        return { type: "hyperjump", shipId: ship.id, target: { q: hex.q, r: hex.r } };
     }
 
     /** Entities on a hex in click-cycle order: our ships, then locations, then the rest. */
@@ -917,6 +1153,7 @@ export class HexWorld {
         if (!this.selectedShipId && !this.inspectedEntityId) return { type: "none" };
         this.selectedShipId = null;
         this.inspectedEntityId = null;
+        this.hyperjumpTargetingId = null;
         this._notify();
         return { type: "deselect" };
     }
@@ -1001,6 +1238,9 @@ export class HexWorld {
                 this.selectedShipId = null;
             }
         }
+        if (this.hyperjumpTargetingId && this.hyperjumpTargetingId !== this.selectedShipId) {
+            this.hyperjumpTargetingId = null;
+        }
         if (this.inspectedEntityId && !this.findEntityById(this.inspectedEntityId)) {
             this.inspectedEntityId = null;
         }
@@ -1060,6 +1300,7 @@ export class HexWorld {
         if (!this.ready) return;
 
         const now = performance.now();
+        this._frameNow = now;
         this._framePoses.clear();
         for (const [id, motion] of this._motions) {
             if (motion.isDone(now)) {
@@ -1067,6 +1308,9 @@ export class HexWorld {
             } else {
                 this._framePoses.set(id, motion.poseAt(now));
             }
+        }
+        for (const [id, arriveAt] of this._arrivals) {
+            if (now >= arriveAt + JUMP_SCALE_IN_MS) this._arrivals.delete(id);
         }
         const deferred: DeferredShip[] = [];
 
@@ -1087,15 +1331,7 @@ export class HexWorld {
         const drawn = new Set<EntityId>();
         for (const { entity, pose, fullColour } of deferred) {
             const center = this.worldToScreen(pose, canvas);
-            drawEntityPlaceholder(
-                context,
-                center,
-                size,
-                entity,
-                this.balance,
-                fullColour,
-                pose.heading
-            );
+            this._drawShip(context, center, size, entity, fullColour, pose.heading);
             drawn.add(entity.id);
         }
         for (const id of this._framePoses.keys()) {
@@ -1106,14 +1342,91 @@ export class HexWorld {
         }
 
         this._drawDying(context, canvas, now, size);
-        this._explosions.render(
-            context,
-            now,
-            (p) => this.worldToScreen(p, canvas),
-            this.camera.zoom
-        );
+        this._drawDeparting(context, canvas, now, size);
+        const toScreen = (p: Pixel) => this.worldToScreen(p, canvas);
+        this._jumpFlashes.render(context, now, toScreen, this.camera.zoom);
+        this._explosions.render(context, now, toScreen, this.camera.zoom);
 
         this._drawSelection(context, canvas);
+    }
+
+    /** 0 while a jumping ship is still in hyperspace, growing to 1 as it arrives. */
+    private _arrivalScale(id: EntityId): number {
+        const arriveAt = this._arrivals.get(id);
+        if (arriveAt === undefined) return 1;
+        const t = (this._frameNow - arriveAt) / JUMP_SCALE_IN_MS;
+        if (t <= 0) return 0;
+        return t >= 1 ? 1 : t * t * (3 - 2 * t);
+    }
+
+    /** Mobile entity with its hyperdrive glow and any jump-arrival scaling. */
+    private _drawShip(
+        ctx: DrawCtx,
+        center: Pixel,
+        size: number,
+        entity: MobileEntity,
+        fullColour: boolean,
+        heading?: number
+    ) {
+        const scale = this._arrivalScale(entity.id);
+        if (scale <= 0) return;
+        if (entity.kind === "ship" && entity.hyperdriveCharging) {
+            this._drawChargeGlow(ctx, center, size, fullColour);
+        }
+        drawEntityPlaceholder(ctx, center, size * scale, entity, this.balance, fullColour, heading);
+    }
+
+    /** Pulsing cyan glow around a ship whose hyperdrive is engaged. */
+    private _drawChargeGlow(ctx: DrawCtx, center: Pixel, size: number, fullColour: boolean) {
+        const pulse = 0.5 + 0.5 * Math.sin(this._frameNow / 180);
+        const radius = size * (0.62 + 0.14 * pulse);
+        const alpha = fullColour ? 1 : 0.5;
+        ctx.save();
+        const g = ctx.createRadialGradient(
+            center.x,
+            center.y,
+            size * 0.1,
+            center.x,
+            center.y,
+            radius
+        );
+        g.addColorStop(0, `rgba(127, 232, 255, ${(0.25 + 0.25 * pulse) * alpha})`);
+        g.addColorStop(1, "rgba(127, 232, 255, 0)");
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = `rgba(160, 240, 255, ${(0.35 + 0.45 * pulse) * alpha})`;
+        ctx.lineWidth = Math.max(1, size * 0.035);
+        ctx.beginPath();
+        ctx.arc(center.x, center.y, radius * 0.85, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+    }
+
+    /** Jumping ships shrink away at their origin while the implosion plays. */
+    private _drawDeparting(ctx: DrawCtx, canvas: HTMLCanvasElement, now: number, size: number) {
+        this._departing = this._departing.filter(({ entity, pose, departAt, arriveAt }) => {
+            if (now >= arriveAt) return false;
+            const t = Math.max(0, (now - departAt) / (arriveAt - departAt));
+            const center = this.worldToScreen(pose, canvas);
+            if (entity.kind === "ship" && t === 0) {
+                this._drawChargeGlow(ctx, center, size, true);
+            }
+            ctx.save();
+            ctx.globalAlpha = 1 - t * t;
+            drawEntityPlaceholder(
+                ctx,
+                center,
+                size * (1 - t),
+                entity,
+                this.balance,
+                true,
+                pose.heading + t * t * Math.PI
+            );
+            ctx.restore();
+            return true;
+        });
     }
 
     private _drawDying(ctx: DrawCtx, canvas: HTMLCanvasElement, now: number, size: number) {
@@ -1158,13 +1471,208 @@ export class HexWorld {
         ctx.stroke();
 
         for (const entity of tile.entities) {
-            const pose = isMobile(entity) ? this._framePoses.get(entity.id) : undefined;
-            if (isMobile(entity) && pose) {
+            if (!isMobile(entity)) {
+                drawEntityPlaceholder(ctx, center, size, entity, this.balance, fullColour);
+                continue;
+            }
+            const pose = this._framePoses.get(entity.id);
+            if (pose) {
                 deferred.push({ entity, pose, fullColour });
                 continue;
             }
-            drawEntityPlaceholder(ctx, center, size, entity, this.balance, fullColour);
+            this._drawShip(ctx, center, size, entity, fullColour);
         }
+    }
+
+    /** Line from `start` through `route` in the current stroke style: solid for `solid` hexes, dashed after. */
+    private _strokeRoute(ctx: DrawCtx, start: Pixel, route: Pixel[], solid: number, size: number) {
+        const drawLeg = (points: Pixel[], dashed: boolean) => {
+            if (points.length < 2) return;
+            ctx.setLineDash(dashed ? [size * 0.18, size * 0.14] : []);
+            ctx.beginPath();
+            ctx.moveTo(points[0].x, points[0].y);
+            for (const p of points.slice(1)) ctx.lineTo(p.x, p.y);
+            ctx.stroke();
+        };
+        drawLeg([start, ...route.slice(0, solid)], false);
+        drawLeg(solid > 0 ? route.slice(solid - 1) : [start, ...route], true);
+        ctx.setLineDash([]);
+    }
+
+    private _hexToScreen(hex: Axial, canvas: HTMLCanvasElement): Pixel {
+        return this.worldToScreen(axialToPixel(hex.q, hex.r, this.hexSize), canvas);
+    }
+
+    /** Where a ship is drawn this frame, mid-animation or at its hex. */
+    private _shipScreenPos(ship: MobileEntity, canvas: HTMLCanvasElement): Pixel {
+        return this.worldToScreen(
+            this._framePoses.get(ship.id) ?? axialToPixel(ship.q, ship.r, this.hexSize),
+            canvas
+        );
+    }
+
+    /** Our ships carrying a move order or a pending jump. */
+    private _ownShipsWithOrders(): ShipEntity[] {
+        const ships: ShipEntity[] = [];
+        for (const tile of this._tiles.values()) {
+            for (const e of tile.entities) {
+                if (e.kind !== "ship" || e.sideId !== this.sideId) continue;
+                if (e.moveOrder || e.hyperjump) ships.push(e);
+            }
+        }
+        return ships;
+    }
+
+    /**
+     * Move order destinations and jump targets of our ships. The selected ship gets its
+     * whole route (next end of turn solid, later turns dashed) and a prominent flag.
+     */
+    private _drawOrders(ctx: DrawCtx, canvas: HTMLCanvasElement) {
+        const size = this.hexSize * this.camera.zoom;
+        for (const ship of this._ownShipsWithOrders()) {
+            const selected = ship.id === this.selectedShipId;
+            if (ship.hyperjump) {
+                this._drawScatter(ctx, canvas, ship.hyperjump.target, selected ? 0.9 : 0.4);
+                if (selected) {
+                    ctx.save();
+                    ctx.strokeStyle = "rgba(127, 232, 255, 0.6)";
+                    ctx.lineWidth = Math.max(1, size * 0.035);
+                    ctx.setLineDash([size * 0.1, size * 0.14]);
+                    const from = this._shipScreenPos(ship, canvas);
+                    const to = this._hexToScreen(ship.hyperjump.target, canvas);
+                    ctx.beginPath();
+                    ctx.moveTo(from.x, from.y);
+                    ctx.lineTo(to.x, to.y);
+                    ctx.stroke();
+                    ctx.restore();
+                }
+            }
+            if (!ship.moveOrder) continue;
+            const dest = this._hexToScreen(ship.moveOrder.destination, canvas);
+            if (!selected) {
+                this._drawFlag(ctx, dest, size, false);
+                continue;
+            }
+            const route = (ship.moveOrder.route ?? [ship.moveOrder.destination]).map((h) =>
+                this._hexToScreen(h, canvas)
+            );
+            const nextTurn = Math.floor(ship.maxMovementPoints / MOVE_COST_PER_HEX);
+            ctx.save();
+            ctx.strokeStyle = "rgba(92, 255, 176, 0.85)";
+            ctx.fillStyle = "rgba(92, 255, 176, 0.85)";
+            ctx.lineWidth = Math.max(1, size * 0.05);
+            this._strokeRoute(ctx, this._shipScreenPos(ship, canvas), route, nextTurn, size);
+            for (const p of route.slice(0, -1)) {
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, Math.max(1.5, size * 0.06), 0, Math.PI * 2);
+                ctx.fill();
+            }
+            ctx.restore();
+            this._drawFlag(ctx, dest, size, true);
+        }
+    }
+
+    /** Move order destination: a pulsing ring and flag, or a small faint flag. */
+    private _drawFlag(ctx: DrawCtx, at: Pixel, size: number, prominent: boolean) {
+        const k = prominent ? 1 : 0.45;
+        ctx.save();
+        if (prominent) {
+            const pulse = 0.5 + 0.5 * Math.sin(this._frameNow / 250);
+            ctx.strokeStyle = `rgba(92, 255, 176, ${0.55 + 0.45 * pulse})`;
+            ctx.lineWidth = Math.max(1.5, size * 0.05);
+            ctx.beginPath();
+            ctx.arc(at.x, at.y, size * (0.55 + 0.05 * pulse), 0, Math.PI * 2);
+            ctx.stroke();
+        } else {
+            ctx.globalAlpha = 0.6;
+        }
+        const pole = size * 0.7 * k;
+        const baseX = at.x - size * 0.12 * k;
+        const baseY = at.y + pole * 0.45;
+        ctx.strokeStyle = "#e8eefc";
+        ctx.lineWidth = Math.max(1, size * 0.035 * k);
+        ctx.beginPath();
+        ctx.moveTo(baseX, baseY);
+        ctx.lineTo(baseX, baseY - pole);
+        ctx.stroke();
+        ctx.fillStyle = "#5cffb0";
+        ctx.beginPath();
+        ctx.moveTo(baseX, baseY - pole);
+        ctx.lineTo(baseX + pole * 0.6, baseY - pole * 0.78);
+        ctx.lineTo(baseX, baseY - pole * 0.56);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+    }
+
+    /** Jump target hex and the rings a jump can scatter onto, faded by `strength` (0-1). */
+    private _drawScatter(ctx: DrawCtx, canvas: HTMLCanvasElement, target: Axial, strength: number) {
+        const size = this.hexSize * this.camera.zoom;
+        const inBounds = (h: Axial) => this.isOnMap(h.q, h.r);
+        ctx.save();
+        ctx.lineWidth = Math.max(0.75, size * 0.025);
+        for (let ring = MAX_SCATTER_RING; ring >= 1; ring--) {
+            const fade = strength / (ring + 1);
+            ctx.fillStyle = `rgba(127, 232, 255, ${0.22 * fade})`;
+            ctx.strokeStyle = `rgba(127, 232, 255, ${0.35 * fade})`;
+            for (const hex of ringHexes(target, ring, inBounds)) {
+                this._hexPath(ctx, this._hexToScreen(hex, canvas), size * 0.92);
+                ctx.fill();
+                ctx.stroke();
+            }
+        }
+        const center = this._hexToScreen(target, canvas);
+        ctx.fillStyle = `rgba(127, 232, 255, ${0.3 * strength})`;
+        ctx.strokeStyle = `rgba(160, 240, 255, ${strength})`;
+        ctx.lineWidth = Math.max(1.5, size * 0.05);
+        this._hexPath(ctx, center, size * 0.92);
+        ctx.fill();
+        ctx.stroke();
+        const r = size * 0.3;
+        ctx.beginPath();
+        ctx.moveTo(center.x - r, center.y);
+        ctx.lineTo(center.x + r, center.y);
+        ctx.moveTo(center.x, center.y - r);
+        ctx.lineTo(center.x, center.y + r);
+        ctx.stroke();
+        ctx.restore();
+    }
+
+    /**
+     * Under the cursor with a ship selected: the scatter area while targeting a jump,
+     * otherwise the route a move would take (this turn's MP solid, the rest dashed).
+     */
+    private _drawHoverPreview(ctx: DrawCtx, canvas: HTMLCanvasElement, ship: ShipEntity) {
+        const hex = this.hoveredHex;
+        if (!hex || this.battleToResolve || this.groundBattleToResolve) return;
+        const size = this.hexSize * this.camera.zoom;
+        const onShip = hex.q === ship.q && hex.r === ship.r;
+        if (onShip) return;
+        if (!this.isExplored(hex)) {
+            ctx.save();
+            ctx.strokeStyle = "rgba(255, 107, 138, 0.6)";
+            ctx.lineWidth = Math.max(1, size * 0.04);
+            ctx.setLineDash([size * 0.1, size * 0.08]);
+            this._hexPath(ctx, this._hexToScreen(hex, canvas), size * 0.85);
+            ctx.stroke();
+            ctx.restore();
+            return;
+        }
+        if (this.hyperjumpTargeting) {
+            this._drawScatter(ctx, canvas, hex, 1);
+            return;
+        }
+        if (ship.hyperdriveCharging) return;
+        const route = this.previewRoute(hex)?.map((h) => this._hexToScreen(h, canvas));
+        if (!route?.length) return;
+        ctx.save();
+        ctx.strokeStyle = "rgba(232, 238, 252, 0.7)";
+        ctx.lineWidth = Math.max(1, size * 0.035);
+        const thisTurn = Math.floor(ship.movementPoints / MOVE_COST_PER_HEX);
+        this._strokeRoute(ctx, this._shipScreenPos(ship, canvas), route, thisTurn, size);
+        this._hexPath(ctx, route[route.length - 1], size * 0.85);
+        ctx.stroke();
+        ctx.restore();
     }
 
     /** Planned route of the inspected supply ship: solid for this turn's hexes, dashed after. */
@@ -1188,17 +1696,7 @@ export class HexWorld {
         ctx.strokeStyle = "rgba(255, 209, 102, 0.85)";
         ctx.fillStyle = "rgba(255, 209, 102, 0.85)";
         ctx.lineWidth = Math.max(1, size * 0.05);
-        const drawLeg = (points: Pixel[], dashed: boolean) => {
-            if (points.length < 2) return;
-            ctx.setLineDash(dashed ? [size * 0.18, size * 0.14] : []);
-            ctx.beginPath();
-            ctx.moveTo(points[0].x, points[0].y);
-            for (const p of points.slice(1)) ctx.lineTo(p.x, p.y);
-            ctx.stroke();
-        };
-        drawLeg([start, ...route.slice(0, thisTurn)], false);
-        drawLeg(route.slice(Math.max(0, thisTurn - 1)), true);
-        ctx.setLineDash([]);
+        this._strokeRoute(ctx, start, route, thisTurn, size);
         for (const p of route) {
             ctx.beginPath();
             ctx.arc(p.x, p.y, Math.max(1.5, size * 0.07), 0, Math.PI * 2);
@@ -1245,24 +1743,26 @@ export class HexWorld {
         this._drawSupplyRoute(ctx, canvas);
         this._drawInspected(ctx, canvas);
         const ship = this.selectedShip;
-        if (!ship) return;
+        if (ship && !this.hyperjumpTargeting) {
+            const size = this.hexSize * this.camera.zoom;
+            ctx.save();
+            ctx.fillStyle = "rgba(92, 255, 176, 0.1)";
+            ctx.strokeStyle = "rgba(92, 255, 176, 0.45)";
+            ctx.lineWidth = Math.max(0.75, 1.5 * this.camera.zoom);
+            for (const hex of this.reachableHexes()) {
+                this._hexPath(ctx, this._hexToScreen(hex, canvas), size * 0.92);
+                ctx.fill();
+                ctx.stroke();
+            }
+            ctx.restore();
+        }
+        this._drawOrders(ctx, canvas);
+        if (!ship || this._arrivalScale(ship.id) <= 0) return;
+        this._drawHoverPreview(ctx, canvas, ship);
         const size = this.hexSize * this.camera.zoom;
 
         ctx.save();
-        ctx.fillStyle = "rgba(92, 255, 176, 0.1)";
-        ctx.strokeStyle = "rgba(92, 255, 176, 0.45)";
-        ctx.lineWidth = Math.max(0.75, 1.5 * this.camera.zoom);
-        for (const hex of this.reachableHexes()) {
-            const center = this.worldToScreen(axialToPixel(hex.q, hex.r, this.hexSize), canvas);
-            this._hexPath(ctx, center, size * 0.92);
-            ctx.fill();
-            ctx.stroke();
-        }
-
-        const center = this.worldToScreen(
-            this._framePoses.get(ship.id) ?? axialToPixel(ship.q, ship.r, this.hexSize),
-            canvas
-        );
+        const center = this._shipScreenPos(ship, canvas);
         const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 250);
         ctx.strokeStyle = `rgba(255, 255, 255, ${0.6 + 0.4 * pulse})`;
         ctx.lineWidth = Math.max(1.5, size * 0.06);

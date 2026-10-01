@@ -43,8 +43,8 @@ const GROUND_UNIT_IMAGES: Partial<Record<GroundUnitType, string>> = {
 
 const SUPPLY_SHIP_IMAGE = "ships/cargo-ship.webp";
 
-/** Every tech has a picture, so a new tech must be given one here. */
-const TECH_IMAGES: Record<TechId, string> = {
+/** Techs without a picture show the Thumbnail initials badge. */
+const TECH_IMAGES: Partial<Record<TechId, string>> = {
     supply_speed_1: "research/improved-drives.jpg",
     supply_speed_2: "research/advanced-drives.png",
     supply_capacity_1: "research/expanded-holds.jpg",
@@ -79,8 +79,8 @@ export function imageUrl(subject: ImageSubject): string | undefined {
     }
 }
 
-export function techImage(techId: TechId): string {
-    return `${PUBLIC_BASE}/${TECH_IMAGES[techId]}`;
+export function techImage(techId: TechId): string | undefined {
+    return url(TECH_IMAGES[techId]);
 }
 
 /** Picture for a build option or order; upgrades show their target. */

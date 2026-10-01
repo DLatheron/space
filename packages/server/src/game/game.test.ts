@@ -867,7 +867,7 @@ describe("BattleManager", () => {
         const result = battles.moveShip("alpha", alphaShip.id, { q: 8, r: 5 });
         expect(result.ok).toBe(true);
         if (!result.ok) return;
-        expect(result.move.path).toEqual([
+        expect(result.move?.path).toEqual([
             { q: 6, r: 5 },
             { q: 7, r: 5 }
         ]);

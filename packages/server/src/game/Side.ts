@@ -264,9 +264,19 @@ export class Side {
         return Array.from(this._visible);
     }
 
-    /** Wire snapshot as this side may see it: other sides' supply routes and reservations are hidden. */
+    /**
+     * Wire snapshot as this side may see it: other sides' supply routes and reservations, ship
+     * move orders, jump targets and hyperdrive cooldowns are hidden (charging stays visible).
+     */
     summarize(entity: Entity): EntitySummary {
         const summary = entityToSummary(entity);
+        if (summary.kind === "ship") {
+            if (summary.sideId === this.id) return summary;
+            delete summary.moveOrder;
+            delete summary.hyperjump;
+            delete summary.hyperdriveCooldown;
+            return summary;
+        }
         if (summary.kind !== "supply_ship" || summary.sideId === this.id) return summary;
         const redacted = { ...summary, reservedFor: [] };
         delete redacted.route;

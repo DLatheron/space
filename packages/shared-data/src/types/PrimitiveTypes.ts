@@ -101,9 +101,23 @@ export const ShipEntity = EntityBase.extend({
     /** Absent means tier 1. */
     tier: EnhancementTier.optional(),
     /** Ground units aboard; transports only. */
-    carriedUnitIds: z.array(EntityId).optional()
+    carriedUnitIds: z.array(EntityId).optional(),
+    /**
+     * Multi-turn move still to run at the start of each end of turn; only sent to the owning
+     * side. `route` is the planned path from the current hex (excluded) to `destination`.
+     */
+    moveOrder: z
+        .object({ destination: AxialCoord, route: z.array(AxialCoord).optional() })
+        .optional(),
+    /** Pending hyperspace jump, resolved at end of turn; only sent to the owning side. */
+    hyperjump: z.object({ target: AxialCoord }).optional(),
+    /** Hyperdrive engaged (a jump is pending); visible to every side that sees the ship. */
+    hyperdriveCharging: z.boolean().optional(),
+    /** Turns before the hyperdrive can be engaged again; absent means ready. Owner only. */
+    hyperdriveCooldown: z.number().int().min(0).optional()
 });
 export type ShipEntity = z.infer<typeof ShipEntity>;
+export type ShipMoveOrder = NonNullable<ShipEntity["moveOrder"]>;
 
 /** Reserves part of a supply ship's cargo for one build order at its destination. */
 export const CargoReservation = z.object({

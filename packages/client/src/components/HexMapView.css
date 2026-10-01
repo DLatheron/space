@@ -21,6 +21,63 @@
     cursor: grabbing;
 }
 
+.hex-map-view__canvas--targeting,
+.hex-map-view__canvas--targeting:active {
+    cursor: crosshair;
+}
+
+/* Below the resource bar, centred over the map. */
+.hex-map-view__banners {
+    position: absolute;
+    top: 4rem;
+    left: 50%;
+    transform: translateX(-50%);
+    display: grid;
+    gap: 0.4rem;
+    justify-items: center;
+    max-width: calc(100% - 1.5rem);
+    pointer-events: none;
+}
+
+.hex-map-view__banner {
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+    padding: 0.4rem 0.75rem;
+    border: 1px solid #3a4d73;
+    border-radius: 0.35rem;
+    background: rgba(8, 12, 24, 0.9);
+    color: #e8eefc;
+    font-size: 0.85rem;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+}
+
+.hex-map-view__banner--targeting {
+    border-color: #7fe8ff;
+    color: #7fe8ff;
+    pointer-events: auto;
+}
+
+.hex-map-view__banner--targeting button {
+    padding: 0.25rem 0.6rem;
+    border-color: #7fe8ff;
+    color: #7fe8ff;
+    font-size: 0.8rem;
+}
+
+.hex-map-view__banner--notice {
+    border-color: #ff6b8a;
+    color: #ffb3c2;
+    animation: hex-map-view-notice 0.2s ease-out;
+}
+
+@keyframes hex-map-view-notice {
+    from {
+        opacity: 0;
+        transform: translateY(-0.3rem);
+    }
+}
+
 .hex-map-view__hint {
     position: absolute;
     left: 0.75rem;
