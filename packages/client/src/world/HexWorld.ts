@@ -20,6 +20,8 @@ import {
     hexHasObstacle,
     hyperdriveFor,
     hyperjumpAccuracy,
+    hyperjumpRange,
+    inHyperjumpRange,
     MAX_SCATTER_RING,
     MOVE_COST_PER_HEX,
     PLANET_LEVEL_MAX,
@@ -1136,6 +1138,18 @@ export class HexWorld {
         );
     }
 
+    /** Our hyperjump range in hexes with our current techs; undefined before the map loads. */
+    jumpRange(): number | undefined {
+        if (!this.balance || !this.ready) return undefined;
+        return hyperjumpRange(this.balance, this.economy?.techs ?? [], this.width, this.height);
+    }
+
+    /** Whether `hex` is within jump range of `ship` (always true while the range is unknown). */
+    inJumpRange(ship: ShipEntity, hex: Axial): boolean {
+        const range = this.jumpRange();
+        return range === undefined || inHyperjumpRange(ship, hex, range);
+    }
+
     /** Selected ship waiting for a hyperspace jump target click. */
     get hyperjumpTargeting(): ShipEntity | undefined {
         const ship = this.selectedShip;
@@ -1347,7 +1361,7 @@ export class HexWorld {
         const entities = tile?.entities.filter((e) => !isCarried(e)) ?? [];
 
         // Clicking the hex of the current selection cycles through everything on it
-        // (never a move order); clicking the only selected ship deselects it.
+        // (never a move order); a lone selected ship stays selected (Escape deselects).
         const cycle = this.clickCycle(entities);
         const index = cycle.findIndex(
             (e) => e.id === (this.selectedShipId ?? this.inspectedEntityId)
@@ -1356,16 +1370,12 @@ export class HexWorld {
             return this._pick(cycle[(index + 1) % cycle.length], false);
         }
         if (index >= 0 && this.selectedShipId) {
-            return this._deselect();
+            return { type: "none" };
         }
 
-        const ownShip = cycle[0];
-        if (ownShip?.kind === "ship" && ownShip.sideId === this.sideId) {
-            return this._pick(ownShip, false);
-        }
-
-        // Any explored hex is a destination: the ship goes as far as its MP allow now and
-        // the server keeps the rest as a move order.
+        // With a ship selected, any other hex is a destination, even one holding our own
+        // ships or locations: the ship goes as far as its MP allow now and the server keeps
+        // the rest as a move order.
         const ship = this.selectedShip;
         if (ship) {
             if (!tile) {
@@ -1390,6 +1400,11 @@ export class HexWorld {
             return move;
         }
 
+        const ownShip = cycle[0];
+        if (ownShip?.kind === "ship" && ownShip.sideId === this.sideId) {
+            return this._pick(ownShip, false);
+        }
+
         const location = primaryEntity(entities.filter(isBuildSite));
         const first = location ?? primaryEntity(entities);
         return first ? this._pick(first, true) : this._deselect();
@@ -1408,6 +1423,12 @@ export class HexWorld {
         }
         if (hex.q === ship.q && hex.r === ship.r) {
             return { type: "rejected", reason: "Pick a hex other than the ship's own" };
+        }
+        if (!this.inJumpRange(ship, hex)) {
+            return {
+                type: "rejected",
+                reason: `Beyond hyperdrive range (${(this.jumpRange() ?? 0).toFixed(1)} hexes)`
+            };
         }
         this.hyperjumpTargetingId = null;
         this._notify();
@@ -1965,6 +1986,26 @@ export class HexWorld {
         ctx.restore();
     }
 
+    /** Dashed circle around a targeting ship marking how far its jump can reach. */
+    private _drawJumpRange(ctx: DrawCtx, canvas: HTMLCanvasElement, ship: ShipEntity) {
+        const range = this.jumpRange();
+        if (range === undefined) return;
+        const size = this.hexSize * this.camera.zoom;
+        const center = this._shipScreenPos(ship, canvas);
+        // Neighbouring pointy-top hex centres are sqrt(3) * size apart.
+        const radius = range * Math.sqrt(3) * size;
+        ctx.save();
+        ctx.fillStyle = "rgba(127, 232, 255, 0.05)";
+        ctx.strokeStyle = "rgba(127, 232, 255, 0.6)";
+        ctx.lineWidth = Math.max(1, size * 0.04);
+        ctx.setLineDash([size * 0.25, size * 0.15]);
+        ctx.beginPath();
+        ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+    }
+
     /** Jump target hex and the rings a jump can scatter onto, faded by `strength` (0-1). */
     private _drawScatter(ctx: DrawCtx, canvas: HTMLCanvasElement, target: Axial, strength: number) {
         const size = this.hexSize * this.camera.zoom;
@@ -2008,7 +2049,8 @@ export class HexWorld {
         const size = this.hexSize * this.camera.zoom;
         const onShip = hex.q === ship.q && hex.r === ship.r;
         if (onShip) return;
-        if (!this.isExplored(hex)) {
+        const outOfRange = !!this.hyperjumpTargeting && !this.inJumpRange(ship, hex);
+        if (!this.isExplored(hex) || outOfRange) {
             ctx.save();
             ctx.strokeStyle = "rgba(255, 107, 138, 0.6)";
             ctx.lineWidth = Math.max(1, size * 0.04);
@@ -2116,6 +2158,7 @@ export class HexWorld {
             }
             ctx.restore();
         }
+        if (this.hyperjumpTargeting) this._drawJumpRange(ctx, canvas, this.hyperjumpTargeting);
         this._drawOrders(ctx, canvas);
         if (!ship || this._arrivalScale(ship.id) <= 0) return;
         this._drawHoverPreview(ctx, canvas, ship);

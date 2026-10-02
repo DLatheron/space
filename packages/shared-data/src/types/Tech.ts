@@ -17,6 +17,8 @@ export const TechId = z.enum([
     "enhancement_tier_3",
     "hyperdrive_calibration_1",
     "hyperdrive_calibration_2",
+    "hyperdrive_range_1",
+    "hyperdrive_range_2",
     "evasive_manoeuvres_1",
     "evasive_manoeuvres_2",
     "armoured_freighters",
@@ -126,6 +128,20 @@ export const TECHS: Record<TechId, TechDefinition> = {
         cost: { money: 150, materials: 0, population: 0, science: 300 },
         buildTurns: 5,
         requires: ["hyperdrive_calibration_1"]
+    },
+    hyperdrive_range_1: {
+        name: "Extended Jump Range",
+        description: "Hyperspace jumps reach much further.",
+        cost: { money: 100, materials: 0, population: 0, science: 150 },
+        buildTurns: 3,
+        requires: ["advanced_shipyard"]
+    },
+    hyperdrive_range_2: {
+        name: "Deep Space Jumps",
+        description: "Hyperspace jumps can cross the whole map.",
+        cost: { money: 200, materials: 0, population: 0, science: 350 },
+        buildTurns: 5,
+        requires: ["hyperdrive_range_1"]
     },
     evasive_manoeuvres_1: {
         name: "Evasive Manoeuvres I",

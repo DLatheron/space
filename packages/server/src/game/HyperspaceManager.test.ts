@@ -4,7 +4,8 @@ import {
     type AxialCoord,
     type EconomyBalance,
     type EntityKind,
-    type ShipType
+    type ShipType,
+    type TechId
 } from "@space/shared-data";
 import { defaultEconomyBalance } from "../config/config.schema.js";
 import { BattleManager } from "./Battle.js";
@@ -48,7 +49,11 @@ function scripted(values: number[]): () => number {
     return () => queue.shift() ?? 0;
 }
 
-function jumpWorld(rng: () => number = () => 0, balance?: EconomyBalance) {
+function jumpWorld(
+    rng: () => number = () => 0,
+    balance?: EconomyBalance,
+    rangeTechs: TechId[] = ["hyperdrive_range_2"]
+) {
     const map = createEmptyMap({ width: 20, height: 20, hexSize: 50, seed: 1 });
     const entities = new EntityManager(map);
     const home = entities.add<EntityOf<"planet">>({
@@ -61,6 +66,10 @@ function jumpWorld(rng: () => number = () => 0, balance?: EconomyBalance) {
         level: 10
     });
     const economy = new EconomyManager(entities, ["alpha", "beta"], { balance });
+    // Map-wide range by default, so jump tests aren't about range; see "HyperspaceManager range".
+    for (const sideId of ["alpha", "beta"]) {
+        for (const tech of rangeTechs) economy.research.add(sideId, tech);
+    }
     const battles = new BattleManager(entities, economy, { rng: () => 0.5 });
     const explored = new Set<string>();
     forEachHex(map.width, map.height, (hex) => explored.add(axialKey(hex.q, hex.r)));
@@ -146,6 +155,35 @@ describe("HyperspaceManager activation", () => {
             ok: false,
             error: `Target ${TARGET.q},${TARGET.r} is unexplored`
         });
+    });
+});
+
+describe("HyperspaceManager range", () => {
+    // The 20x20 test map's diagonal is ~25.5 hexes: base range ~6.4, Extended ~12.8.
+    it("limits jumps to a circle a quarter of the map diagonal across", () => {
+        const { hyperspace, ship } = jumpWorld(() => 0, undefined, []);
+        expect(hyperspace.activate("alpha", ship.id, { q: 11, r: 5 })).toEqual({ ok: true });
+        const tooFar = hyperspace.activate("alpha", ship.id, { q: 12, r: 5 });
+        expect(tooFar.ok).toBe(false);
+        expect(!tooFar.ok && tooFar.error).toMatch(/beyond hyperdrive range \(6\.4 hexes\)/);
+        // 5 hexes away along a hex side's midpoint is only 4.4 in a straight line: allowed.
+        expect(hyperspace.activate("alpha", ship.id, { q: 8, r: 7 })).toEqual({ ok: true });
+    });
+
+    it("extends the range with Extended Jump Range, then across the map with Deep Space Jumps", () => {
+        const extended = jumpWorld(() => 0, undefined, ["hyperdrive_range_1"]);
+        expect(extended.hyperspace.activate("alpha", extended.ship.id, TARGET).ok).toBe(true);
+        expect(extended.hyperspace.activate("alpha", extended.ship.id, { q: 17, r: 5 }).ok).toBe(
+            true
+        );
+        expect(extended.hyperspace.activate("alpha", extended.ship.id, { q: 18, r: 5 }).ok).toBe(
+            false
+        );
+
+        const deep = jumpWorld(() => 0, undefined, ["hyperdrive_range_1", "hyperdrive_range_2"]);
+        deep.entities.move(deep.ship.id, { q: 0, r: 0 });
+        const farCorner = { q: 10, r: 19 }; // col 19, row 19
+        expect(deep.hyperspace.activate("alpha", deep.ship.id, farCorner)).toEqual({ ok: true });
     });
 });
 

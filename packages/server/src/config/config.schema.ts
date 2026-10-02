@@ -556,6 +556,15 @@ export const EconomyBalanceConfig = z
                         hyperdrive_calibration_2: z.number().min(0).default(15)
                     })
                     .strict()
+                    .prefault({}),
+                /** Jump range as a share of the map diagonal; the highest known applies. */
+                rangeFraction: z
+                    .object({
+                        base: z.number().positive().default(0.25),
+                        hyperdrive_range_1: z.number().positive().default(0.5),
+                        hyperdrive_range_2: z.number().positive().default(1)
+                    })
+                    .strict()
                     .prefault({})
             })
             .strict()

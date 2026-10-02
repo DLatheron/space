@@ -33,7 +33,7 @@ const planet: EntitySummary = {
     r: 2
 };
 
-function makeWorld(entities: EntitySummary[]): HexWorld {
+function makeWorld(entities: EntitySummary[], balance?: EconomyBalance): HexWorld {
     const world = new HexWorld();
     const tiles = [];
     for (let q = 0; q < 5; q++) {
@@ -55,7 +55,7 @@ function makeWorld(entities: EntitySummary[]): HexWorld {
         visible: tiles.map((t) => `${t.q},${t.r}` as const),
         turn: { turn: 1, sideReady: {} } as never,
         economy: {} as EconomyState,
-        balance: null as unknown as EconomyBalance
+        balance: balance ?? (null as unknown as EconomyBalance)
     });
     return world;
 }
@@ -88,11 +88,33 @@ describe("HexWorld.handleClick", () => {
         expect(world.selectedShipId).toBe("ship-1");
     });
 
-    it("opens a lone planet and deselects a lone ship on a second click", () => {
+    it("opens a lone planet and keeps a lone ship selected on a second click", () => {
         const world = makeWorld([planet, ship("ship-1", 1, 1)]);
         expect(click(world, 2, 2)).toEqual({ type: "open-location", locationId: "planet-1" });
         expect(click(world, 1, 1)).toEqual({ type: "select", shipId: "ship-1" });
-        expect(click(world, 1, 1)).toEqual({ type: "deselect" });
+        expect(click(world, 1, 1)).toEqual({ type: "none" });
+        expect(world.selectedShipId).toBe("ship-1");
+    });
+
+    it("orders the selected ship onto hexes holding our other ships and locations", () => {
+        const world = makeWorld([planet, ship("ship-1", 1, 1), ship("ship-2", 3, 1)]);
+        click(world, 1, 1);
+        expect(click(world, 3, 1)).toEqual({ type: "move", shipId: "ship-1", to: { q: 3, r: 1 } });
+        expect(world.selectedShipId).toBe("ship-1");
+        expect(click(world, 2, 2)).toEqual({ type: "move", shipId: "ship-1", to: { q: 2, r: 2 } });
+        expect(world.selectedShipId).toBe("ship-1");
+
+        // Selecting elsewhere takes a deselect (Escape) first.
+        world.selectShip(null);
+        expect(click(world, 3, 1)).toEqual({ type: "select", shipId: "ship-2" });
+    });
+
+    it("cycles through everything on the selected ship's hex", () => {
+        const world = makeWorld([planet, ship("ship-1", 2, 2), ship("ship-2", 2, 2)]);
+        expect(click(world, 2, 2)).toEqual({ type: "select", shipId: "ship-1" });
+        expect(click(world, 2, 2)).toEqual({ type: "select", shipId: "ship-2" });
+        expect(click(world, 2, 2)).toEqual({ type: "inspect", entityId: "planet-1" });
+        expect(click(world, 2, 2)).toEqual({ type: "select", shipId: "ship-1" });
     });
 
     it("only inspects planets we don't own", () => {
@@ -224,9 +246,8 @@ describe("HexWorld carriers", () => {
         const world = makeWorld([carrier, fighter]);
         expect(world.clickCycle(world.entitiesAt(1, 1)).map((e) => e.id)).toEqual(["carrier-1"]);
         expect(click(world, 1, 1)).toEqual({ type: "select", shipId: "carrier-1" });
-        // Nothing else to cycle to: a second click deselects instead of picking the fighter.
-        expect(click(world, 1, 1)).toEqual({ type: "deselect" });
-        click(world, 1, 1);
+        // Nothing else to cycle to: a second click keeps the carrier rather than picking the fighter.
+        expect(click(world, 1, 1)).toEqual({ type: "none" });
         expect(world.mapFocus).toMatchObject({ entities: [{ id: "carrier-1" }] });
         expect(world.ownShipsAt(1, 1).map((s) => s.id)).toEqual(["carrier-1"]);
         expect(world.carriedShips(world.selectedShip!).map((s) => s.id)).toEqual(["fighter-1"]);
@@ -401,5 +422,28 @@ describe("HexWorld hyperjump targeting", () => {
         world.startHyperjumpTargeting("ship-1");
         world.selectShip("ship-2");
         expect(world.hyperjumpTargetingId).toBeNull();
+    });
+
+    it("rejects targets beyond our circular jump range", () => {
+        const balance = {
+            hyperspace: {
+                rangeFraction: { base: 0.25, hyperdrive_range_1: 0.5, hyperdrive_range_2: 1 }
+            }
+        } as unknown as EconomyBalance;
+        // The 8x8 map's diagonal is ~9.6 hexes, so the base range is ~2.4.
+        const world = makeWorld([ship("ship-1", 1, 1)], balance);
+        expect(world.jumpRange()).toBeCloseTo(2.41, 2);
+        world.startHyperjumpTargeting("ship-1");
+        expect(click(world, 4, 1)).toEqual({
+            type: "rejected",
+            reason: "Beyond hyperdrive range (2.4 hexes)"
+        });
+        expect(click(world, 3, 3)).toMatchObject({ type: "rejected" });
+        expect(world.hyperjumpTargeting?.id).toBe("ship-1");
+        expect(click(world, 3, 1)).toEqual({
+            type: "hyperjump",
+            shipId: "ship-1",
+            target: { q: 3, r: 1 }
+        });
     });
 });

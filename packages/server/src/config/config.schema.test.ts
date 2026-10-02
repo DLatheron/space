@@ -319,7 +319,8 @@ describe("economy balance config", () => {
                 black_hole: { destroyChance: 0.9, damageFraction: 0.9 }
             },
             collision: { bothDestroyedChance: 0.25 },
-            techAccuracyBonus: { hyperdrive_calibration_1: 10, hyperdrive_calibration_2: 15 }
+            techAccuracyBonus: { hyperdrive_calibration_1: 10, hyperdrive_calibration_2: 15 },
+            rangeFraction: { base: 0.25, hyperdrive_range_1: 0.5, hyperdrive_range_2: 1 }
         });
     });
 
@@ -358,6 +359,8 @@ describe("economy balance config", () => {
         expect(parse({ hyperspace: { hazards: { wormhole: {} } } })).toThrow();
         expect(parse({ hyperspace: { hazards: { sun: { destroyChance: 1.5 } } } })).toThrow();
         expect(parse({ hyperspace: { techAccuracyBonus: { warp: 5 } } })).toThrow();
+        expect(parse({ hyperspace: { rangeFraction: { base: 0 } } })).toThrow();
+        expect(parse({ hyperspace: { rangeFraction: { hyperdrive_range_3: 2 } } })).toThrow();
         expect(parse({ ships: { frigate: { hyperdrive: { cooldownTurns: -1 } } } })).toThrow();
         expect(parse({ shipTiers: { hyperdriveAccuracyBonus: [0, 10] } })).toThrow();
     });

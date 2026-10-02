@@ -210,8 +210,8 @@ export function HexMapView({ world, onAction }: HexMapViewProps) {
                     {targeting && (
                         <div className="hex-map-view__banner hex-map-view__banner--targeting">
                             <span>
-                                Hyperdrive targeting: click an explored hex to jump to · Esc to
-                                cancel
+                                Hyperdrive targeting: click an explored hex within range to jump
+                                to · Esc to cancel
                             </span>
                             <button type="button" onClick={() => world.cancelHyperjumpTargeting()}>
                                 Cancel
@@ -231,7 +231,7 @@ export function HexMapView({ world, onAction }: HexMapViewProps) {
             )}
             <div className="hex-map-view__hint">
                 {world.selectedShipId
-                    ? "Click an explored hex to move there (multi-turn routes continue at end of turn) · Esc to clear"
+                    ? "Click any explored hex to move there (multi-turn routes continue at end of turn) · Click the ship's hex to cycle · Esc to deselect"
                     : "Drag to pan · Scroll to zoom · Click to select / inspect (again to cycle) · Esc to clear"}
             </div>
         </div>

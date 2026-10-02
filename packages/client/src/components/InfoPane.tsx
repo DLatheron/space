@@ -323,6 +323,7 @@ function ShipOrders({
     if (!order && !hyperdrive) return null;
 
     const accuracy = world.jumpAccuracy(ship);
+    const range = world.jumpRange();
     const jump = ship.hyperjump;
     const targeting = world.hyperjumpTargeting?.id === ship.id;
     const cooldown = ship.hyperdriveCooldown ?? 0;
@@ -360,6 +361,12 @@ function ShipOrders({
                                   ? `Cooling down · ${plural(cooldown, "turn")}`
                                   : `Ready · ${plural(hyperdrive.cooldownTurns, "turn")} cooldown`}
                         </dd>
+                    </div>
+                )}
+                {hyperdrive && range !== undefined && (
+                    <div>
+                        <dt>Jump range</dt>
+                        <dd>{range.toFixed(1)} hexes</dd>
                     </div>
                 )}
                 {accuracy && (
@@ -413,7 +420,8 @@ function ShipOrders({
             {hyperdrive && blocked && <p className="info-pane__hint">{blocked}</p>}
             {targeting && (
                 <p className="info-pane__hint">
-                    Click an explored hex on the map. The jump may scatter up to{" "}
+                    Click an explored hex inside the dashed range circle. The jump may scatter
+                    up to{" "}
                     {plural(MAX_SCATTER_RING, "hex")} from the target.
                 </p>
             )}

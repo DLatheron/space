@@ -137,6 +137,7 @@ describe("carried ships", () => {
     it("jump with the carrier, losing their own pending jump on boarding", () => {
         const { entities, economy, carriers, battles, carrier, fighters } = carrierWorld();
         const hyperspace = new HyperspaceManager(entities, { battles, economy, rng: () => 0 });
+        economy.research.add("alpha", "hyperdrive_range_2");
         carrier.movementPoints = 0;
         fighters[0]!.hyperjump = { target: { q: 3, r: 3 } };
         carriers.load("alpha", carrier.id, ids(fighters));

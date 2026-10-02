@@ -1,5 +1,6 @@
 import { axialKey } from "@space/maths";
 import type { AxialCoord, ShipType } from "@space/shared-data";
+import { defaultEconomyBalance } from "../config/config.schema.js";
 import { BattleManager } from "./Battle.js";
 import { EntityManager } from "./EntityManager.js";
 import { HyperspaceManager } from "./HyperspaceManager.js";
@@ -33,7 +34,9 @@ function orderWorld(knowledge?: (sideId: string) => MoveOrderKnowledge) {
     const entities = new EntityManager(map);
     const battles = new BattleManager(entities);
     const orders = new MoveOrderManager(entities, { knowledge });
-    const hyperspace = new HyperspaceManager(entities, { battles, rng: () => 0 });
+    const balance = defaultEconomyBalance();
+    balance.hyperspace.rangeFraction.base = 1;
+    const hyperspace = new HyperspaceManager(entities, { battles, balance, rng: () => 0 });
     const turns = new TurnManager(["alpha", "beta"], entities, undefined, undefined, {
         moveOrders: orders,
         hyperspace

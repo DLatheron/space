@@ -1,6 +1,8 @@
 import {
     hyperdriveFor,
     hyperjumpAccuracy,
+    hyperjumpRange,
+    inHyperjumpRange,
     isHyperspaceHazardKind,
     MAX_SCATTER_RING,
     ringHexes,
@@ -56,7 +58,8 @@ export type HyperspaceOptions = {
 
 /**
  * Hyperspace jumps. A ship with a hyperdrive engages it during its turn, aiming at any hex
- * its side has explored; it can't move normally until the jump resolves at end of turn.
+ * its side has explored within its side's circular jump range (see `hyperjumpRange`); it
+ * can't move normally until the jump resolves at end of turn.
  *
  * Each jump, in a fixed order (so later arrivals can hit earlier ones), uses the random
  * number generator in this order: the scatter ring roll, the pick among in-bounds hexes on
@@ -105,6 +108,14 @@ export class HyperspaceManager {
         }
         if (!this._isExplored(ship.sideId, tile)) {
             return { ok: false, error: `Target ${target.q},${target.r} is unexplored` };
+        }
+        const { width, height } = this._entities.map;
+        const range = hyperjumpRange(this._balance, this._techs(ship.sideId), width, height);
+        if (!inHyperjumpRange(ship, tile, range)) {
+            return {
+                ok: false,
+                error: `Target ${target.q},${target.r} is beyond hyperdrive range (${range.toFixed(1)} hexes)`
+            };
         }
         ship.hyperjump = { target: { q: tile.q, r: tile.r } };
         ship.hyperdriveCharging = true;

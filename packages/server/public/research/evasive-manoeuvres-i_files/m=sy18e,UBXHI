@@ -1,8 +1,0 @@
-//# allFunctionsCalledOnLoad
-loaded_h_0(function(_){var window=this;
-_.Roc=_.x("UBXHI",[]);
-_.v("UBXHI");
-_.Soc=class extends _.gs{constructor(a){super(a.La);this.loaded=!1;this.root=this.getRoot()}ka(){if(!this.loaded){var a=this.root.getData("src").ka();if(a){if(a!==this.root.Xc("src")){var b=this.root.el();_.Qoc(_.Noc(),b,a)}this.root.setData("src",null)}this.loaded=!0}}};_.Soc.prototype.$wa$QT8fkf=function(){return this.ka};_.is(_.Roc,_.Soc);
-_.w();
-});
-// Google Inc.

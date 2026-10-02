@@ -58,6 +58,15 @@ export const HyperspaceBalance = z.object({
     techAccuracyBonus: z.object({
         hyperdrive_calibration_1: z.number().min(0),
         hyperdrive_calibration_2: z.number().min(0)
+    }),
+    /**
+     * Jump range as a share of the map diagonal: `base` until researched, then the highest
+     * known range tech (see `hyperjumpRange`). 1 reaches corner to corner.
+     */
+    rangeFraction: z.object({
+        base: z.number().positive(),
+        hyperdrive_range_1: z.number().positive(),
+        hyperdrive_range_2: z.number().positive()
     })
 });
 export type HyperspaceBalance = z.infer<typeof HyperspaceBalance>;
@@ -87,6 +96,44 @@ export function hyperjumpAccuracyBonus(
     const techBonus = balance.hyperspace.techAccuracyBonus as Partial<Record<TechId, number>>;
     for (const tech of techs) bonus += techBonus[tech] ?? 0;
     return bonus;
+}
+
+/** Straight-line distance between hex centres, in hexes (neighbours are 1 apart). */
+export function hexCentreDistance(a: AxialCoord, b: AxialCoord): number {
+    const dq = a.q - b.q;
+    const dr = a.r - b.r;
+    return Math.sqrt(dq * dq + dq * dr + dr * dr);
+}
+
+/**
+ * Longest corner-to-corner centre distance, in hexes, of a `width` x `height` map laid out
+ * pointy-top in odd-r offset columns and rows.
+ */
+export function mapDiagonal(width: number, height: number): number {
+    const lastCol = Math.max(0, width - 1);
+    const lastRow = Math.max(0, height - 1);
+    const shift = (lastRow & 1) / 2;
+    const dy = (lastRow * Math.sqrt(3)) / 2;
+    return Math.max(Math.hypot(lastCol + shift, dy), Math.hypot(lastCol - shift, dy));
+}
+
+/** Hyperjump range in hexes for a side knowing `techs` on a `width` x `height` map. */
+export function hyperjumpRange(
+    balance: EconomyBalance,
+    techs: readonly TechId[],
+    width: number,
+    height: number
+): number {
+    const fractions = balance.hyperspace.rangeFraction as Partial<Record<TechId, number>> & {
+        base: number;
+    };
+    const fraction = techs.reduce((best, t) => Math.max(best, fractions[t] ?? 0), fractions.base);
+    return fraction * mapDiagonal(width, height);
+}
+
+/** Whether `to` lies within a circular jump range of `from`. */
+export function inHyperjumpRange(from: AxialCoord, to: AxialCoord, range: number): boolean {
+    return hexCentreDistance(from, to) <= range + 1e-9;
 }
 
 /** Scales the chances to percentages summing to 100 (all on target when they're all zero). */

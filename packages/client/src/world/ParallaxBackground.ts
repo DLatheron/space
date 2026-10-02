@@ -79,13 +79,13 @@ export class ParallaxBackground {
             image: null,
             panFactor: 0.04,
             worldSize: 4200,
-            opacity: 0.7
+            opacity: 0.8
         },
         {
             image: null,
             panFactor: 0.1,
             worldSize: 2800,
-            opacity: 0.5
+            opacity: 0.7
         }
     ];
     /** Far → near: denser/dimmer → sparser/brighter, increasing pan. */

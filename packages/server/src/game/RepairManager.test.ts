@@ -88,6 +88,7 @@ function world({ jumpRng = () => 0, battleRng = () => 0.5, techs = {} }: WorldOp
         level: 10
     });
     const economy = new EconomyManager(entities, ["alpha", "beta"], { instantBuild: true });
+    for (const sideId of ["alpha", "beta"]) economy.research.add(sideId, "hyperdrive_range_2");
     for (const [sideId, known] of Object.entries(techs)) {
         for (const tech of known ?? []) economy.research.add(sideId, tech);
     }

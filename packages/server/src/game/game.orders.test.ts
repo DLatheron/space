@@ -73,6 +73,7 @@ function createGame(
     }
     for (const sideId of ["alpha", "beta"]) {
         game.side(sideId)!.recomputeVisibility(game.entities, mockConfig.visionRange);
+        game.economy.research.add(sideId, "hyperdrive_range_2");
     }
     return { game, alpha, beta };
 }
