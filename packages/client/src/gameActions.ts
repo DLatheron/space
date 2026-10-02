@@ -12,6 +12,8 @@ export type GameActions = {
     build: (locationId: EntityId, item: BuildItem, priority: BuildPriority) => void;
     cancel: (locationId: EntityId, orderId: OrderId) => void;
     setPriority: (locationId: EntityId, orderId: OrderId, priority: BuildPriority) => void;
+    /** Funding priority of a Shield Generator's upkeep. */
+    setShieldPriority: (locationId: EntityId, priority: BuildPriority) => void;
     moveOrder: (locationId: EntityId, orderId: OrderId, direction: QueueDirection) => void;
     colonise: (locationId: EntityId, shipId: EntityId) => void;
     load: (shipId: EntityId, unitIds: EntityId[]) => void;

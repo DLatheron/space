@@ -1,6 +1,7 @@
 import {
     BOMBARD_COST,
     canBombardShip,
+    combatDamage,
     shipDef,
     SHIP_TYPE_INFO,
     type CombatOutcome,
@@ -12,13 +13,16 @@ import {
 } from "@space/shared-data";
 import { hasEnemyWarships } from "./Battle.js";
 import {
+    batteryFighter,
     groundRounds,
     isAlive,
     orbitalStrike,
     shipFighter,
     toParticipant,
-    unitFighter
+    unitFighter,
+    type Fighter
 } from "./combat.js";
+import { destroyVessels, type DestroyedVessels } from "./destroyShips.js";
 import type { EconomyManager } from "./EconomyManager.js";
 import type { EntityManager } from "./EntityManager.js";
 import type { EntityOf } from "./map/types.js";
@@ -51,7 +55,8 @@ export type GroundOptions = {
     /** Random numbers in [0, 1) for damage rolls; defaults to `Math.random`. */
     rng?: () => number;
     /**
-     * Turn combat counts against for bombarding ships (`lastCombatTurn`); defaults to 1.
+     * Turn combat counts against for bombarding ships and transports fired on
+     * (`lastCombatTurn`); defaults to 1.
      */
     turn?: () => number;
 };
@@ -59,11 +64,13 @@ export type GroundOptions = {
 /**
  * Transports, invasions, orbital bombardment and automatic ground combat. Units board and land
  * only at locations on the transport's hex. Invading needs the orbit free of enemy ships;
- * landing on an undefended enemy location captures it at once, otherwise ground combat is
- * fought in rounds (see `groundRounds`). Wiping out the defenders captures the location;
- * invaders that are wiped out are destroyed; undecided invaders stay aboard their transports.
- * Damage persists on units. Bombardment fires one-way from capable ships in orbit and may
- * destroy installations; it never captures the location.
+ * the location's Defensive Batteries fire on the transports first, and units aboard a
+ * transport they destroy are lost. Landing on an undefended enemy location captures it at
+ * once, otherwise ground combat is fought in rounds (see `groundRounds`). Wiping out the
+ * defenders captures the location; invaders that are wiped out are destroyed; undecided
+ * invaders stay aboard their transports. Damage persists on units and ships. Bombardment fires
+ * one-way from capable ships in orbit, may destroy installations and draws battery fire; it
+ * never captures the location.
  */
 export class GroundManager {
     private readonly _entities: EntityManager;
@@ -139,7 +146,9 @@ export class GroundManager {
 
     /**
      * Land every unit aboard the given transports on an enemy location on their hex and fight
-     * for it at once. An undefended location is captured immediately.
+     * for it at once. Each Defensive Battery there first fires one volley across the
+     * transports (see `orbitalStrike`); units aboard those destroyed never land. An
+     * undefended location is captured immediately.
      */
     invade(sideId: SideId | null, locationId: EntityId, shipIds: EntityId[]): InvadeResult {
         if (!sideId) return { ok: false, error: "You are not assigned to a side" };
@@ -152,6 +161,7 @@ export class GroundManager {
             return { ok: false, error: "Enemy ships are defending the location" };
         }
 
+        const transports: EntityOf<"ship">[] = [];
         const unitIds: EntityId[] = [];
         for (const shipId of shipIds) {
             const transport = this._transport(sideId, shipId);
@@ -160,28 +170,39 @@ export class GroundManager {
             if (ship.q !== location.q || ship.r !== location.r) {
                 return { ok: false, error: `Transport ${shipId} is not at the location` };
             }
+            transports.push(ship);
             unitIds.push(...(ship.carriedUnitIds ?? []));
         }
         if (unitIds.length === 0) return { ok: false, error: "No units aboard" };
 
         const balance = this._economy.balance;
+        const batteries = this._batteries(location, defenderSideId);
+        const transportFighters =
+            batteries.length > 0 ? transports.map((s) => shipFighter(s, "attacker", balance)) : [];
+        orbitalStrike(batteries, transportFighters, balance.combat, this._rng);
+        const sunk = this._applyShipDamage(transports, transportFighters);
+
         const units = this._economy.units;
-        const attackers = unitIds.flatMap((id) => units.get(id) ?? []);
+        const attackers = unitIds
+            .filter((id) => !sunk.destroyedUnitIds.includes(id))
+            .flatMap((id) => units.get(id) ?? []);
         const defenders = units.garrisonOf(locationId);
         const attackerFighters = attackers.map((u) => unitFighter(u, "attacker", balance));
         const defenderFighters = defenders.map((u) => unitFighter(u, "defender", balance));
         const rounds = groundRounds(attackerFighters, defenderFighters, balance.combat, this._rng);
 
-        const all = [...attackerFighters, ...defenderFighters];
+        const ground = [...attackerFighters, ...defenderFighters];
         const byId = new Map<EntityId, GroundUnit>(
             [...attackers, ...defenders].map((u) => [u.id, u])
         );
-        for (const f of all) {
+        for (const f of ground) {
             const unit = byId.get(f.id)!;
             if (f.hp < f.maxHp) unit.hp = f.hp;
         }
-        const destroyedUnitIds = all.filter((f) => !isAlive(f)).map((f) => f.id);
-        this._economy.onUnitsDestroyed(destroyedUnitIds, location);
+        const killedUnitIds = ground.filter((f) => !isAlive(f)).map((f) => f.id);
+        this._economy.onUnitsDestroyed(killedUnitIds, location);
+        const destroyedUnitIds = [...sunk.destroyedUnitIds, ...killedUnitIds];
+        const all = [...transportFighters, ...batteries, ...ground];
 
         const survivors = attackerFighters.filter(isAlive).map((f) => f.id);
         const defendersLeft = defenderFighters.some(isAlive);
@@ -211,7 +232,7 @@ export class GroundManager {
                 attackerSideId: sideId,
                 defenderSideIds: [defenderSideId],
                 participants: all.map(toParticipant),
-                destroyedIds: [],
+                destroyedIds: sunk.destroyedShipIds,
                 destroyedUnitIds,
                 outcome,
                 attackerMovedIn: captured,
@@ -225,8 +246,11 @@ export class GroundManager {
 
     /**
      * Fire orbital bombardment from capable ships on an enemy location on their hex. Ships
-     * spend `BOMBARD_COST` movement each. Garrison units take one-way fire; each ship may then
-     * destroy one random installation. Does not capture the location.
+     * spend `BOMBARD_COST` movement each. In order, while the location's shield has hp each
+     * ship's shot is absorbed (the shield loses `combatDamage(attack, 0)`, overflow wasted);
+     * the remaining ships fire one-way on the garrison. Every Defensive Battery then fires
+     * once across the bombarding ships. Each surviving ship that got through may then destroy
+     * one random installation. Does not capture the location.
      */
     bombard(sideId: SideId | null, locationId: EntityId, shipIds: EntityId[]): BombardResult {
         if (!sideId) return { ok: false, error: "You are not assigned to a side" };
@@ -266,14 +290,26 @@ export class GroundManager {
 
         const units = this._economy.units;
         const defenders = units.garrisonOf(locationId);
-        const installationsBefore = this._economy.locationEconomy(locationId)?.installations ?? [];
+        const installationsBefore = [...this._economy.installationsAt(locationId)];
         if (defenders.length === 0 && installationsBefore.length === 0) {
             return { ok: false, error: "Nothing to bombard" };
         }
 
         const attackerFighters = ships.map((s) => shipFighter(s, "attacker", balance));
         const defenderFighters = defenders.map((u) => unitFighter(u, "defender", balance));
-        orbitalStrike(attackerFighters, defenderFighters, balance.combat, this._rng);
+        const shielded = installationsBefore.some((i) => i.type === "shield_generator");
+        const shieldBefore = this._economy.shieldHp(locationId);
+        let shieldHp = shieldBefore;
+        const through = attackerFighters.filter((f) => {
+            if (shieldHp <= 0) return true;
+            if (f.attack > 0) shieldHp -= combatDamage(f.attack, 0, balance.combat, this._rng());
+            return false;
+        });
+        shieldHp = Math.max(0, shieldHp);
+        this._economy.setShieldHp(locationId, shieldHp);
+        orbitalStrike(through, defenderFighters, balance.combat, this._rng);
+        const batteries = this._batteries(location, defenderSideId);
+        orbitalStrike(batteries, attackerFighters, balance.combat, this._rng);
 
         const turn = this._turn();
         for (const ship of ships) {
@@ -283,20 +319,19 @@ export class GroundManager {
             delete ship.hyperjump;
             delete ship.hyperdriveCharging;
         }
+        const sunk = this._applyShipDamage(ships, attackerFighters);
 
         const byId = new Map<EntityId, GroundUnit>(defenders.map((u) => [u.id, u]));
         for (const f of defenderFighters) {
             const unit = byId.get(f.id)!;
             if (f.hp < f.maxHp) unit.hp = f.hp;
         }
-        const destroyedUnitIds = defenderFighters.filter((f) => !isAlive(f)).map((f) => f.id);
-        this._economy.onUnitsDestroyed(destroyedUnitIds, location);
+        const killedUnitIds = defenderFighters.filter((f) => !isAlive(f)).map((f) => f.id);
+        this._economy.onUnitsDestroyed(killedUnitIds, location);
 
         const destroyedInstallationIds: EntityId[] = [];
-        const remaining = [
-            ...(this._economy.locationEconomy(locationId)?.installations ?? [])
-        ];
-        for (const _ship of ships) {
+        const remaining = [...this._economy.installationsAt(locationId)];
+        for (let shots = through.filter(isAlive).length; shots > 0; shots--) {
             if (remaining.length === 0) break;
             if (this._rng() >= balance.combat.bombardmentInstallationChance) continue;
             const index = Math.floor(this._rng() * remaining.length);
@@ -309,10 +344,15 @@ export class GroundManager {
             defenderFighters.length === 0
                 ? destroyedInstallationIds.length > 0
                 : !defenderFighters.some(isAlive);
-        const outcome: CombatOutcome = garrisonCleared ? "attacker_won" : "inconclusive";
+        const outcome: CombatOutcome = !attackerFighters.some(isAlive)
+            ? "attacker_destroyed"
+            : garrisonCleared
+              ? "attacker_won"
+              : "inconclusive";
 
         const hex = { q: location.q, r: location.r };
-        const all = [...attackerFighters, ...defenderFighters];
+        const all = [...attackerFighters, ...batteries, ...defenderFighters];
+        const destroyedUnitIds = [...sunk.destroyedUnitIds, ...killedUnitIds];
         return {
             ok: true,
             location,
@@ -325,16 +365,46 @@ export class GroundManager {
                 attackerSideId: sideId,
                 defenderSideIds: [defenderSideId],
                 participants: all.map(toParticipant),
-                destroyedIds: [],
+                destroyedIds: sunk.destroyedShipIds,
                 destroyedUnitIds,
                 outcome,
                 attackerMovedIn: false,
                 rounds: 1,
                 locationId,
                 captured: false,
-                destroyedInstallationIds
+                destroyedInstallationIds,
+                ...(shielded ? { shieldBefore, shieldAfter: shieldHp } : {})
             }
         };
+    }
+
+    /** The location's Defensive Batteries as defender fighters, in installation order. */
+    private _batteries(location: LocationEntity, sideId: SideId): Fighter[] {
+        return this._economy
+            .installationsAt(location.id)
+            .filter((i) => i.type === "defensive_battery")
+            .map((i) => batteryFighter(i, location.id, sideId, "defender", this._economy.balance));
+    }
+
+    /**
+     * Write damage taken back onto ships that have a fighter (recording the combat turn) and
+     * destroy those at 0 hp (see `destroyVessels`).
+     */
+    private _applyShipDamage(
+        ships: readonly EntityOf<"ship">[],
+        fighters: readonly Fighter[]
+    ): DestroyedVessels {
+        const turn = this._turn();
+        const lost: EntityOf<"ship">[] = [];
+        for (const f of fighters) {
+            const ship = ships.find((s) => s.id === f.id);
+            if (!ship) continue;
+            ship.lastCombatTurn = turn;
+            if (!isAlive(f)) lost.push(ship);
+            else if (f.taken > 0) ship.hp = f.hp;
+        }
+        if (lost.length === 0) return { destroyedShipIds: [], destroyedUnitIds: [] };
+        return destroyVessels(this._entities, this._economy, lost);
     }
 
     private _transport(

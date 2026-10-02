@@ -1,17 +1,23 @@
 import {
+    batteryStats,
     combatDamage,
     groundUnitStats,
+    platformStats,
     shipStats,
     supplyShipStats,
     type CombatBalance,
     type CombatParticipant,
     type EconomyBalance,
+    type EntityId,
     type GroundUnit,
+    type Installation,
+    type SideId,
+    type TargetClass,
     type TechId
 } from "@space/shared-data";
 import type { EntityOf } from "./map/types.js";
 
-/** Mutable combat state of one ship, supply ship or ground unit. */
+/** Mutable combat state of one ship, supply ship, ground unit or defensive installation. */
 export type Fighter = {
     id: string;
     kind: CombatParticipant["kind"];
@@ -19,7 +25,14 @@ export type Fighter = {
     role: CombatParticipant["role"];
     shipType?: CombatParticipant["shipType"];
     unitType?: CombatParticipant["unitType"];
+    structureType?: CombatParticipant["structureType"];
+    /** Installations: the location they stand on. */
+    locationId?: EntityId;
     tier?: number;
+    /** What attackers' multipliers single it out as; none means multiplier 1. */
+    targetClass?: TargetClass;
+    /** Its own damage multipliers by target class (see `attackMultiplier`); none means 1. */
+    multipliers?: Partial<Record<TargetClass, number>>;
     attack: number;
     defence: number;
     /** Chance (0-1) of evading each attack. */
@@ -59,6 +72,7 @@ export function shipFighter(
 ): Fighter {
     const tier = ship.tier ?? 1;
     const stats = shipStats(ship.shipType, tier, balance);
+    const def = balance.ships[ship.shipType];
     return fighter(
         {
             id: ship.id,
@@ -67,6 +81,8 @@ export function shipFighter(
             role,
             shipType: ship.shipType,
             tier,
+            targetClass: def.class,
+            multipliers: def.attackMultipliers,
             attack: stats.attack,
             defence: stats.defence,
             evasion: 0,
@@ -121,6 +137,60 @@ export function unitFighter(
     );
 }
 
+/** A Defensive Battery: it fires but can't be damaged (max hp 0, never a target). */
+export function batteryFighter(
+    installation: Installation,
+    locationId: EntityId,
+    sideId: SideId,
+    role: Fighter["role"],
+    balance: EconomyBalance
+): Fighter {
+    const stats = batteryStats(installation.tier, balance);
+    return fighter(
+        {
+            id: installation.id,
+            kind: "installation",
+            sideId,
+            role,
+            structureType: "defensive_battery",
+            locationId,
+            tier: installation.tier,
+            attack: stats.attack,
+            defence: stats.defence,
+            evasion: 0,
+            maxHp: 0
+        },
+        0
+    );
+}
+
+export function platformFighter(
+    installation: Installation,
+    locationId: EntityId,
+    sideId: SideId,
+    role: Fighter["role"],
+    balance: EconomyBalance
+): Fighter {
+    const stats = platformStats(installation.tier, balance);
+    return fighter(
+        {
+            id: installation.id,
+            kind: "installation",
+            sideId,
+            role,
+            structureType: "orbital_platform",
+            locationId,
+            tier: installation.tier,
+            targetClass: "orbital_platform",
+            attack: stats.attack,
+            defence: stats.defence,
+            evasion: 0,
+            maxHp: stats.hp
+        },
+        installation.hp ?? stats.hp
+    );
+}
+
 export function toParticipant(f: Fighter): CombatParticipant {
     return {
         id: f.id,
@@ -129,6 +199,7 @@ export function toParticipant(f: Fighter): CombatParticipant {
         role: f.role,
         ...(f.shipType ? { shipType: f.shipType } : {}),
         ...(f.unitType ? { unitType: f.unitType } : {}),
+        ...(f.structureType ? { structureType: f.structureType } : {}),
         ...(f.tier !== undefined ? { tier: f.tier } : {}),
         maxHp: f.maxHp,
         hpBefore: f.hpBefore,
@@ -136,11 +207,20 @@ export function toParticipant(f: Fighter): CombatParticipant {
         damageDealt: f.dealt,
         damageTaken: f.taken,
         evaded: f.attacked > 0 && f.evadedCount === f.attacked,
-        destroyed: f.hp <= 0
+        destroyed: f.maxHp > 0 && f.hp <= 0
     };
 }
 
 export const isAlive = (f: Fighter) => f.hp > 0;
+
+/**
+ * Attack `source` brings against `target` from a share of its attack: the share scaled by
+ * `source`'s multiplier for `target`'s class, rounded to the nearest whole point.
+ */
+export function scaledAttack(source: Fighter, target: Fighter, share: number): number {
+    if (!target.targetClass) return share;
+    return Math.round(share * (source.multipliers?.[target.targetClass] ?? 1));
+}
 
 /** Strongest first: highest attack, then most hp; ties keep their order. */
 function byStrength(fighters: readonly Fighter[]): Fighter[] {
@@ -173,7 +253,8 @@ function hit(source: Fighter, target: Fighter, damage: number) {
  * One space exchange, applied simultaneously. Random numbers are drawn in this order: one
  * evasion roll per defender with evasion above 0 (in defender order); one damage roll per
  * defender that didn't evade and gets a share of the attacker's attack above 0 (see
- * `splitAttack`); then one return-fire roll per defender with attack above 0.
+ * `splitAttack`); then one return-fire roll per defender with attack above 0. Every hit's
+ * attack is scaled for its target's class first (see `scaledAttack`).
  */
 export function spaceExchange(
     attacker: Fighter,
@@ -189,18 +270,23 @@ export function spaceExchange(
     const targets = defenders.filter((_, i) => !evaded[i]);
     const shares = splitAttack(attacker.attack, targets);
     const outgoing = targets.map((t, i) =>
-        shares[i]! > 0 ? combatDamage(shares[i]!, t.defence, combat, rng()) : 0
+        shares[i]! > 0
+            ? combatDamage(scaledAttack(attacker, t, shares[i]!), t.defence, combat, rng())
+            : 0
     );
     const incoming = defenders.map((d) =>
-        d.attack > 0 ? combatDamage(d.attack, attacker.defence, combat, rng()) : 0
+        d.attack > 0
+            ? combatDamage(scaledAttack(d, attacker, d.attack), attacker.defence, combat, rng())
+            : 0
     );
     targets.forEach((t, i) => hit(attacker, t, outgoing[i]!));
     defenders.forEach((d, i) => hit(d, attacker, incoming[i]!));
 }
 
 /**
- * One-way orbital fire: each attacker splits its attack across living defenders (see
- * `splitAttack`) with no return fire. Used for bombardment.
+ * One-way fire: each attacker splits its attack across living defenders (see `splitAttack`,
+ * scaled per target by `scaledAttack`) with no return fire, one damage roll per share above 0.
+ * Used for bombardment and for Defensive Batteries firing back.
  */
 export function orbitalStrike(
     attackers: readonly Fighter[],
@@ -216,7 +302,8 @@ export function orbitalStrike(
         targets.forEach((t, i) => {
             t.attacked += 1;
             if (shares[i]! <= 0) return;
-            hit(attacker, t, combatDamage(shares[i]!, t.defence, combat, rng()));
+            const attack = scaledAttack(attacker, t, shares[i]!);
+            hit(attacker, t, combatDamage(attack, t.defence, combat, rng()));
         });
     }
 }

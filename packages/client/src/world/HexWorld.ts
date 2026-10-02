@@ -16,6 +16,7 @@ import {
 import {
     canBombardShip,
     canCarryShip,
+    canRepairIn,
     hangarFor,
     hexHasObstacle,
     hyperdriveFor,
@@ -999,11 +1000,16 @@ export class HexWorld {
 
     /**
      * Repair outlook for one of our damaged ships or supply ships: hp regained at the coming
-     * end of turn, or `blocked` when it fought this turn (see `repairsAtEndOf`).
+     * end of turn, `blocked` when it fought this turn (see `repairsAtEndOf`), or `needsDock`
+     * for ships that only repair aboard a carrier or at an owned shipyard (see `canRepairIn`).
      */
     repairOf(
         entity: MobileEntity
-    ): { status: "repairing"; perTurn: number } | { status: "blocked" } | undefined {
+    ):
+        | { status: "repairing"; perTurn: number }
+        | { status: "blocked" }
+        | { status: "needsDock" }
+        | undefined {
         const balance = this.balance;
         const hp = this.hpOf(entity);
         if (!balance || !hp || !this.turn || entity.sideId !== this.sideId) return undefined;
@@ -1015,10 +1021,19 @@ export class HexWorld {
                 isLocationEntity(e) &&
                 !!this.locationEconomy(e.id)?.installations.some((i) => yards.includes(i.type))
         );
-        const perTurn = shipRepairPerTurn(balance, hp.hp, hp.max, this.economy?.techs ?? [], {
+        const context = {
             atOwnedShipyard,
-            carried: entity.kind === "ship" && !!entity.carriedBy
-        });
+            carried: entity.kind === "ship" && !!entity.carriedBy,
+            needsDock: entity.kind === "ship" && !balance.ships[entity.shipType].repairsInSpace
+        };
+        if (!canRepairIn(context)) return { status: "needsDock" };
+        const perTurn = shipRepairPerTurn(
+            balance,
+            hp.hp,
+            hp.max,
+            this.economy?.techs ?? [],
+            context
+        );
         return { status: "repairing", perTurn };
     }
 

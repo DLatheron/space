@@ -322,6 +322,13 @@ export class Game {
             this._handlePriority(from, payload.locationId, payload.orderId, payload.priority);
         });
 
+        this._messageManager.registerHandler(
+            "client:shield:priority",
+            (_context, payload, from) => {
+                this._handleShieldPriority(from, payload.locationId, payload.priority);
+            }
+        );
+
         this._messageManager.registerHandler("client:order:move", (_context, payload, from) => {
             this._handleMoveOrder(from, payload.locationId, payload.orderId, payload.direction);
         });
@@ -650,6 +657,12 @@ export class Game {
         this._sendEconomyState(client.sideId!);
     }
 
+    private _handleShieldPriority(client: Client, locationId: EntityId, priority: BuildPriority) {
+        const result = this._economy.setShieldPriority(client.sideId, locationId, priority);
+        if (!result.ok) return this._reject(client, "shield priority", result.error);
+        this._sendEconomyState(client.sideId!);
+    }
+
     private _handleMoveOrder(
         client: Client,
         locationId: EntityId,
@@ -706,7 +719,7 @@ export class Game {
             combat.captured ? "(captured)" : ""
         );
         this._broadcastCombat(combat);
-        this._refreshVisibility([axialKey(location.q, location.r)]);
+        this._refreshVisibility([axialKey(location.q, location.r)], combat.destroyedIds);
         this._sendEconomyState(client.sideId!);
         this._sendEconomyState(defenderSideId);
     }
@@ -727,7 +740,7 @@ export class Game {
             combat.destroyedInstallationIds?.length ?? 0
         );
         this._broadcastCombat(combat);
-        this._refreshVisibility([axialKey(location.q, location.r)]);
+        this._refreshVisibility([axialKey(location.q, location.r)], combat.destroyedIds);
         for (const shipId of shipIds) this._refreshShipHex(shipId);
         this._sendEconomyState(client.sideId!);
         this._sendEconomyState(defenderSideId);

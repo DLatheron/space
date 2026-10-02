@@ -9,9 +9,12 @@ import {
     enhancementTargetId,
     fundLocationOrders,
     GROUND_UNIT_TYPE_INFO,
+    isDefenceStructure,
     locationIncome,
     partitionOrders,
     queueCategory,
+    SHIELD_UPKEEP_ID,
+    shieldUpkeepOrder,
     shipDef,
     siteForEntity,
     slotsForEntity,
@@ -20,13 +23,16 @@ import {
     structureDef,
     STRUCTURE_INFO,
     sumResources,
+    suppliedFraction,
     TechId,
+    zeroResources,
     type BuildCategory,
     type BuildContext,
     type BuildItem,
     type BuildPriority,
     type EnhancementTarget,
     type EntityId,
+    type Installation,
     type LocationEconomy,
     type StructureSite
 } from "@space/shared-data";
@@ -43,6 +49,7 @@ import {
 } from "../world/HexWorld.js";
 import { BuildPopup } from "./location/BuildPopup.js";
 import { BuildQueue } from "./location/BuildQueue.js";
+import { DefenceTileStats, ShieldPanel } from "./location/DefenceDetails.js";
 import { GarrisonList, OrbitList } from "./location/ForcesLists.js";
 import { InstallationGrid } from "./location/InstallationGrid.js";
 import {
@@ -110,7 +117,8 @@ function OpenButton({ label, onClick }: { label: string; onClick: () => void }) 
 }
 
 type Popup =
-    { kind: "build"; category: BuildCategory } | { kind: "upgrade"; target: EnhancementTarget };
+    | { kind: "build"; category: BuildCategory; defences?: boolean }
+    | { kind: "upgrade"; target: EnhancementTarget };
 
 type OwnLocationProps = {
     world: HexWorld;
@@ -154,11 +162,15 @@ function OwnLocationPanel({ world, location, economy, context, actions }: OwnLoc
     const { active, waiting, ready } = partitionOrders(economy, balance);
     const waitingIds = new Set(waiting.map((o) => o.id));
     const readyIds = new Set(ready.map((o) => o.id));
+    const shield = economy.shield;
+    const shieldUpkeep = shield ? shieldUpkeepOrder(shield, balance) : undefined;
     const preview = fundLocationOrders(
         depositCapped(produced, arrivingCargo, settledCap).stockpile,
         settled,
-        balance
+        balance,
+        shieldUpkeep ? [shieldUpkeep] : []
     );
+    const generator = economy.installations.find((i) => i.type === "shield_generator");
     const previewById = new Map(preview.orders.map((o) => [o.id, o]));
     const slots = buildSlots(economy, balance);
     const running = Object.fromEntries(
@@ -211,6 +223,20 @@ function OwnLocationPanel({ world, location, economy, context, actions }: OwnLoc
     const roomOn = (ship: ShipEntity) =>
         balance.ships[ship.shipType].unitCapacity - world.carriedUnitIds(ship).length;
     const openBuild = (category: BuildCategory) => setPopup({ kind: "build", category });
+    const openDefences = () =>
+        setPopup({ kind: "build", category: "installations", defences: true });
+    const onUpgradeInstallation = (inst: Installation) =>
+        setPopup({
+            kind: "upgrade",
+            target: { kind: "installation", installationId: inst.id, structureType: inst.type }
+        });
+    const sitedStructures = STRUCTURE_ITEMS.filter(
+        (item) =>
+            item.kind === "structure" &&
+            structureDef(item.structureType, balance).sites.includes(economy.site)
+    );
+    const isDefenceItem = (item: BuildItem) =>
+        item.kind === "structure" && isDefenceStructure(item.structureType);
 
     const buildPopupProps = {
         context,
@@ -281,17 +307,53 @@ function OwnLocationPanel({ world, location, economy, context, actions }: OwnLoc
                     freeSlots={Math.max(0, economy.slots - used)}
                     waitingIds={waitingIds}
                     onAdd={() => openBuild("installations")}
-                    onUpgrade={(inst) =>
-                        setPopup({
-                            kind: "upgrade",
-                            target: {
-                                kind: "installation",
-                                installationId: inst.id,
-                                structureType: inst.type
-                            }
-                        })
-                    }
+                    onUpgrade={onUpgradeInstallation}
+                    show={(type) => !isDefenceStructure(type)}
                 />
+                <section className="planet-page__defences" aria-label="Defensive structures">
+                    <header className="planet-page__card-head">
+                        <h4>Defensive structures</h4>
+                        <OpenButton label="Add defensive structure" onClick={openDefences} />
+                    </header>
+                    {economy.installations.some((i) => isDefenceStructure(i.type)) ||
+                    economy.orders.some((o) => isDefenceItem(o.item)) ? (
+                        <InstallationGrid
+                            economy={economy}
+                            balance={balance}
+                            freeSlots={0}
+                            waitingIds={waitingIds}
+                            onAdd={openDefences}
+                            onUpgrade={onUpgradeInstallation}
+                            show={isDefenceStructure}
+                            detail={(inst) => (
+                                <DefenceTileStats
+                                    installation={inst}
+                                    balance={balance}
+                                    shield={shield}
+                                />
+                            )}
+                        />
+                    ) : (
+                        <p className="planet-page__muted">
+                            No defences. Batteries, shields and orbital platforms share the
+                            installation slots.
+                        </p>
+                    )}
+                    {shield && generator && shieldUpkeep && (
+                        <ShieldPanel
+                            shield={shield}
+                            generator={generator}
+                            balance={balance}
+                            nextSupplied={suppliedFraction(
+                                shieldUpkeep.cost,
+                                preview.drawn[SHIELD_UPKEEP_ID] ?? zeroResources()
+                            )}
+                            onPriorityChange={(priority) =>
+                                actions.setShieldPriority(locationId, priority)
+                            }
+                        />
+                    )}
+                </section>
             </Card>
 
             {showResearch && (
@@ -395,12 +457,10 @@ function OwnLocationPanel({ world, location, economy, context, actions }: OwnLoc
             {popup?.kind === "build" && popup.category === "installations" && (
                 <BuildPopup
                     {...buildPopupProps}
-                    title="Add installation"
+                    title={popup.defences ? "Add defensive structure" : "Add installation"}
                     detail={`${used}/${economy.slots} slots used`}
-                    items={STRUCTURE_ITEMS.filter(
-                        (item) =>
-                            item.kind === "structure" &&
-                            structureDef(item.structureType, balance).sites.includes(economy.site)
+                    items={sitedStructures.filter((item) =>
+                        popup.defences ? isDefenceItem(item) : !isDefenceItem(item)
                     )}
                     actionLabel="Build"
                 />
@@ -511,7 +571,8 @@ function EnemyLocationPanel({
                             {invasion.ships.length} ship
                             {invasion.ships.length === 1 ? "" : "s"} in orbit carrying {landing}{" "}
                             unit
-                            {landing === 1 ? "" : "s"}. All of them land and fight the garrison.
+                            {landing === 1 ? "" : "s"}. Defensive Batteries fire on the ships first;
+                            the rest land and fight the garrison.
                         </span>
                         <button
                             type="button"
@@ -533,7 +594,8 @@ function EnemyLocationPanel({
                         <span>
                             {bombardment.ships.length} capital ship
                             {bombardment.ships.length === 1 ? "" : "s"} ready to fire (1 MP each).
-                            Hits the garrison with no return fire; each ship may destroy an
+                            Any shield absorbs shots first, the rest hit the garrison and Defensive
+                            Batteries fire back; each ship that gets through may destroy an
                             installation. Does not capture the world.
                         </span>
                         <button
@@ -546,7 +608,8 @@ function EnemyLocationPanel({
                     </div>
                 ) : (
                     <p className="planet-page__muted">
-                        Bring a Star Destroyer with movement left onto this hex to bombard.
+                        Bring a Star Destroyer or Super Star Destroyer with movement left onto this
+                        hex to bombard.
                     </p>
                 )}
             </Card>

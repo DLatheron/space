@@ -81,7 +81,9 @@ export function CombatLog({ world }: { world: HexWorld }) {
 
 /** Every participant with hp before → after, damage dealt and taken. */
 export function CombatDetails({ world, result }: { world: HexWorld; result: CombatResult }) {
-    const listed = result.participants.filter((p) => p.destroyed).length;
+    const listed = result.participants.filter(
+        (p) => p.destroyed && (p.kind === "ship" || p.kind === "supply_ship")
+    ).length;
     const alsoLost = result.destroyedIds.length - listed;
     return (
         <div className="combat-log__details">
@@ -115,8 +117,16 @@ export function CombatDetails({ world, result }: { world: HexWorld; result: Comb
                                 )}
                             </td>
                             <td>
-                                {formatNumber(p.hpBefore)}→{formatNumber(p.hpAfter)}
-                                <span className="combat-log__muted">/{formatNumber(p.maxHp)}</span>
+                                {p.maxHp > 0 ? (
+                                    <>
+                                        {formatNumber(p.hpBefore)}→{formatNumber(p.hpAfter)}
+                                        <span className="combat-log__muted">
+                                            /{formatNumber(p.maxHp)}
+                                        </span>
+                                    </>
+                                ) : (
+                                    <span className="combat-log__muted">—</span>
+                                )}
                             </td>
                             <td>{formatNumber(p.damageDealt)}</td>
                             <td>{formatNumber(p.damageTaken)}</td>
@@ -129,6 +139,8 @@ export function CombatDetails({ world, result }: { world: HexWorld; result: Comb
                 {result.kind === "space" && result.attackerMovedIn && " · attacker moved in"}
                 {result.displacedTo &&
                     ` · jumper pushed to ${result.displacedTo.q}, ${result.displacedTo.r}`}
+                {result.shieldBefore !== undefined &&
+                    ` · shield ${formatNumber(result.shieldBefore)}→${formatNumber(result.shieldAfter ?? 0)}`}
                 {alsoLost > 0 && ` · ${alsoLost} more lost aboard carriers`}
                 {result.destroyedUnitIds.length > 0 &&
                     result.kind === "space" &&

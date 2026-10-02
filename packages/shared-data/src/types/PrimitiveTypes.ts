@@ -81,7 +81,9 @@ export const ShipType = z.enum([
     "transport",
     "fighter_squadron",
     "advanced_fighter_squadron",
-    "star_destroyer"
+    "bomber_squadron",
+    "star_destroyer",
+    "super_star_destroyer"
 ]);
 export type ShipType = z.infer<typeof ShipType>;
 

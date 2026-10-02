@@ -381,6 +381,61 @@ describe("HexWorld combat", () => {
     });
 });
 
+describe("HexWorld repair outlook", () => {
+    const balance = {
+        ships: {
+            scout: { hp: 6, attack: 1, defence: 1, maxMovementPoints: 5, repairsInSpace: true },
+            star_destroyer: {
+                hp: 30,
+                attack: 8,
+                defence: 8,
+                maxMovementPoints: 2,
+                repairsInSpace: true
+            },
+            bomber_squadron: {
+                hp: 10,
+                attack: 4,
+                defence: 0,
+                maxMovementPoints: 4,
+                repairsInSpace: false
+            }
+        },
+        shipTiers: {
+            hpMultiplier: [1, 1.5, 2],
+            movementBonus: [0, 0, 1],
+            attackBonus: [0, 1, 2],
+            defenceBonus: [0, 1, 2]
+        },
+        repair: {
+            baseFraction: 0.1,
+            minPerTurn: 1,
+            techBonus: {},
+            atOwnedShipyardBonus: 0.15,
+            carriedBonus: 0.1
+        }
+    } as unknown as EconomyBalance;
+
+    it("flags strike craft that need a hangar or shipyard to repair", () => {
+        const world = makeWorld(
+            [
+                ship("scout-1", 0, 0, { hp: 2 }),
+                ship("bomber-1", 1, 0, { shipType: "bomber_squadron", hp: 2 }),
+                ship("carrier-1", 3, 0, { shipType: "star_destroyer" }),
+                ship("bomber-2", 3, 0, {
+                    shipType: "bomber_squadron",
+                    hp: 2,
+                    carriedBy: "carrier-1"
+                })
+            ],
+            balance
+        );
+        const repairOf = (id: string) => world.repairOf(world.findEntity(id, "ship")!);
+        expect(repairOf("scout-1")).toEqual({ status: "repairing", perTurn: 1 });
+        expect(repairOf("bomber-1")).toEqual({ status: "needsDock" });
+        expect(repairOf("bomber-2")).toEqual({ status: "repairing", perTurn: 2 });
+    });
+});
+
 describe("HexWorld hyperjump targeting", () => {
     it("sends the next click on an explored hex as the jump target", () => {
         const world = makeWorld([planet, ship("ship-1", 1, 1)]);

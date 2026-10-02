@@ -67,6 +67,11 @@ export const ClientToServerMessage = z.discriminatedUnion("type", [
         payload: z.object({ locationId: EntityId, orderId: OrderId, priority: BuildPriority })
     }),
     z.object({
+        /** Funding priority of an owned location's Shield Generator upkeep (see `ShieldState`). */
+        type: z.literal("client:shield:priority"),
+        payload: z.object({ locationId: EntityId, priority: BuildPriority })
+    }),
+    z.object({
         /** Swap an order with its neighbour in the same build queue (see `moveOrderInQueue`). */
         type: z.literal("client:order:move"),
         payload: z.object({ locationId: EntityId, orderId: OrderId, direction: QueueDirection })
@@ -101,8 +106,10 @@ export const ClientToServerMessage = z.discriminatedUnion("type", [
     z.object({
         /**
          * Orbital bombardment of an enemy location on the ships' hex. Armed capital ships with
-         * `canBombard` each spend `BOMBARD_COST` movement; ground units take fire with no return
-         * fire, then each ship may destroy an installation (see `server:combat`).
+         * `canBombard` each spend `BOMBARD_COST` movement. A charged Shield Generator absorbs
+         * shots; ground units take the rest with no return fire, Defensive Batteries fire back,
+         * then each surviving ship that got through may destroy an installation (see
+         * `server:combat`).
          */
         type: z.literal("client:bombard"),
         payload: z.object({ locationId: EntityId, shipIds: z.array(EntityId).min(1) })

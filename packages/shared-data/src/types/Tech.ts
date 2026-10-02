@@ -23,7 +23,10 @@ export const TechId = z.enum([
     "evasive_manoeuvres_2",
     "armoured_freighters",
     "damage_control_1",
-    "damage_control_2"
+    "damage_control_2",
+    "capital_ship_engineering",
+    "planetary_shields",
+    "orbital_defence_platforms"
 ]);
 export type TechId = z.infer<typeof TechId>;
 
@@ -177,6 +180,27 @@ export const TECHS: Record<TechId, TechDefinition> = {
         cost: { money: 100, materials: 100, population: 0, science: 200 },
         buildTurns: 4,
         requires: ["damage_control_1"]
+    },
+    capital_ship_engineering: {
+        name: "Capital Ship Engineering",
+        description: "Unlocks the Super Star Destroyer.",
+        cost: { money: 200, materials: 0, population: 0, science: 400 },
+        buildTurns: 6,
+        requires: ["advanced_shipyard"]
+    },
+    planetary_shields: {
+        name: "Planetary Shields",
+        description: "Unlocks the Shield Generator.",
+        cost: { money: 100, materials: 0, population: 0, science: 150 },
+        buildTurns: 3,
+        requires: []
+    },
+    orbital_defence_platforms: {
+        name: "Orbital Defence Platforms",
+        description: "Unlocks the Orbital Platform.",
+        cost: { money: 150, materials: 0, population: 0, science: 250 },
+        buildTurns: 4,
+        requires: ["advanced_shipyard"]
     }
 };
 

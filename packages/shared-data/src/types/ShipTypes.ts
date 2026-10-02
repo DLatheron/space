@@ -42,8 +42,22 @@ export const SHIP_TYPE_INFO: Record<ShipType, ShipTypeInfo> = {
         rotationSpeed: 450,
         moveSpeed: 2.5
     },
+    // 180° turn 0.4s + 1 hex 0.45s → ≤ 0.85s
+    bomber_squadron: {
+        name: "Bomber Squadron",
+        scale: 0.42,
+        rotationSpeed: 450,
+        moveSpeed: 2.2
+    },
     // 180° turn 1.2s + 1 hex 1.0s → ≤ 2.2s
-    star_destroyer: { name: "Star Destroyer", scale: 0.8, rotationSpeed: 150, moveSpeed: 1 }
+    star_destroyer: { name: "Star Destroyer", scale: 0.8, rotationSpeed: 150, moveSpeed: 1 },
+    // 180° turn 1.8s + 1 hex 1.25s → ≤ 3.05s
+    super_star_destroyer: {
+        name: "Super Star Destroyer",
+        scale: 1,
+        rotationSpeed: 100,
+        moveSpeed: 0.8
+    }
 };
 
 export function shipDef(shipType: ShipType, balance: EconomyBalance): ShipTypeDefinition {

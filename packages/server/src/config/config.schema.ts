@@ -1,9 +1,11 @@
 import { LogLevel } from "@space/misc";
 import {
     BuildSlots,
+    ShipClass,
     ShipType,
     StructureSite,
     StructureType,
+    TargetClass,
     TechId,
     type EconomyBalance,
     type GroundUnitBalance,
@@ -201,6 +203,17 @@ function ship(defaults: ShipBalance) {
             canColonise: z.boolean().default(defaults.canColonise),
             /** Orbital bombardment of enemy locations on its hex. */
             canBombard: z.boolean().default(defaults.canBombard),
+            /** `strike_craft`, `capital` or `support`; what other ships' multipliers single out. */
+            class: ShipClass.default(defaults.class),
+            /**
+             * Damage multiplier per target class (`strike_craft`, `capital`, `support`,
+             * `orbital_platform`); absent classes take 1. Replaced as a whole.
+             */
+            attackMultipliers: z
+                .partialRecord(TargetClass, z.number().min(0))
+                .default(() => ({ ...defaults.attackMultipliers })),
+            /** Repairs anywhere out of combat; otherwise only in a hangar or at an owned shipyard. */
+            repairsInSpace: z.boolean().default(defaults.repairsInSpace),
             hyperdrive: hyperdrive(defaults.hyperdrive),
             /** Ships it can carry; `null` removes a default hangar. */
             hangar: hangar(defaults.hangar)
@@ -245,8 +258,24 @@ const SHIP_DEFAULTS = {
     requiresTech: null,
     unitCapacity: 0,
     canColonise: false,
-    canBombard: false
+    canBombard: false,
+    attackMultipliers: {},
+    repairsInSpace: true
 } satisfies Partial<ShipBalance>;
+
+/** Fighters and bombers only repair docked in a hangar or at an owned shipyard. */
+const STRIKE_CRAFT_DEFAULTS = {
+    ...SHIP_DEFAULTS,
+    class: "strike_craft",
+    repairsInSpace: false
+} satisfies Partial<ShipBalance>;
+
+/** Ship types a capital ship hangar takes by default. */
+const HANGAR_CARRIES: ShipType[] = [
+    "fighter_squadron",
+    "advanced_fighter_squadron",
+    "bomber_squadron"
+];
 
 const DEFAULT_STRUCTURE_BUILD_SLOTS: EconomyBalance["buildSlots"]["structures"] = {
     shipyard: { ships: 1 },
@@ -350,6 +379,33 @@ export const EconomyBalanceConfig = z
                     requiresTech: "ground_forces",
                     unique: true,
                     maxTier: 1
+                }),
+                /** Combat stats under `defences`. */
+                defensive_battery: structure({
+                    ...STRUCTURE_DEFAULTS,
+                    cost: { money: 120, materials: 150, population: 10, science: 0 },
+                    buildTurns: 2,
+                    sites: ["planet", "moon"],
+                    maxTier: 3
+                }),
+                shield_generator: structure({
+                    ...STRUCTURE_DEFAULTS,
+                    cost: { money: 200, materials: 200, population: 10, science: 50 },
+                    buildTurns: 3,
+                    sites: ["planet", "moon"],
+                    requiresTech: "planetary_shields",
+                    unique: true,
+                    maxTier: 3
+                }),
+                orbital_platform: structure({
+                    ...STRUCTURE_DEFAULTS,
+                    cost: { money: 300, materials: 400, population: 20, science: 0 },
+                    buildTurns: 4,
+                    sites: ["planet", "moon"],
+                    requires: ["shipyard"],
+                    requiresTech: "orbital_defence_platforms",
+                    unique: true,
+                    maxTier: 3
                 })
             })
             .strict()
@@ -358,6 +414,7 @@ export const EconomyBalanceConfig = z
             .object({
                 scout: ship({
                     ...SHIP_DEFAULTS,
+                    class: "support",
                     cost: { money: 100, materials: 100, population: 5, science: 0 },
                     buildTurns: 2,
                     maxMovementPoints: 5,
@@ -368,6 +425,7 @@ export const EconomyBalanceConfig = z
                 }),
                 frigate: ship({
                     ...SHIP_DEFAULTS,
+                    class: "capital",
                     cost: { money: 200, materials: 300, population: 15, science: 0 },
                     buildTurns: 3,
                     maxMovementPoints: 3,
@@ -383,6 +441,7 @@ export const EconomyBalanceConfig = z
                 }),
                 colony_ship: ship({
                     ...SHIP_DEFAULTS,
+                    class: "support",
                     cost: { money: 200, materials: 200, population: 50, science: 0 },
                     buildTurns: 3,
                     maxMovementPoints: 2,
@@ -394,6 +453,7 @@ export const EconomyBalanceConfig = z
                 }),
                 transport: ship({
                     ...SHIP_DEFAULTS,
+                    class: "support",
                     cost: { money: 100, materials: 150, population: 5, science: 0 },
                     buildTurns: 2,
                     maxMovementPoints: 3,
@@ -405,17 +465,18 @@ export const EconomyBalanceConfig = z
                     unitCapacity: 4
                 }),
                 fighter_squadron: ship({
-                    ...SHIP_DEFAULTS,
+                    ...STRIKE_CRAFT_DEFAULTS,
                     cost: { money: 80, materials: 60, population: 10, science: 0 },
                     buildTurns: 2,
                     maxMovementPoints: 6,
                     hp: 4,
                     attack: 3,
                     defence: 1,
-                    maxTier: 3
+                    maxTier: 3,
+                    attackMultipliers: { orbital_platform: 2 }
                 }),
                 advanced_fighter_squadron: ship({
-                    ...SHIP_DEFAULTS,
+                    ...STRIKE_CRAFT_DEFAULTS,
                     cost: { money: 150, materials: 120, population: 15, science: 0 },
                     buildTurns: 3,
                     maxMovementPoints: 6,
@@ -423,10 +484,24 @@ export const EconomyBalanceConfig = z
                     attack: 5,
                     defence: 2,
                     requires: ["advanced_shipyard"],
-                    maxTier: 3
+                    maxTier: 3,
+                    attackMultipliers: { orbital_platform: 2 }
+                }),
+                bomber_squadron: ship({
+                    ...STRIKE_CRAFT_DEFAULTS,
+                    cost: { money: 100, materials: 80, population: 10, science: 0 },
+                    buildTurns: 2,
+                    maxMovementPoints: 4,
+                    hp: 5,
+                    attack: 4,
+                    defence: 0,
+                    requires: ["advanced_shipyard"],
+                    maxTier: 3,
+                    attackMultipliers: { capital: 2.5, orbital_platform: 2 }
                 }),
                 star_destroyer: ship({
                     ...SHIP_DEFAULTS,
+                    class: "capital",
                     cost: { money: 600, materials: 800, population: 60, science: 0 },
                     buildTurns: 6,
                     maxMovementPoints: 2,
@@ -437,10 +512,30 @@ export const EconomyBalanceConfig = z
                     maxTier: 3,
                     unitCapacity: 4,
                     canBombard: true,
-                    hangar: { capacity: 4, carries: ["fighter_squadron", "advanced_fighter_squadron"] },
+                    hangar: { capacity: 4, carries: HANGAR_CARRIES },
                     hyperdrive: {
                         cooldownTurns: 4,
                         accuracy: { onTarget: 30, oneOff: 50, twoOff: 20 }
+                    }
+                }),
+                super_star_destroyer: ship({
+                    ...SHIP_DEFAULTS,
+                    class: "capital",
+                    cost: { money: 1800, materials: 2400, population: 150, science: 0 },
+                    buildTurns: 10,
+                    maxMovementPoints: 2,
+                    hp: 90,
+                    attack: 20,
+                    defence: 14,
+                    requires: ["advanced_shipyard", "docks"],
+                    requiresTech: "capital_ship_engineering",
+                    maxTier: 3,
+                    unitCapacity: 8,
+                    canBombard: true,
+                    hangar: { capacity: 10, carries: HANGAR_CARRIES },
+                    hyperdrive: {
+                        cooldownTurns: 5,
+                        accuracy: { onTarget: 40, oneOff: 45, twoOff: 15 }
                     }
                 })
             })
@@ -521,6 +616,45 @@ export const EconomyBalanceConfig = z
                 atOwnedShipyardBonus: z.number().min(0).max(1).default(0.15),
                 /** Aboard a carrier's hangar. */
                 carriedBonus: z.number().min(0).max(1).default(0.05)
+            })
+            .strict()
+            .prefault({}),
+        /**
+         * Combat stats of defensive installations at tier 1; tiers 2 and 3 scale attack,
+         * defence, hp, shield capacity and recharge by `structureTierOutput` (rounded up).
+         */
+        defences: z
+            .object({
+                /** Fires once at bombarding ships and once at invading transports. */
+                defensive_battery: z
+                    .object({
+                        attack: z.int().min(0).default(5),
+                        defence: z.int().min(0).default(4)
+                    })
+                    .strict()
+                    .prefault({}),
+                /**
+                 * Hp pool absorbing bombarding ships' shots. Each end of turn its upkeep is
+                 * funded with the location's orders at the shield's priority; with a share `f`
+                 * supplied the cap is `capacity * f` and it recharges `rechargePerTurn * f`.
+                 */
+                shield_generator: z
+                    .object({
+                        capacity: z.int().min(0).default(40),
+                        rechargePerTurn: z.int().min(0).default(10),
+                        upkeep: resources({ money: 15, materials: 0, population: 0, science: 5 })
+                    })
+                    .strict()
+                    .prefault({}),
+                /** Blocks enemy ships from entering its hex; damage persists and is repaired. */
+                orbital_platform: z
+                    .object({
+                        attack: z.int().min(0).default(8),
+                        defence: z.int().min(0).default(8),
+                        hp: z.int().positive().default(40)
+                    })
+                    .strict()
+                    .prefault({})
             })
             .strict()
             .prefault({}),

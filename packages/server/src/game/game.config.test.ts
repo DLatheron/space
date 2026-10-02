@@ -216,6 +216,42 @@ describe("Game economy messages", () => {
         game.destroyGame();
     });
 
+    it("sets a Shield Generator's priority, replying with economy state or an error", async () => {
+        const { game, alpha } = createGame({ revealMap: false, fullVisibility: false });
+        const home = game.entities.ofKind("planet").find((p) => p.sideId === "alpha")!;
+        const setPriority = () =>
+            game.queueMessage(
+                {
+                    type: "client:shield:priority",
+                    payload: { locationId: home.id, priority: "high" }
+                },
+                alpha.client
+            );
+
+        setPriority();
+        await vi.waitFor(() => expect(alpha.last("server:error")).toBeDefined());
+        expect(alpha.last("server:error")!.payload.message).toBe(
+            `No Shield Generator at ${home.id}`
+        );
+
+        game.economy.research.add("alpha", "planetary_shields");
+        game.economy.build("alpha", home.id, {
+            kind: "structure",
+            structureType: "shield_generator"
+        });
+        for (let turn = 0; turn < DEFAULTS.structures.shield_generator.buildTurns; turn++) {
+            game.economy.fund();
+        }
+        game.economy.completeReady();
+        setPriority();
+        await vi.waitFor(() => expect(alpha.last("server:economy:state")).toBeDefined());
+        const location = alpha
+            .last("server:economy:state")!
+            .payload.locations.find((l) => l.locationId === home.id)!;
+        expect(location.shield).toMatchObject({ priority: "high" });
+        game.destroyGame();
+    });
+
     it("uses ship, structure and starting values from the economy config", async () => {
         const economy = EconomyBalanceConfig.parse({
             startingShips: ["scout", "colony_ship"],

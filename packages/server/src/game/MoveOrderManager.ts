@@ -1,5 +1,5 @@
 import { MOVE_COST_PER_HEX, type AxialCoord, type EntityId, type SideId } from "@space/shared-data";
-import { hasEnemyVessels } from "./Battle.js";
+import { isDefendedHex } from "./Battle.js";
 import type { EconomyManager } from "./EconomyManager.js";
 import type { EntityManager } from "./EntityManager.js";
 import type { EntityOf } from "./map/types.js";
@@ -37,7 +37,8 @@ export type MoveOrderOptions = {
 /**
  * Runs ships' multi-turn move orders at end of turn: each order is re-planned with the
  * side's knowledge, then the ship steps until its movement runs out. Orders never attack: the
- * ship stops before hexes holding enemy vessels and keeps its order to try again next turn.
+ * ship stops before defended hexes (enemy vessels or an enemy Orbital Platform, see
+ * `isDefendedHex`) and keeps its order to try again next turn.
  * Ships with a jump pending drop their order.
  */
 export class MoveOrderManager {
@@ -89,7 +90,8 @@ export class MoveOrderManager {
                 plan,
                 Math.floor(ship.movementPoints / MOVE_COST_PER_HEX),
                 {
-                    stopBefore: (hex) => hasEnemyVessels(this._entities, hex, ship.sideId)
+                    stopBefore: (hex) =>
+                        isDefendedHex(this._entities, this._economy, hex, ship.sideId)
                 }
             );
             if (steps.path.length === 0) {

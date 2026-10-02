@@ -214,6 +214,78 @@ describe("EconomyManager funding at end of turn", () => {
     });
 });
 
+describe("EconomyManager Shield Generators", () => {
+    /** A moon with a finished Shield Generator and an empty stockpile. */
+    function shieldWorld() {
+        const world = economyWorld();
+        const { economy, moon } = world;
+        economy.research.add("alpha", "planetary_shields");
+        economy.deposit(
+            moon.id,
+            res({ money: 1000, materials: 1000, population: 100, science: 100 })
+        );
+        economy.build("alpha", moon.id, structure("shield_generator"));
+        for (let turn = 0; turn < DEFAULTS.structures.shield_generator.buildTurns; turn++) {
+            economy.fund();
+        }
+        economy.completeReady();
+        economy.withdraw(moon.id, economy.stockpile(moon.id));
+        const shield = () => economy.locationEconomy(moon.id)!.shield;
+        return { ...world, shield };
+    }
+
+    it("starts a new shield empty, at medium priority, and removes it with its generator", () => {
+        const { economy, moon, shield } = shieldWorld();
+        expect(shield()).toEqual({ hp: 0, priority: "medium", supplied: 0 });
+        expect(economy.locationEconomy(economy.ownedLocations("alpha")[0]!.id)?.shield).toBe(
+            undefined
+        );
+        const generator = economy.installationsAt(moon.id)[0]!;
+        expect(economy.demolish("alpha", moon.id, generator.id)).toEqual({ ok: true });
+        expect(shield()).toBeUndefined();
+        expect(economy.shieldHp(moon.id)).toBe(0);
+    });
+
+    it("funds the upkeep by priority alongside builds, recharging by the share supplied", () => {
+        const { economy, moon, shield, orders } = shieldWorld();
+        expect(economy.setShieldPriority("alpha", moon.id, "high")).toEqual({ ok: true });
+        economy.build("alpha", moon.id, structure("mine"), "medium");
+        economy.deposit(moon.id, res({ money: 30, population: 5, science: 5 }));
+        economy.fund();
+        // Upkeep 15 money + 5 science first; the mine gets the other 15 money.
+        expect(shield()).toEqual({ hp: 10, priority: "high", supplied: 1 });
+        expect(orders(moon.id)[0].applied).toEqual(res({ money: 15, population: 5 }));
+        expect(economy.stockpile(moon.id)).toEqual(zeroResources());
+
+        expect(economy.setShieldPriority("alpha", moon.id, "low")).toEqual({ ok: true });
+        economy.deposit(moon.id, res({ money: 57, science: 5 }));
+        economy.fund();
+        // The mine takes its 50 money rate first: 7 of 15 money is 7/15 supplied, so the
+        // shield charges floor(10 * 7/15) = 4 towards a cap of floor(40 * 7/15) = 18.
+        expect(shield()?.hp).toBe(14);
+        expect(shield()?.supplied).toBeCloseTo(7 / 15);
+    });
+
+    it("drains a shield above what partial supply can hold, and empties it unsupplied", () => {
+        const { economy, moon, shield } = shieldWorld();
+        economy.setShieldHp(moon.id, 30);
+        economy.deposit(moon.id, res({ money: 7, science: 5 }));
+        economy.fund();
+        expect(shield()?.hp).toBe(18);
+        economy.fund();
+        expect(shield()).toMatchObject({ hp: 0, supplied: 0 });
+    });
+
+    it("rejects shield priorities without a generator or at another side's location", () => {
+        const { economy, home, moon } = shieldWorld();
+        expect(economy.setShieldPriority("alpha", home.id, "high")).toEqual({
+            ok: false,
+            error: `No Shield Generator at ${home.id}`
+        });
+        expect(economy.setShieldPriority("beta", moon.id, "high").ok).toBe(false);
+    });
+});
+
 describe("EconomyManager research", () => {
     it("needs a Science Academy, completes over its build turns and unlocks side-wide", () => {
         const { economy, endTurn, home, moon, installed } = economyWorld();

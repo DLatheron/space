@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import {
     enhancementTargetId,
     isFullyFunded,
@@ -8,7 +9,8 @@ import {
     type EconomyBalance,
     type Installation,
     type LocationEconomy,
-    type OrderId
+    type OrderId,
+    type StructureType
 } from "@space/shared-data";
 import { imageUrl } from "../../assets/images.js";
 import { Thumbnail } from "../../components/Thumbnail.js";
@@ -18,12 +20,17 @@ import "./InstallationGrid.css";
 type InstallationGridProps = {
     economy: LocationEconomy;
     balance: EconomyBalance;
-    /** Free structure slots, each shown as an "Add installation" tile. */
+    /** Free structure slots, each shown as an `addLabel` tile. */
     freeSlots: number;
     /** Orders over their category's limit (see `partitionOrders`). */
     waitingIds: ReadonlySet<OrderId>;
     onAdd: () => void;
     onUpgrade: (installation: Installation) => void;
+    /** Structure types listed here, built or on order; defaults to all. */
+    show?: (type: StructureType) => boolean;
+    addLabel?: string;
+    /** Extra content under a built installation's picture. */
+    detail?: (installation: Installation) => ReactNode;
 };
 
 function ProgressOverlay({
@@ -62,7 +69,10 @@ export function InstallationGrid({
     freeSlots,
     waitingIds,
     onAdd,
-    onUpgrade
+    onUpgrade,
+    show = () => true,
+    addLabel = "Add installation",
+    detail
 }: InstallationGridProps) {
     const upgrades = new Map<string, BuildOrder>();
     for (const order of economy.orders) {
@@ -70,68 +80,79 @@ export function InstallationGrid({
             upgrades.set(enhancementTargetId(order.item.target), order);
         }
     }
-    const construction = economy.orders.filter((o) => o.item.kind === "structure");
+    const construction = economy.orders.filter(
+        (o) => o.item.kind === "structure" && show(o.item.structureType)
+    );
 
     return (
         <ul className="installation-grid">
-            {economy.installations.map((inst) => {
-                const def = structureDef(inst.type, balance);
-                const upgrade = upgrades.get(inst.id);
-                const output = [
-                    ...outputSummary(structureOutput(inst.type, inst.tier, balance)),
-                    ...capSummary(structureCapBonus(inst.type, inst.tier, balance))
-                ];
-                const slots = def.slots ?? 1;
-                return (
-                    <li
-                        key={inst.id}
-                        className="installation-tile"
-                        title={[`${def.name} T${inst.tier}`, def.description, ...output].join("\n")}
-                    >
-                        <div className="installation-tile__picture">
-                            <Thumbnail
-                                src={imageUrl({ kind: "structure", structureType: inst.type })}
-                                label={def.name}
-                                size="fill"
-                            />
-                            <span className="installation-tile__caption">
-                                <span className="installation-tile__name">
-                                    <strong>{def.name}</strong>
-                                    <span className="installation-tile__tier">T{inst.tier}</span>
-                                </span>
-                                {output.length > 0 && (
-                                    <span className="installation-tile__output">
-                                        {output.join(" · ")}
-                                    </span>
-                                )}
-                            </span>
-                            {slots !== 1 && (
-                                <span className="installation-tile__slots">{slots} slots</span>
+            {economy.installations
+                .filter((inst) => show(inst.type))
+                .map((inst) => {
+                    const def = structureDef(inst.type, balance);
+                    const upgrade = upgrades.get(inst.id);
+                    const output = [
+                        ...outputSummary(structureOutput(inst.type, inst.tier, balance)),
+                        ...capSummary(structureCapBonus(inst.type, inst.tier, balance))
+                    ];
+                    const slots = def.slots ?? 1;
+                    return (
+                        <li
+                            key={inst.id}
+                            className="installation-tile"
+                            title={[`${def.name} T${inst.tier}`, def.description, ...output].join(
+                                "\n"
                             )}
-                            {upgrade && (
-                                <ProgressOverlay
-                                    order={upgrade}
-                                    waiting={waitingIds.has(upgrade.id)}
-                                    label={`Upgrading to T${inst.tier + 1}`}
+                        >
+                            <div className="installation-tile__picture">
+                                <Thumbnail
+                                    src={imageUrl({ kind: "structure", structureType: inst.type })}
+                                    label={def.name}
+                                    size="fill"
                                 />
+                                <span className="installation-tile__caption">
+                                    <span className="installation-tile__name">
+                                        <strong>{def.name}</strong>
+                                        <span className="installation-tile__tier">
+                                            T{inst.tier}
+                                        </span>
+                                    </span>
+                                    {output.length > 0 && (
+                                        <span className="installation-tile__output">
+                                            {output.join(" · ")}
+                                        </span>
+                                    )}
+                                </span>
+                                {slots !== 1 && (
+                                    <span className="installation-tile__slots">{slots} slots</span>
+                                )}
+                                {upgrade && (
+                                    <ProgressOverlay
+                                        order={upgrade}
+                                        waiting={waitingIds.has(upgrade.id)}
+                                        label={`Upgrading to T${inst.tier + 1}`}
+                                    />
+                                )}
+                            </div>
+                            {detail?.(inst)}
+                            {inst.tier < def.maxTier ? (
+                                <button
+                                    type="button"
+                                    className="installation-tile__action"
+                                    disabled={!!upgrade}
+                                    title={
+                                        upgrade ? "Already being upgraded" : `Upgrade ${def.name}`
+                                    }
+                                    onClick={() => onUpgrade(inst)}
+                                >
+                                    {upgrade ? "Upgrading" : `Upgrade to T${inst.tier + 1}`}
+                                </button>
+                            ) : (
+                                <span className="installation-tile__max">Max tier</span>
                             )}
-                        </div>
-                        {inst.tier < def.maxTier ? (
-                            <button
-                                type="button"
-                                className="installation-tile__action"
-                                disabled={!!upgrade}
-                                title={upgrade ? "Already being upgraded" : `Upgrade ${def.name}`}
-                                onClick={() => onUpgrade(inst)}
-                            >
-                                {upgrade ? "Upgrading" : `Upgrade to T${inst.tier + 1}`}
-                            </button>
-                        ) : (
-                            <span className="installation-tile__max">Max tier</span>
-                        )}
-                    </li>
-                );
-            })}
+                        </li>
+                    );
+                })}
             {construction.map((order) => {
                 if (order.item.kind !== "structure") return null;
                 const def = structureDef(order.item.structureType, balance);
@@ -166,7 +187,7 @@ export function InstallationGrid({
                         <span className="installation-tile__plus" aria-hidden="true">
                             +
                         </span>
-                        Add installation
+                        {addLabel}
                     </button>
                 </li>
             ))}

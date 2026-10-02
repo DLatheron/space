@@ -22,7 +22,7 @@ import {
     type Resources,
     type SideId
 } from "@space/shared-data";
-import { hasEnemyWarships, type BattleManager } from "./Battle.js";
+import { hasAmbushers, type BattleManager } from "./Battle.js";
 import type { EconomyManager } from "./EconomyManager.js";
 import type { EntityManager } from "./EntityManager.js";
 import { findTileByAxial } from "./map/SpaceMap.js";
@@ -71,7 +71,7 @@ export type SupplyArrival = {
 export type SupplyMoveResult = {
     moves: SupplyMove[];
     arrivals: SupplyArrival[];
-    /** Ambushes: enemy warships the side didn't know about attacking its supply ships. */
+    /** Ambushes: enemy warships or platforms the side didn't know about attacking its supply ships. */
     combats: CombatResult[];
 };
 
@@ -178,7 +178,8 @@ export class SupplyManager {
 
     /**
      * Steps 2 and 3. Each supply ship re-plans its route and moves up to its speed. Stepping
-     * towards a hex holding enemy warships it didn't know about, it is ambushed (see
+     * towards a hex holding enemy warships or an armed enemy Orbital Platform it didn't know
+     * about (see `hasAmbushers`), it is ambushed (see
      * `BattleManager.ambush`) and, if it survives, stops before that hex. A ship with no route
      * waits. A ship whose destination was lost heads for the nearest
      * owned location instead (its reservations are dropped). Ships reaching their
@@ -209,7 +210,7 @@ export class SupplyManager {
                 const path: AxialCoord[] = [];
                 let ambushAt: AxialCoord | undefined;
                 for (const hex of route.slice(0, ship.speed)) {
-                    if (hasEnemyWarships(this._entities, hex, ship.sideId)) {
+                    if (hasAmbushers(this._entities, this._economy, hex, ship.sideId)) {
                         ambushAt = hex;
                         break;
                     }
@@ -477,7 +478,7 @@ export class SupplyManager {
     private _trueKnowledge(sideId: SideId): SupplyKnowledge {
         return {
             isObstacle: (hex) => hexHasObstacle(this._entities.entitiesAt(hex.q, hex.r)),
-            isHostile: (hex) => hasEnemyWarships(this._entities, hex, sideId)
+            isHostile: (hex) => hasAmbushers(this._entities, this._economy, hex, sideId)
         };
     }
 }

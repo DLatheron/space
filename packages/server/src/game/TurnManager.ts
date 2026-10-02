@@ -48,7 +48,8 @@ type Advance = Omit<EndTurnResult, "advanced" | "state">;
  * 4. installations and base income add to local stockpiles;
  * 5. supply ships move, re-planning around known enemies;
  * 6. arriving cargo goes into the destination's stockpile;
- * 7. builds draw from their local stockpile by priority, capped at their per-turn rate.
+ * 7. builds and Shield Generator upkeep draw from their local stockpile by priority, builds
+ *    capped at their per-turn rate; shields recharge by the share of upkeep supplied.
  *    Builds that become fully funded are ready: they stay queued (without holding a build
  *    slot, so the next queued build starts funding at once) and complete in next turn's
  *    step 3, so a build takes at least `buildTurns + 1` end turns;
@@ -56,8 +57,8 @@ type Advance = Omit<EndTurnResult, "advanced" | "state">;
  * 9. dispatch: demand by priority, nearest source, reserve cargo, pack ships;
  * 10. ships launched in steps 8 and 9 make their first move (as in steps 5 and 6). Cargo
  *    they deliver is only used by next turn's funding;
- * 11. damaged ships and supply ships with no combat during the turn just ended (including
- *    this end of turn) repair.
+ * 11. damaged ships, supply ships and Orbital Platforms with no combat during the turn just
+ *    ended (including this end of turn) repair.
  */
 export class TurnManager {
     private readonly _entities: EntityManager;

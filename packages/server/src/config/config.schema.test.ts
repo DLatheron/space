@@ -79,7 +79,10 @@ describe("economy balance config", () => {
             maxTier: 3,
             unitCapacity: 4,
             canColonise: false,
-            canBombard: false
+            canBombard: false,
+            class: "support",
+            attackMultipliers: {},
+            repairsInSpace: true
         });
         expect(economy.ships.frigate.requires).toEqual(["advanced_shipyard"]);
         expect(economy.ships.colony_ship).toMatchObject({ canColonise: true, maxTier: 1 });
@@ -207,11 +210,25 @@ describe("economy balance config", () => {
             transport: [0, 2],
             fighter_squadron: [3, 1],
             advanced_fighter_squadron: [5, 2],
-            star_destroyer: [8, 8]
+            bomber_squadron: [4, 0],
+            star_destroyer: [8, 8],
+            super_star_destroyer: [20, 14]
         });
         expect(economy.ships.star_destroyer.hangar).toEqual({
             capacity: 4,
-            carries: ["fighter_squadron", "advanced_fighter_squadron"]
+            carries: ["fighter_squadron", "advanced_fighter_squadron", "bomber_squadron"]
+        });
+        expect(economy.ships.super_star_destroyer).toMatchObject({
+            hp: 90,
+            requires: ["advanced_shipyard", "docks"],
+            requiresTech: "capital_ship_engineering",
+            unitCapacity: 8,
+            canBombard: true,
+            hangar: {
+                capacity: 10,
+                carries: ["fighter_squadron", "advanced_fighter_squadron", "bomber_squadron"]
+            },
+            hyperdrive: { cooldownTurns: 5, accuracy: { onTarget: 40, oneOff: 45, twoOff: 15 } }
         });
         expect(economy.ships.frigate.hangar).toBeUndefined();
         expect(economy.combat).toEqual({
@@ -257,6 +274,84 @@ describe("economy balance config", () => {
         ).toThrow();
     });
 
+    it("defaults ship classes, attack multipliers, space repair and defences", () => {
+        const economy = defaultEconomyBalance();
+        const classes = Object.fromEntries(
+            Object.entries(economy.ships).map(([type, ship]) => [type, ship.class])
+        );
+        expect(classes).toEqual({
+            scout: "support",
+            frigate: "capital",
+            colony_ship: "support",
+            transport: "support",
+            fighter_squadron: "strike_craft",
+            advanced_fighter_squadron: "strike_craft",
+            bomber_squadron: "strike_craft",
+            star_destroyer: "capital",
+            super_star_destroyer: "capital"
+        });
+        expect(economy.ships.fighter_squadron.attackMultipliers).toEqual({ orbital_platform: 2 });
+        expect(economy.ships.bomber_squadron.attackMultipliers).toEqual({
+            capital: 2.5,
+            orbital_platform: 2
+        });
+        expect(economy.ships.frigate.attackMultipliers).toEqual({});
+        const docked = Object.entries(economy.ships)
+            .filter(([, ship]) => !ship.repairsInSpace)
+            .map(([type]) => type);
+        expect(docked).toEqual([
+            "fighter_squadron",
+            "advanced_fighter_squadron",
+            "bomber_squadron"
+        ]);
+        expect(economy.defences).toEqual({
+            defensive_battery: { attack: 5, defence: 4 },
+            shield_generator: {
+                capacity: 40,
+                rechargePerTurn: 10,
+                upkeep: { money: 15, materials: 0, population: 0, science: 5 }
+            },
+            orbital_platform: { attack: 8, defence: 8, hp: 40 }
+        });
+        expect(economy.structures.shield_generator).toMatchObject({
+            sites: ["planet", "moon"],
+            requiresTech: "planetary_shields",
+            unique: true
+        });
+        expect(economy.structures.orbital_platform).toMatchObject({
+            requires: ["shipyard"],
+            requiresTech: "orbital_defence_platforms",
+            unique: true
+        });
+        expect(economy.structures.defensive_battery).toMatchObject({
+            requiresTech: null,
+            unique: false,
+            slots: 1
+        });
+
+        const custom = Config.parse({
+            economy: {
+                ships: { frigate: { attackMultipliers: { strike_craft: 1.5 }, class: "support" } },
+                defences: { shield_generator: { upkeep: { money: 40 } } }
+            }
+        }).economy;
+        expect(custom.ships.frigate).toMatchObject({
+            class: "support",
+            attackMultipliers: { strike_craft: 1.5 }
+        });
+        expect(custom.defences.shield_generator).toEqual({
+            capacity: 40,
+            rechargePerTurn: 10,
+            upkeep: { money: 40, materials: 0, population: 0, science: 5 }
+        });
+        const parse = (value: unknown) => () => Config.parse({ economy: value });
+        expect(parse({ ships: { frigate: { class: "battleship" } } })).toThrow();
+        expect(parse({ ships: { frigate: { attackMultipliers: { planet: 2 } } } })).toThrow();
+        expect(parse({ ships: { frigate: { attackMultipliers: { capital: -1 } } } })).toThrow();
+        expect(parse({ defences: { orbital_platform: { hp: 0 } } })).toThrow();
+        expect(parse({ defences: { minefield: {} } })).toThrow();
+    });
+
     it("adds, changes and removes hangars", () => {
         const economy = Config.parse({
             economy: {
@@ -283,7 +378,7 @@ describe("economy balance config", () => {
         }).economy;
         expect(partial.ships.star_destroyer.hangar).toEqual({
             capacity: 6,
-            carries: ["fighter_squadron", "advanced_fighter_squadron"]
+            carries: ["fighter_squadron", "advanced_fighter_squadron", "bomber_squadron"]
         });
         expect(() =>
             Config.parse({ economy: { ships: { frigate: { hangar: { capacity: 1 } } } } })

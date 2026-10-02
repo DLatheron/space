@@ -212,6 +212,13 @@ export function App() {
                 });
                 appendLog(`priority — order ${orderId} on ${locationId} → ${priority}`);
             },
+            setShieldPriority: (locationId, priority) => {
+                sendMessage({
+                    type: "client:shield:priority",
+                    payload: { locationId, priority }
+                });
+                appendLog(`priority — shield on ${locationId} → ${priority}`);
+            },
             moveOrder: (locationId, orderId, direction) => {
                 sendMessage({
                     type: "client:order:move",

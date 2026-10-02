@@ -14,7 +14,12 @@ import {
     minResources,
     moveOrderInQueue,
     partitionOrders,
+    platformStats,
     remainingNeed,
+    SHIELD_UPKEEP_ID,
+    shieldRecharge,
+    shieldStats,
+    shieldUpkeepOrder,
     SHIP_TYPE_INFO,
     shipCapFor,
     shipDef,
@@ -25,6 +30,7 @@ import {
     structureDef,
     subtractResources,
     sumResources,
+    suppliedFraction,
     zeroResources,
     type AxialCoord,
     type BuildItem,
@@ -41,6 +47,7 @@ import {
     type OrderId,
     type QueueDirection,
     type Resources,
+    type ShieldState,
     type ShipType,
     type SideId,
     type TechId
@@ -108,6 +115,8 @@ type LocationRecord = {
     stockpile: Resources;
     installations: Installation[];
     orders: BuildOrder[];
+    /** Present exactly while a Shield Generator is built here. */
+    shield?: ShieldState;
 };
 
 type Completion = { done: boolean; ship?: EntityOf<"ship">; unit?: GroundUnit };
@@ -204,6 +213,26 @@ export class EconomyManager {
     /** Most of each resource the location's stockpile holds (see `stockpileCap`). */
     stockpileCap(locationId: EntityId): Resources {
         return this._cap(this._record(locationId));
+    }
+
+    /**
+     * The installations themselves (not copies) at an owned location, so combat can update
+     * `hp` and `lastCombatTurn`; remove them with `destroyInstallations`. Empty when unowned.
+     */
+    installationsAt(locationId: EntityId): readonly Installation[] {
+        if (!this.locationEntity(locationId)?.sideId) return [];
+        return this._locations.get(locationId)?.installations ?? [];
+    }
+
+    /** Current Shield Generator hp at a location; 0 without one. */
+    shieldHp(locationId: EntityId): number {
+        return this._locations.get(locationId)?.shield?.hp ?? 0;
+    }
+
+    /** Set the shield hp after bombardment; ignored without a Shield Generator. */
+    setShieldHp(locationId: EntityId, hp: number): void {
+        const shield = this._locations.get(locationId)?.shield;
+        if (shield) shield.hp = Math.max(0, hp);
     }
 
     /**
@@ -348,6 +377,20 @@ export class EconomyManager {
         return { ok: true };
     }
 
+    /** Funding priority of the location's Shield Generator upkeep (see `shieldUpkeepOrder`). */
+    setShieldPriority(
+        sideId: SideId | null,
+        locationId: EntityId,
+        priority: BuildPriority
+    ): EconomyResult {
+        const owned = this._owned(sideId, locationId);
+        if (!owned.ok) return owned;
+        const shield = this._record(locationId).shield;
+        if (!shield) return { ok: false, error: `No Shield Generator at ${locationId}` };
+        shield.priority = priority;
+        return { ok: true };
+    }
+
     /** Swap an order with its neighbour in the same build queue (see `moveOrderInQueue`). */
     moveOrder(
         sideId: SideId | null,
@@ -470,20 +513,24 @@ export class EconomyManager {
     }
 
     /**
-     * Step 5: active orders draw from their local stockpile (see `fundLocationOrders`). Those
-     * that become fully funded are ready: they complete at the next end of turn and free their
-     * build slot straight away.
+     * Step 5: active orders and any Shield Generator upkeep draw from their local stockpile by
+     * priority (see `fundLocationOrders`). Orders that become fully funded are ready: they
+     * complete at the next end of turn and free their build slot straight away. Shields then
+     * recharge by the share of upkeep supplied (see `shieldRecharge`).
      */
     fund(): void {
         for (const sideId of this._sideIds) {
             for (const location of this.ownedLocations(sideId)) {
                 const record = this._record(location.id);
-                const funded = fundLocationOrders(record.stockpile, record, this._balance);
+                const shield = record.shield;
+                const upkeep = shield ? [shieldUpkeepOrder(shield, this._balance)] : [];
+                const funded = fundLocationOrders(record.stockpile, record, this._balance, upkeep);
                 record.stockpile = funded.stockpile;
                 const applied = new Map(funded.orders.map((o) => [o.id, o.applied]));
                 for (const order of record.orders) {
                     order.applied = applied.get(order.id) ?? order.applied;
                 }
+                if (shield) this._rechargeShield(record, shield, funded.drawn[SHIELD_UPKEEP_ID]!);
             }
         }
     }
@@ -615,6 +662,7 @@ export class EconomyManager {
         if (!installation) return { ok: false, error: `No installation ${installationId}` };
         this._cancelEnhancementsFor("installation", installationId);
         record.installations = record.installations.filter((i) => i.id !== installationId);
+        this._syncShield(record);
         this.releasePopulation({
             sideId: owned.location.sideId!,
             amount: structureDef(installation.type, this._balance).cost.population,
@@ -638,6 +686,7 @@ export class EconomyManager {
         if (removed.length === 0) return;
         const keep = record.installations.filter((i) => !wanted.has(i.id));
         record.installations = keep;
+        this._syncShield(record);
         for (const installation of removed) {
             this._cancelEnhancementsFor("installation", installation.id);
             this.releasePopulation({
@@ -713,6 +762,7 @@ export class EconomyManager {
                     tier: 1,
                     populationFrom: location.id
                 });
+                this._syncShield(record);
                 return { done: true };
             case "ship": {
                 if (hasEnemyWarships(this._entities, location, sideId)) return { done: false };
@@ -741,7 +791,13 @@ export class EconomyManager {
                 const installation = record.installations.find(
                     (i) => i.id === target.installationId
                 );
-                if (installation) installation.tier = tier;
+                if (!installation) return;
+                if (installation.hp !== undefined && installation.type === "orbital_platform") {
+                    const before = platformStats(installation.tier, this._balance).hp;
+                    const after = platformStats(tier, this._balance).hp;
+                    installation.hp += after - before;
+                }
+                installation.tier = tier;
                 return;
             }
             case "ship": {
@@ -802,6 +858,25 @@ export class EconomyManager {
                 ship.reservedFor = ship.reservedFor.filter((r) => !ids.has(r.orderId));
             }
         }
+    }
+
+    /** A shield exists exactly while a Shield Generator does; a new one starts empty. */
+    private _syncShield(record: LocationRecord) {
+        const built = record.installations.some((i) => i.type === "shield_generator");
+        if (built && !record.shield) {
+            record.shield = { hp: 0, priority: DEFAULT_BUILD_PRIORITY, supplied: 0 };
+        } else if (!built) {
+            delete record.shield;
+        }
+    }
+
+    private _rechargeShield(record: LocationRecord, shield: ShieldState, drawn: Resources) {
+        const generator = record.installations.find((i) => i.type === "shield_generator");
+        if (!generator) return;
+        const stats = shieldStats(generator.tier, this._balance);
+        const supplied = suppliedFraction(stats.upkeep, drawn);
+        shield.supplied = supplied;
+        shield.hp = shieldRecharge(shield.hp, stats.capacity, stats.rechargePerTurn, supplied);
     }
 
     private _newInstallationId(): EntityId {
@@ -896,7 +971,8 @@ export class EconomyManager {
                 cost: { ...o.cost },
                 applied: { ...o.applied },
                 ratePerTurn: { ...o.ratePerTurn }
-            }))
+            })),
+            ...(record.shield ? { shield: { ...record.shield } } : {})
         };
     }
 

@@ -1,6 +1,17 @@
 import {
     addResources,
+    attackMultiplier,
+    batteryStats,
     borrowedPopulation,
+    canRepairIn,
+    installationRepairPerTurn,
+    isDefenceStructure,
+    platformStats,
+    SHIELD_UPKEEP_ID,
+    shieldRecharge,
+    shieldStats,
+    shieldUpkeepOrder,
+    suppliedFraction,
     buildItemCost,
     buildItemName,
     buildItemTurns,
@@ -106,6 +117,9 @@ function ship(overrides: Partial<ShipBalance>): ShipBalance {
         unitCapacity: 0,
         canColonise: false,
         canBombard: false,
+        class: "support",
+        attackMultipliers: {},
+        repairsInSpace: true,
         ...overrides
     };
 }
@@ -157,6 +171,20 @@ const balance: EconomyBalance = {
             sites: ["planet", "moon"],
             requiresTech: "ground_forces",
             unique: true
+        }),
+        defensive_battery: structure({ sites: ["planet", "moon"], maxTier: 3 }),
+        shield_generator: structure({
+            sites: ["planet", "moon"],
+            requiresTech: "planetary_shields",
+            unique: true,
+            maxTier: 3
+        }),
+        orbital_platform: structure({
+            sites: ["planet", "moon"],
+            requires: ["shipyard"],
+            requiresTech: "orbital_defence_platforms",
+            unique: true,
+            maxTier: 3
         })
     },
     ships: {
@@ -185,13 +213,32 @@ const balance: EconomyBalance = {
             requiresTech: "transports",
             unitCapacity: 4
         }),
-        fighter_squadron: ship({ cost: res(80, 60, 10), maxMovementPoints: 6, hp: 4 }),
+        fighter_squadron: ship({
+            cost: res(80, 60, 10),
+            maxMovementPoints: 6,
+            hp: 4,
+            class: "strike_craft",
+            attackMultipliers: { orbital_platform: 2 },
+            repairsInSpace: false
+        }),
         advanced_fighter_squadron: ship({
             cost: res(150, 120, 15),
             buildTurns: 3,
             maxMovementPoints: 6,
             hp: 7,
-            requires: ["advanced_shipyard"]
+            requires: ["advanced_shipyard"],
+            class: "strike_craft",
+            attackMultipliers: { orbital_platform: 2 },
+            repairsInSpace: false
+        }),
+        bomber_squadron: ship({
+            hp: 5,
+            attack: 4,
+            defence: 0,
+            requires: ["advanced_shipyard"],
+            class: "strike_craft",
+            attackMultipliers: { capital: 2.5, orbital_platform: 2 },
+            repairsInSpace: false
         }),
         star_destroyer: ship({
             cost: res(600, 800, 60),
@@ -204,7 +251,17 @@ const balance: EconomyBalance = {
             unitCapacity: 4,
             canBombard: true,
             hyperdrive: { cooldownTurns: 4, accuracy: { onTarget: 30, oneOff: 50, twoOff: 20 } },
-            hangar: { capacity: 4, carries: ["fighter_squadron", "advanced_fighter_squadron"] }
+            hangar: { capacity: 4, carries: ["fighter_squadron", "advanced_fighter_squadron"] },
+            class: "capital"
+        }),
+        super_star_destroyer: ship({
+            hp: 90,
+            attack: 20,
+            defence: 14,
+            requires: ["advanced_shipyard", "docks"],
+            requiresTech: "capital_ship_engineering",
+            canBombard: true,
+            class: "capital"
         })
     },
     shipTiers: {
@@ -238,6 +295,11 @@ const balance: EconomyBalance = {
         techBonus: { damage_control_1: 0.05, damage_control_2: 0.1 },
         atOwnedShipyardBonus: 0.15,
         carriedBonus: 0.05
+    },
+    defences: {
+        defensive_battery: { attack: 5, defence: 4 },
+        shield_generator: { capacity: 40, rechargePerTurn: 10, upkeep: res(15, 0, 0, 5) },
+        orbital_platform: { attack: 8, defence: 8, hp: 40 }
     },
     hyperspace: {
         hazards: {
@@ -652,9 +714,14 @@ describe("structureDef", () => {
         expect(structureDef("advanced_shipyard", balance).unlocksShips).toEqual([
             "frigate",
             "advanced_fighter_squadron",
-            "star_destroyer"
+            "bomber_squadron",
+            "star_destroyer",
+            "super_star_destroyer"
         ]);
-        expect(structureDef("docks", balance).unlocksShips).toEqual(["star_destroyer"]);
+        expect(structureDef("docks", balance).unlocksShips).toEqual([
+            "star_destroyer",
+            "super_star_destroyer"
+        ]);
         expect(structureDef("barracks", balance).unlocksGroundUnits).toEqual([
             "infantry",
             "armour"
@@ -1240,6 +1307,42 @@ describe("fundLocationOrders", () => {
         ]);
         expect(result.stockpile).toEqual(zeroResources());
     });
+
+    it("funds standing draws such as the shield upkeep by priority alongside orders", () => {
+        const shield = { hp: 0, priority: "high" as const, supplied: 0 };
+        const upkeep = shieldUpkeepOrder(shield, balance);
+        expect(upkeep).toMatchObject({
+            id: SHIELD_UPKEEP_ID,
+            priority: "high",
+            cost: res(15, 0, 0, 5),
+            ratePerTurn: res(15, 0, 0, 5)
+        });
+        const build = createBuildOrder("m1", mine, balance, "medium");
+        const short = fundLocationOrders(res(20, 0, 0, 5), location({ orders: [build] }), balance, [
+            upkeep
+        ]);
+        expect(short.drawn[SHIELD_UPKEEP_ID]).toEqual(res(15, 0, 0, 5));
+        expect(short.drawn.m1).toEqual(res(5));
+        expect(short.orders.map((o) => o.id)).toEqual(["m1"]);
+        expect(short.stockpile).toEqual(zeroResources());
+
+        const low = fundLocationOrders(res(50, 0, 0, 2), location({ orders: [build] }), balance, [
+            shieldUpkeepOrder({ ...shield, priority: "low" }, balance)
+        ]);
+        expect(low.drawn.m1).toEqual(res(50));
+        expect(low.drawn[SHIELD_UPKEEP_ID]).toEqual(res(0, 0, 0, 2));
+        expect(suppliedFraction(upkeep.cost, low.drawn[SHIELD_UPKEEP_ID]!)).toBe(0);
+
+        const alone = fundLocationOrders(res(100, 0, 0, 100), location(), balance, [upkeep]);
+        expect(alone.drawn).toEqual({ [SHIELD_UPKEEP_ID]: res(15, 0, 0, 5) });
+    });
+
+    it("measures supply by the least supplied resource asked for", () => {
+        expect(suppliedFraction(res(15, 0, 0, 5), res(15, 0, 0, 5))).toBe(1);
+        expect(suppliedFraction(res(15, 0, 0, 5), res(15, 0, 0, 2))).toBeCloseTo(0.4);
+        expect(suppliedFraction(res(10), res(5, 99))).toBe(0.5);
+        expect(suppliedFraction(res(), res())).toBe(1);
+    });
 });
 
 describe("queueCategory / moveOrderInQueue", () => {
@@ -1344,6 +1447,59 @@ describe("combat helpers", () => {
         expect(
             shipRepairPerTurn(balance, 35, 40, ["damage_control_2"], { atOwnedShipyard: true })
         ).toBe(5);
+    });
+
+    it("repairs ships that need a dock only aboard a carrier or at an owned shipyard", () => {
+        expect(shipRepairPerTurn(balance, 1, 40, [], { needsDock: true })).toBe(0);
+        expect(shipRepairPerTurn(balance, 1, 40, [], { needsDock: true, carried: true })).toBe(6);
+        expect(
+            shipRepairPerTurn(balance, 1, 40, [], { needsDock: true, atOwnedShipyard: true })
+        ).toBe(10);
+        expect(canRepairIn({})).toBe(true);
+        expect(canRepairIn({ needsDock: true })).toBe(false);
+    });
+
+    it("repairs Orbital Platforms by the base fraction, at least minPerTurn", () => {
+        expect(installationRepairPerTurn(balance, 10, 40)).toBe(4);
+        expect(installationRepairPerTurn(balance, 38, 40)).toBe(2);
+        expect(installationRepairPerTurn(balance, 1, 5)).toBe(1);
+        expect(installationRepairPerTurn(balance, 40, 40)).toBe(0);
+        expect(installationRepairPerTurn(balance, 0, 40)).toBe(0);
+    });
+
+    it("reads attack multipliers by target class, defaulting to 1", () => {
+        expect(attackMultiplier(balance, "bomber_squadron", "capital")).toBe(2.5);
+        expect(attackMultiplier(balance, "bomber_squadron", "orbital_platform")).toBe(2);
+        expect(attackMultiplier(balance, "bomber_squadron", "support")).toBe(1);
+        expect(attackMultiplier(balance, "fighter_squadron", "orbital_platform")).toBe(2);
+        expect(attackMultiplier(balance, "frigate", "orbital_platform")).toBe(1);
+        expect(attackMultiplier(balance, undefined, "capital")).toBe(1);
+        expect(attackMultiplier(balance, "bomber_squadron", undefined)).toBe(1);
+    });
+
+    it("scales defence stats by structure tier, rounding up", () => {
+        expect(batteryStats(1, balance)).toEqual({ attack: 5, defence: 4 });
+        expect(batteryStats(2, balance)).toEqual({ attack: 8, defence: 6 });
+        expect(platformStats(1, balance)).toEqual({ attack: 8, defence: 8, hp: 40 });
+        expect(platformStats(3, balance)).toEqual({ attack: 16, defence: 16, hp: 80 });
+        expect(shieldStats(2, balance)).toEqual({
+            capacity: 60,
+            rechargePerTurn: 15,
+            upkeep: res(15, 0, 0, 5)
+        });
+        expect(isDefenceStructure("shield_generator")).toBe(true);
+        expect(isDefenceStructure("mine")).toBe(false);
+    });
+
+    it("recharges a shield by the supplied share, capping and draining it", () => {
+        expect(shieldRecharge(0, 40, 10, 1)).toBe(10);
+        expect(shieldRecharge(35, 40, 10, 1)).toBe(40);
+        expect(shieldRecharge(40, 40, 10, 1)).toBe(40);
+        expect(shieldRecharge(0, 40, 10, 0.5)).toBe(5);
+        expect(shieldRecharge(18, 40, 10, 0.5)).toBe(20);
+        expect(shieldRecharge(30, 40, 10, 0.5)).toBe(20);
+        expect(shieldRecharge(30, 40, 10, 0)).toBe(0);
+        expect(shieldRecharge(0, 40, 10, 1 / 3)).toBe(3);
     });
 
     it("repairs only after a whole turn without combat", () => {

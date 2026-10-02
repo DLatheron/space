@@ -1,0 +1,54 @@
+.defences__stats {
+    display: grid;
+    gap: 0.2rem;
+    margin: 0.3rem 0.4rem 0;
+    color: #b7c7e4;
+    font-size: 0.72rem;
+}
+
+.defences__hp {
+    display: grid;
+    gap: 0.15rem;
+}
+
+.defences__hp-text {
+    color: #9ab3d4;
+    font-size: 0.72rem;
+}
+
+.defences__hp-track {
+    height: 0.3rem;
+    border-radius: 999px;
+    background: #1a2644;
+    overflow: hidden;
+}
+
+.defences__hp-fill {
+    display: block;
+    height: 100%;
+    background: #5cffb0;
+    transition: width 0.4s ease-out;
+}
+
+.defences__hp-fill--damaged {
+    background: #ffd166;
+}
+
+.defences__shield {
+    display: grid;
+    gap: 0.3rem;
+    margin-top: 0.5rem;
+    padding: 0.4rem 0.5rem;
+    border: 1px solid #22314f;
+    border-radius: 0.35rem;
+    background: #121c38;
+    font-size: 0.82rem;
+}
+
+.defences__shield-line {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.3rem;
+    color: #9ab3d4;
+}

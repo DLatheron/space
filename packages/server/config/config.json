@@ -179,6 +179,42 @@
                 "unique": true,
                 "slots": 1,
                 "maxTier": 1
+            },
+            "defensive_battery": {
+                "cost": { "money": 120, "materials": 150, "population": 10, "science": 0 },
+                "buildTurns": 2,
+                "sites": ["planet", "moon"],
+                "requires": [],
+                "requiresTech": null,
+                "produces": { "money": 0, "materials": 0, "population": 0, "science": 0 },
+                "shipCapBonus": 0,
+                "unique": false,
+                "slots": 1,
+                "maxTier": 3
+            },
+            "shield_generator": {
+                "cost": { "money": 200, "materials": 200, "population": 10, "science": 50 },
+                "buildTurns": 3,
+                "sites": ["planet", "moon"],
+                "requires": [],
+                "requiresTech": "planetary_shields",
+                "produces": { "money": 0, "materials": 0, "population": 0, "science": 0 },
+                "shipCapBonus": 0,
+                "unique": true,
+                "slots": 1,
+                "maxTier": 3
+            },
+            "orbital_platform": {
+                "cost": { "money": 300, "materials": 400, "population": 20, "science": 0 },
+                "buildTurns": 4,
+                "sites": ["planet", "moon"],
+                "requires": ["shipyard"],
+                "requiresTech": "orbital_defence_platforms",
+                "produces": { "money": 0, "materials": 0, "population": 0, "science": 0 },
+                "shipCapBonus": 0,
+                "unique": true,
+                "slots": 1,
+                "maxTier": 3
             }
         },
         "ships": {
@@ -193,7 +229,11 @@
                 "requiresTech": null,
                 "maxTier": 3,
                 "unitCapacity": 0,
-                "canColonise": false
+                "canColonise": false,
+                "canBombard": false,
+                "class": "support",
+                "attackMultipliers": {},
+                "repairsInSpace": true
             },
             "frigate": {
                 "cost": { "money": 200, "materials": 300, "population": 15, "science": 0 },
@@ -207,6 +247,10 @@
                 "maxTier": 3,
                 "unitCapacity": 0,
                 "canColonise": false,
+                "canBombard": false,
+                "class": "capital",
+                "attackMultipliers": {},
+                "repairsInSpace": true,
                 "hyperdrive": {
                     "cooldownTurns": 3,
                     "accuracy": { "onTarget": 20, "oneOff": 50, "twoOff": 30 }
@@ -223,7 +267,11 @@
                 "requiresTech": null,
                 "maxTier": 1,
                 "unitCapacity": 0,
-                "canColonise": true
+                "canColonise": true,
+                "canBombard": false,
+                "class": "support",
+                "attackMultipliers": {},
+                "repairsInSpace": true
             },
             "transport": {
                 "cost": { "money": 100, "materials": 150, "population": 5, "science": 0 },
@@ -236,7 +284,11 @@
                 "requiresTech": "transports",
                 "maxTier": 3,
                 "unitCapacity": 4,
-                "canColonise": false
+                "canColonise": false,
+                "canBombard": false,
+                "class": "support",
+                "attackMultipliers": {},
+                "repairsInSpace": true
             },
             "fighter_squadron": {
                 "cost": { "money": 80, "materials": 60, "population": 10, "science": 0 },
@@ -249,7 +301,11 @@
                 "requiresTech": null,
                 "maxTier": 3,
                 "unitCapacity": 0,
-                "canColonise": false
+                "canColonise": false,
+                "canBombard": false,
+                "class": "strike_craft",
+                "attackMultipliers": { "orbital_platform": 2 },
+                "repairsInSpace": false
             },
             "advanced_fighter_squadron": {
                 "cost": { "money": 150, "materials": 120, "population": 15, "science": 0 },
@@ -262,7 +318,28 @@
                 "requiresTech": null,
                 "maxTier": 3,
                 "unitCapacity": 0,
-                "canColonise": false
+                "canColonise": false,
+                "canBombard": false,
+                "class": "strike_craft",
+                "attackMultipliers": { "orbital_platform": 2 },
+                "repairsInSpace": false
+            },
+            "bomber_squadron": {
+                "cost": { "money": 100, "materials": 80, "population": 10, "science": 0 },
+                "buildTurns": 2,
+                "maxMovementPoints": 4,
+                "hp": 5,
+                "attack": 4,
+                "defence": 0,
+                "requires": ["advanced_shipyard"],
+                "requiresTech": null,
+                "maxTier": 3,
+                "unitCapacity": 0,
+                "canColonise": false,
+                "canBombard": false,
+                "class": "strike_craft",
+                "attackMultipliers": { "capital": 2.5, "orbital_platform": 2 },
+                "repairsInSpace": false
             },
             "star_destroyer": {
                 "cost": { "money": 600, "materials": 800, "population": 60, "science": 0 },
@@ -277,10 +354,41 @@
                 "unitCapacity": 4,
                 "canColonise": false,
                 "canBombard": true,
-                "hangar": { "capacity": 4, "carries": ["fighter_squadron", "advanced_fighter_squadron"] },
+                "class": "capital",
+                "attackMultipliers": {},
+                "repairsInSpace": true,
+                "hangar": {
+                    "capacity": 4,
+                    "carries": ["fighter_squadron", "advanced_fighter_squadron", "bomber_squadron"]
+                },
                 "hyperdrive": {
                     "cooldownTurns": 4,
                     "accuracy": { "onTarget": 30, "oneOff": 50, "twoOff": 20 }
+                }
+            },
+            "super_star_destroyer": {
+                "cost": { "money": 1800, "materials": 2400, "population": 150, "science": 0 },
+                "buildTurns": 10,
+                "maxMovementPoints": 2,
+                "hp": 90,
+                "attack": 20,
+                "defence": 14,
+                "requires": ["advanced_shipyard", "docks"],
+                "requiresTech": "capital_ship_engineering",
+                "maxTier": 3,
+                "unitCapacity": 8,
+                "canColonise": false,
+                "canBombard": true,
+                "class": "capital",
+                "attackMultipliers": {},
+                "repairsInSpace": true,
+                "hangar": {
+                    "capacity": 10,
+                    "carries": ["fighter_squadron", "advanced_fighter_squadron", "bomber_squadron"]
+                },
+                "hyperdrive": {
+                    "cooldownTurns": 5,
+                    "accuracy": { "onTarget": 40, "oneOff": 45, "twoOff": 15 }
                 }
             }
         },
@@ -309,6 +417,15 @@
             "techBonus": { "damage_control_1": 0.05, "damage_control_2": 0.1 },
             "atOwnedShipyardBonus": 0.15,
             "carriedBonus": 0.05
+        },
+        "defences": {
+            "defensive_battery": { "attack": 5, "defence": 4 },
+            "shield_generator": {
+                "capacity": 40,
+                "rechargePerTurn": 10,
+                "upkeep": { "money": 15, "materials": 0, "population": 0, "science": 5 }
+            },
+            "orbital_platform": { "attack": 8, "defence": 8, "hp": 40 }
         },
         "hyperspace": {
             "hazards": {

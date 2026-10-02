@@ -219,6 +219,62 @@ describe("out-of-combat repair", () => {
         expect(carried.hp).toBe(repaired(1, fighterHp, [], { carried: true }));
     });
 
+    it("repairs strike craft only aboard a carrier or at an owned shipyard", () => {
+        const { entities, economy, home, endTurn } = world();
+        economy.build("alpha", home.id, { kind: "structure", structureType: "shipyard" });
+        const max = shipStats("bomber_squadron", 1, DEFAULTS).hp;
+        const adrift = entities.add(
+            makeShip("bomber-a", "alpha", { q: 8, r: 8 }, 1, "bomber_squadron")
+        );
+        const docked = entities.add(makeShip("bomber-b", "alpha", home, 1, "bomber_squadron"));
+        const carrier = entities.add(
+            makeShip("sd-a", "alpha", { q: 9, r: 9 }, undefined, "star_destroyer")
+        );
+        const carried = entities.add({
+            ...makeShip("bomber-c", "alpha", { q: 9, r: 9 }, 1, "bomber_squadron"),
+            carriedBy: carrier.id
+        });
+        const { repairs } = endTurn();
+        expect(adrift.hp).toBe(1);
+        expect(docked.hp).toBe(repaired(1, max, [], { atOwnedShipyard: true }));
+        expect(carried.hp).toBe(repaired(1, max, [], { carried: true }));
+        expect(repairs.map((r) => r.id)).toEqual([docked.id, carried.id]);
+        expect(DEFAULTS.ships.bomber_squadron.repairsInSpace).toBe(false);
+        expect(DEFAULTS.ships.frigate.repairsInSpace).toBe(true);
+    });
+
+    it("repairs damaged Orbital Platforms after a turn out of combat, clearing hp once full", () => {
+        const { economy, home, turns, endTurn } = world({
+            techs: { alpha: ["orbital_defence_platforms"] }
+        });
+        economy.depositUncapped(home.id, {
+            money: 1000,
+            materials: 1000,
+            population: 100,
+            science: 0
+        });
+        for (const structureType of ["shipyard", "orbital_platform"] as const) {
+            const built = economy.build("alpha", home.id, { kind: "structure", structureType });
+            expect(built.ok && built.completed).toBe(true);
+        }
+        const platform = economy
+            .installationsAt(home.id)
+            .find((i) => i.type === "orbital_platform")!;
+        const max = DEFAULTS.defences.orbital_platform.hp;
+        platform.hp = 10;
+        platform.lastCombatTurn = turns.combatTurn;
+
+        expect(endTurn().repairs).toEqual([]);
+        expect(platform.hp).toBe(10);
+        expect(endTurn().repairs).toEqual([
+            { id: platform.id, kind: "installation", sideId: "alpha", hpBefore: 10, hpAfter: 14 }
+        ]);
+        platform.hp = max - 1;
+        endTurn();
+        expect(platform.hp).toBeUndefined();
+        expect(max).toBe(40);
+    });
+
     it("repairs supply ships against their supply ship max hp", () => {
         const techs: TechId[] = ["armoured_freighters", "damage_control_2"];
         const { entities, endTurn } = world({ techs: { alpha: techs } });

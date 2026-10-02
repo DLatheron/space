@@ -295,13 +295,26 @@ function HpValue({ hp }: { hp: { hp: number; max: number } }) {
 }
 
 function RepairNote({ repair }: { repair: NonNullable<ReturnType<HexWorld["repairOf"]>> }) {
-    return repair.status === "repairing" ? (
-        <span className="info-pane__repair">Repairing +{formatNumber(repair.perTurn)}/turn</span>
-    ) : (
-        <span className="info-pane__repair info-pane__repair--blocked">
-            Repairs resume after a turn out of combat
-        </span>
-    );
+    switch (repair.status) {
+        case "repairing":
+            return (
+                <span className="info-pane__repair">
+                    Repairing +{formatNumber(repair.perTurn)}/turn
+                </span>
+            );
+        case "blocked":
+            return (
+                <span className="info-pane__repair info-pane__repair--blocked">
+                    Repairs resume after a turn out of combat
+                </span>
+            );
+        case "needsDock":
+            return (
+                <span className="info-pane__repair info-pane__repair--blocked">
+                    Repairs only in a hangar or at a shipyard
+                </span>
+            );
+    }
 }
 
 function plural(count: number, word: string): string {

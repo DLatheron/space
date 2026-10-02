@@ -1,4 +1,9 @@
-import { zeroResources, type Resources, type ShipType } from "@space/shared-data";
+import {
+    zeroResources,
+    type Resources,
+    type ShipType,
+    type StructureType
+} from "@space/shared-data";
 import { defaultEconomyBalance } from "../config/config.schema.js";
 import { destroyVessels } from "./destroyShips.js";
 import { EconomyManager } from "./EconomyManager.js";
@@ -69,6 +74,26 @@ function groundWorld(rng: () => number = () => 0.5) {
         infantry,
         unitsAt
     };
+}
+
+/** Build `count` of a structure for beta at the target, one after another. */
+function install(world: ReturnType<typeof groundWorld>, structureType: StructureType, count = 1) {
+    const { economy, target } = world;
+    economy.research.add("beta", "planetary_shields");
+    for (let i = 0; i < count; i++) {
+        economy.depositUncapped(
+            target.id,
+            res({ money: 1000, materials: 1000, population: 100, science: 100 })
+        );
+        expect(economy.build("beta", target.id, { kind: "structure", structureType }).ok).toBe(
+            true
+        );
+        for (let turn = 0; turn < DEFAULTS.structures[structureType].buildTurns; turn++) {
+            economy.fund();
+        }
+        economy.completeReady();
+    }
+    return economy.installationsAt(target.id).filter((i) => i.type === structureType);
 }
 
 /** Load `count` alpha infantry at home onto the transport and fly it to the target. */
@@ -407,6 +432,66 @@ describe("GroundManager invasion", () => {
         const second = ground.invade("alpha", target.id, [transport.id]);
         expect(second.ok && second.combat.participants.map((p) => p.hpBefore)).toEqual([4, 4]);
     });
+
+    it("has Defensive Batteries fire on the transports first; units aboard sunk ones never land", () => {
+        const world = groundWorld();
+        const { entities, economy, ground, home, target, transport, infantry } = world;
+        const [battery] = install(world, "defensive_battery");
+        const ids = embark(world, 2);
+        const damaged = makeShip(entities, "transport-b", "alpha", home.q, home.r);
+        damaged.hp = 2;
+        const doomed = infantry("alpha", home.id).id;
+        ground.load("alpha", damaged.id, [doomed]);
+        entities.move(damaged.id, target);
+
+        // 5 attack split 3 + 2 (remainder to the healthier transport): round(3 * 10 / 12) = 3
+        // and round(2 * 10 / 12) = 2, sinking the damaged one.
+        const result = ground.invade("alpha", target.id, [transport.id, damaged.id]);
+        expect(result.ok && result.combat).toMatchObject({
+            outcome: "attacker_won",
+            captured: true,
+            destroyedIds: [damaged.id],
+            destroyedUnitIds: [doomed]
+        });
+        expect(result.ok && result.landedUnitIds).toEqual(ids);
+        expect(result.ok && result.combat.participants).toEqual([
+            expect.objectContaining({ id: transport.id, kind: "ship", hpAfter: 5 }),
+            expect.objectContaining({ id: damaged.id, hpAfter: 0, destroyed: true }),
+            expect.objectContaining({
+                id: battery!.id,
+                kind: "installation",
+                structureType: "defensive_battery",
+                role: "defender",
+                maxHp: 0,
+                damageDealt: 5,
+                destroyed: false
+            }),
+            ...ids.map((id) => expect.objectContaining({ id, kind: "ground_unit" }))
+        ]);
+        expect(transport).toMatchObject({ hp: 5, lastCombatTurn: 1 });
+        expect(entities.get(damaged.id)).toBeUndefined();
+        expect(economy.units.get(doomed)).toBeUndefined();
+        expect(target.garrison).toEqual(ids);
+    });
+
+    it("fails an invasion whose every transport is sunk by the batteries", () => {
+        const world = groundWorld();
+        const { economy, ground, target, transport } = world;
+        install(world, "defensive_battery");
+        const ids = embark(world, 2);
+        transport.hp = 4;
+
+        const result = ground.invade("alpha", target.id, [transport.id]);
+        expect(result.ok && result.combat).toMatchObject({
+            outcome: "attacker_destroyed",
+            captured: false,
+            rounds: 0,
+            destroyedIds: [transport.id],
+            destroyedUnitIds: ids
+        });
+        expect(target.sideId).toBe("beta");
+        expect(economy.stateFor("alpha").groundUnits).toEqual([]);
+    });
 });
 
 describe("GroundManager star destroyer cargo", () => {
@@ -463,8 +548,9 @@ describe("GroundManager bombardment", () => {
         expect(destroyer.movementPoints).toBe(mpBefore - 1);
         expect(destroyer.lastCombatTurn).toBe(1);
         expect(target.sideId).toBe("beta");
-        // Attack 8 vs defence 1: round(8 * 10/11) = 7; infantry hp 10 → damaged, not killed.
-        expect(economy.units.get(defender.id)?.hp).toBe(3);
+        // Attack 8 vs infantry defence 3, roll 0.1 (factor 0.8): round(8 * 0.8 * 10/13) = 5;
+        // infantry hp 10 → damaged, not killed.
+        expect(economy.units.get(defender.id)?.hp).toBe(5);
         expect(result.combat.destroyedUnitIds).toEqual([]);
         // Chance 0.4 with rng 0.1 → hit; second rng pick also 0.1 → index 0.
         expect(result.combat.destroyedInstallationIds).toEqual([mineId]);
@@ -476,13 +562,13 @@ describe("GroundManager bombardment", () => {
                     kind: "ship",
                     role: "attacker",
                     shipType: "star_destroyer",
-                    damageDealt: 7
+                    damageDealt: 5
                 }),
                 expect.objectContaining({
                     id: defender.id,
                     kind: "ground_unit",
                     role: "defender",
-                    hpAfter: 3,
+                    hpAfter: 5,
                     destroyed: false
                 })
             ])
@@ -498,7 +584,7 @@ describe("GroundManager bombardment", () => {
             ok: false,
             error: "Ship sd-b is not at the location"
         });
-        entities.move(destroyer, target);
+        entities.move(destroyer.id, target);
         expect(ground.bombard("alpha", target.id, [frigate.id])).toEqual({
             ok: false,
             error: "Frigate cannot bombard"
@@ -540,5 +626,88 @@ describe("GroundManager bombardment", () => {
         });
         expect(target.sideId).toBe("beta");
         expect(economy.locationEconomy(target.id)!.installations).toEqual([]);
+    });
+
+    it("draws fire from every Defensive Battery onto the bombarding ships", () => {
+        const world = groundWorld();
+        const { entities, economy, ground, target, infantry } = world;
+        const batteries = install(world, "defensive_battery", 2);
+        const defender = infantry("beta", target.id);
+        const sd = makeShip(entities, "sd-d", "alpha", target.q, target.r, "star_destroyer");
+        sd.hp = DEFAULTS.ships.star_destroyer.hp;
+
+        const result = ground.bombard("alpha", target.id, [sd.id]);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        // round(8 * 10 / 13) = 6 to the infantry; each battery round(5 * 10 / 18) = 3 back.
+        expect(defender.hp).toBe(4);
+        expect(sd.hp).toBe(24);
+        expect(result.combat).toMatchObject({ outcome: "inconclusive", destroyedIds: [] });
+        expect(result.combat.destroyedInstallationIds).toEqual([]);
+        expect(result.combat.shieldBefore).toBeUndefined();
+        expect(result.combat.participants.map((p) => [p.id, p.damageDealt])).toEqual([
+            [sd.id, 6],
+            [batteries[0]!.id, 3],
+            [batteries[1]!.id, 3],
+            [defender.id, 0]
+        ]);
+
+        sd.hp = 5;
+        sd.movementPoints = 2;
+        const sunk = ground.bombard("alpha", target.id, [sd.id]);
+        expect(sunk.ok && sunk.combat).toMatchObject({
+            outcome: "attacker_destroyed",
+            destroyedIds: [sd.id],
+            destroyedInstallationIds: []
+        });
+        expect(entities.get(sd.id)).toBeUndefined();
+        expect(economy.installationsAt(target.id)).toHaveLength(2);
+    });
+
+    it("has a shield absorb whole shots until it is down, then lets the rest hit the garrison", () => {
+        const world = groundWorld();
+        const { entities, economy, ground, target, infantry } = world;
+        install(world, "shield_generator");
+        economy.setShieldHp(target.id, 10);
+        const defender = infantry("beta", target.id);
+        const ships = ["sd-1", "sd-2", "sd-3"].map((id) =>
+            makeShip(entities, id, "alpha", target.q, target.r, "star_destroyer")
+        );
+
+        // Each absorbed shot takes combatDamage(8, 0) = 8: 10 -> 2 -> 0, overflow wasted.
+        const result = ground.bombard(
+            "alpha",
+            target.id,
+            ships.map((s) => s.id)
+        );
+        expect(result.ok && result.combat).toMatchObject({
+            shieldBefore: 10,
+            shieldAfter: 0,
+            destroyedInstallationIds: []
+        });
+        expect(economy.shieldHp(target.id)).toBe(0);
+        expect(defender.hp).toBe(4);
+        expect(result.ok && result.combat.participants.map((p) => p.damageDealt)).toEqual([
+            0, 0, 6, 0
+        ]);
+        expect(ships.every((s) => s.movementPoints === s.maxMovementPoints - 1)).toBe(true);
+    });
+
+    it("leaves the garrison untouched when the shield absorbs every shot", () => {
+        const world = groundWorld();
+        const { entities, economy, ground, target, infantry } = world;
+        install(world, "shield_generator");
+        economy.setShieldHp(target.id, 30);
+        const defender = infantry("beta", target.id);
+        const sd = makeShip(entities, "sd-e", "alpha", target.q, target.r, "star_destroyer");
+
+        const result = ground.bombard("alpha", target.id, [sd.id]);
+        expect(result.ok && result.combat).toMatchObject({
+            outcome: "inconclusive",
+            shieldBefore: 30,
+            shieldAfter: 22
+        });
+        expect(defender.hp).toBeUndefined();
+        expect(economy.installationsAt(target.id).map((i) => i.type)).toEqual(["shield_generator"]);
     });
 });

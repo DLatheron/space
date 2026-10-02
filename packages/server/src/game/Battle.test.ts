@@ -1,7 +1,13 @@
 import { axialKey } from "@space/maths";
-import { shipStats, type ShipType, type SideId, type TechId } from "@space/shared-data";
+import {
+    HOME_PLANET_LEVEL,
+    shipStats,
+    type ShipType,
+    type SideId,
+    type TechId
+} from "@space/shared-data";
 import { defaultEconomyBalance } from "../config/config.schema.js";
-import { BattleManager } from "./Battle.js";
+import { BattleManager, hasAmbushers, isDefendedHex } from "./Battle.js";
 import { splitAttack, shipFighter } from "./combat.js";
 import { EconomyManager } from "./EconomyManager.js";
 import { EntityManager } from "./EntityManager.js";
@@ -63,12 +69,41 @@ function supplyShip(id: string, sideId: SideId, q: number, r: number): EntityOf<
 function world(rng: () => number = even, techs: Partial<Record<SideId, TechId[]>> = {}) {
     const map = createEmptyMap({ width: 20, height: 20, hexSize: 50, seed: 1 });
     const entities = new EntityManager(map);
-    const economy = new EconomyManager(entities, ["alpha", "beta"], { balance: BALANCE });
+    const economy = new EconomyManager(entities, ["alpha", "beta"], {
+        balance: BALANCE,
+        instantBuild: true
+    });
     for (const [sideId, known] of Object.entries(techs)) {
         for (const tech of known ?? []) economy.research.add(sideId, tech);
     }
     const battles = new BattleManager(entities, economy, { rng });
     return { entities, economy, battles };
+}
+
+/** Gives `sideId` a planet at the hex with a Shipyard and an Orbital Platform (full hp). */
+function fortify(
+    { entities, economy }: ReturnType<typeof world>,
+    sideId: SideId,
+    q: number,
+    r: number
+) {
+    const planet = entities.add<EntityOf<"planet">>({
+        id: `planet-${sideId}`,
+        kind: "planet",
+        sideId,
+        systemId: "sys-1",
+        q,
+        r,
+        level: HOME_PLANET_LEVEL
+    });
+    economy.research.add(sideId, "orbital_defence_platforms");
+    economy.depositUncapped(planet.id, { money: 1e4, materials: 1e4, population: 1e4, science: 0 });
+    for (const structureType of ["shipyard", "orbital_platform"] as const) {
+        const built = economy.build(sideId, planet.id, { kind: "structure", structureType });
+        if (!built.ok || !built.completed) throw new Error(`Couldn't build ${structureType}`);
+    }
+    const platform = economy.installationsAt(planet.id).find((i) => i.type === "orbital_platform")!;
+    return { planet, platform };
 }
 
 function moved(result: ReturnType<BattleManager["moveShip"]>) {
@@ -334,5 +369,115 @@ describe("BattleManager ambushes and arrivals", () => {
             attackerMovedIn: true
         });
         expect(jumper).toMatchObject({ q: 7, r: 5 });
+    });
+});
+
+describe("BattleManager Orbital Platforms and attack multipliers", () => {
+    it("stops a ship before an enemy platform's hex, which it attacks like enemy vessels", () => {
+        const w = world();
+        const { planet, platform } = fortify(w, "beta", 7, 5);
+        const frigate = w.entities.add(ship("f", "alpha", 5, 5));
+        expect(isDefendedHex(w.entities, w.economy, planet, "alpha")).toBe(true);
+        expect(isDefendedHex(w.entities, w.economy, planet, "beta")).toBe(false);
+
+        const result = moved(w.battles.moveShip("alpha", frigate.id, { q: 7, r: 5 }));
+        expect(result.move?.path).toEqual([{ q: 6, r: 5 }]);
+        expect(result.combat).toMatchObject({
+            hex: { q: 7, r: 5 },
+            defenderSideIds: ["beta"],
+            outcome: "inconclusive",
+            attackerMovedIn: false
+        });
+        // round(4 * 10 / 18) = 2 to the platform; it returns round(8 * 10 / 13) = 6.
+        expect(result.combat?.participants[1]).toMatchObject({
+            id: platform.id,
+            kind: "installation",
+            structureType: "orbital_platform",
+            sideId: "beta",
+            hpBefore: 40,
+            hpAfter: 38,
+            damageDealt: 6,
+            destroyed: false
+        });
+        expect(platform).toMatchObject({ hp: 38, lastCombatTurn: 1 });
+        expect(frigate).toMatchObject({ q: 6, r: 5, hp: 6 });
+    });
+
+    it("gives strike craft their bonus against platforms, and bombers theirs against capital ships", () => {
+        const w = world();
+        const { platform } = fortify(w, "beta", 7, 5);
+        const fighter = w.entities.add(ship("af", "alpha", 6, 5, "advanced_fighter_squadron"));
+        const vsPlatform = moved(w.battles.moveShip("alpha", fighter.id, { q: 7, r: 5 }));
+        // 5 x2 = 10: round(10 * 10 / 18) = 6; the platform returns round(8 * 10 / 12) = 7.
+        expect(platform.hp).toBe(34);
+        expect(vsPlatform.combat).toMatchObject({
+            outcome: "attacker_destroyed",
+            destroyedIds: [fighter.id]
+        });
+
+        const b = world();
+        const bomber = b.entities.add(ship("b", "alpha", 6, 5, "bomber_squadron"));
+        const frigate = b.entities.add(ship("f", "beta", 7, 5));
+        moved(b.battles.moveShip("alpha", bomber.id, { q: 7, r: 5 }));
+        // 4 x2.5 = 10: round(10 * 10 / 13) = 8; the frigate returns round(4 * 10 / 10) = 4.
+        expect(frigate.hp).toBe(4);
+        expect(bomber.hp).toBe(1);
+
+        const s = world();
+        const scoutBomber = s.entities.add(ship("b", "alpha", 6, 5, "bomber_squadron"));
+        const scout = s.entities.add(ship("s", "beta", 7, 5, "scout"));
+        moved(s.battles.moveShip("alpha", scoutBomber.id, { q: 7, r: 5 }));
+        // No bonus against support ships: round(4 * 10 / 11) = 4.
+        expect(scout.hp).toBe(2);
+    });
+
+    it("removes a destroyed platform from its location and lets the attacker move in", () => {
+        const w = world();
+        const { planet, platform } = fortify(w, "beta", 7, 5);
+        platform.hp = 2;
+        const sd = w.entities.add(ship("sd", "alpha", 6, 5, "star_destroyer"));
+        const result = moved(w.battles.moveShip("alpha", sd.id, { q: 7, r: 5 }));
+        expect(result.combat).toMatchObject({
+            outcome: "attacker_won",
+            attackerMovedIn: true,
+            destroyedIds: [],
+            destroyedInstallationIds: [platform.id]
+        });
+        expect(result.combat?.participants[1]).toMatchObject({ hpAfter: 0, destroyed: true });
+        expect(w.economy.installationsAt(planet.id).map((i) => i.type)).toEqual(["shipyard"]);
+        expect(sd).toMatchObject({ q: 7, r: 5 });
+        expect(isDefendedHex(w.entities, w.economy, planet, "alpha")).toBe(false);
+    });
+
+    it("has a jumper arriving on a platform's hex attack it, then be displaced", () => {
+        const w = world();
+        const { platform } = fortify(w, "beta", 7, 5);
+        const jumper = w.entities.add(ship("j", "alpha", 7, 5));
+        const combat = w.battles.arrival(jumper, { q: 2, r: 2 });
+        expect(combat).toMatchObject({ cause: "hyperjump", outcome: "inconclusive" });
+        expect(platform.hp).toBe(38);
+        expect(combat?.displacedTo).toBeDefined();
+        expect(jumper.q === 7 && jumper.r === 5).toBe(false);
+    });
+
+    it("has an armed platform ambush a supply ship stepping into its hex", () => {
+        const w = world(rolls(0.9));
+        const { planet, platform } = fortify(w, "beta", 7, 5);
+        const convoy = w.entities.add(supplyShip("supply", "alpha", 6, 5));
+        expect(hasAmbushers(w.entities, w.economy, planet, "alpha")).toBe(true);
+        expect(hasAmbushers(w.entities, w.economy, planet, "beta")).toBe(false);
+
+        const combat = w.battles.ambush(convoy, planet);
+        // Not evaded at 0.9; round(8 * 10 / 11) = 7 >= 6 hp.
+        expect(combat).toMatchObject({
+            cause: "ambush",
+            attackerSideId: "beta",
+            outcome: "attacker_won",
+            destroyedIds: [convoy.id],
+            rounds: 1
+        });
+        expect(combat?.participants.map((p) => p.id)).toEqual([platform.id, convoy.id]);
+        expect(platform.hp).toBeUndefined();
+        expect(w.entities.get(convoy.id)).toBeUndefined();
     });
 });

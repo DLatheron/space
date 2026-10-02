@@ -1,6 +1,7 @@
 import {
     GROUND_UNIT_TYPE_INFO,
     SHIP_TYPE_INFO,
+    STRUCTURE_INFO,
     type CombatParticipant,
     type CombatResult,
     type SideId
@@ -83,16 +84,21 @@ export function participantName(world: HexWorld, p: CombatParticipant): string {
         return p.unitType ? GROUND_UNIT_TYPE_INFO[p.unitType].name : "Ground unit";
     }
     if (p.kind === "supply_ship") return "Supply ship";
+    if (p.kind === "installation") {
+        return p.structureType ? STRUCTURE_INFO[p.structureType].name : "Installation";
+    }
     const entity = world.findEntityById(p.id);
     const typeName = p.shipType ? SHIP_TYPE_INFO[p.shipType].name : "Ship";
     return entity?.kind === "ship" && entity.name ? entity.name : typeName;
 }
 
-/** Losses per side, e.g. "Alpha lost 2 · Beta lost 1". */
+/** Losses per side, e.g. "Alpha lost 2 · Beta lost 1"; installations are counted separately. */
 export function combatLosses(result: CombatResult): string {
     const lost = new Map<SideId, number>();
     for (const p of result.participants) {
-        if (p.destroyed) lost.set(p.sideId, (lost.get(p.sideId) ?? 0) + 1);
+        if (p.destroyed && p.kind !== "installation") {
+            lost.set(p.sideId, (lost.get(p.sideId) ?? 0) + 1);
+        }
     }
     const parts: string[] = [];
     if (lost.size) {

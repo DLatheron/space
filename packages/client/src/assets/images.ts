@@ -23,7 +23,10 @@ const STRUCTURE_IMAGES: Partial<Record<StructureType, string>> = {
     depot: "installations/depot.jpg",
     archive: "installations/archive.jpg",
     quarters: "installations/quarters.webp",
-    warehouse: "installations/warehouse.webp"
+    warehouse: "installations/warehouse.webp",
+    defensive_battery: "installations/defensive-turrets.jpg",
+    shield_generator: "installations/shield-generator.avif",
+    orbital_platform: "installations/orbital-platform.jpg"
 };
 
 const SHIP_IMAGES: Partial<Record<ShipType, string>> = {
@@ -33,7 +36,9 @@ const SHIP_IMAGES: Partial<Record<ShipType, string>> = {
     transport: "ships/transport-ship.webp",
     fighter_squadron: "ships/fighter-squadron.webp",
     advanced_fighter_squadron: "ships/advanced-fighter-squadron.webp",
-    star_destroyer: "ships/star-destroyer.jpeg"
+    bomber_squadron: "ships/tie-bomber.avif",
+    star_destroyer: "ships/star-destroyer.jpeg",
+    super_star_destroyer: "ships/super-star-destroyer.webp"
 };
 
 const GROUND_UNIT_IMAGES: Partial<Record<GroundUnitType, string>> = {
@@ -60,7 +65,8 @@ const TECH_IMAGES: Partial<Record<TechId, string>> = {
     evasive_manoeuvres_2: "research/evasive-manoeuvres-ii.jpg",
     armoured_freighters: "research/armoured-freighters.jpg",
     damage_control_1: "research/damage-control-i.webp",
-    damage_control_2: "research/damage-control-ii.webp"
+    damage_control_2: "research/damage-control-ii.webp",
+    capital_ship_engineering: "research/captital-ship-engineering.webp"
 };
 
 export type ImageSubject =

@@ -2,6 +2,7 @@ import { axialKey } from "@space/maths";
 import type { AxialCoord, ShipType } from "@space/shared-data";
 import { defaultEconomyBalance } from "../config/config.schema.js";
 import { BattleManager } from "./Battle.js";
+import { EconomyManager } from "./EconomyManager.js";
 import { EntityManager } from "./EntityManager.js";
 import { HyperspaceManager } from "./HyperspaceManager.js";
 import { createEmptyMap } from "./map/SpaceMap.js";
@@ -120,6 +121,40 @@ describe("move orders", () => {
         entities.remove(enemy.id);
         endTurn();
         expect(ship).toMatchObject({ q: 6, r: 5 });
+    });
+
+    it("stops before an enemy Orbital Platform's hex without attacking it", () => {
+        const map = createEmptyMap({ width: 30, height: 20, hexSize: 50, seed: 1 });
+        const entities = new EntityManager(map);
+        const planet = entities.add<EntityOf<"planet">>({
+            id: "planet-b",
+            kind: "planet",
+            sideId: "beta",
+            systemId: "sys-1",
+            q: 7,
+            r: 5,
+            level: 5
+        });
+        const economy = new EconomyManager(entities, ["alpha", "beta"], { instantBuild: true });
+        economy.research.add("beta", "orbital_defence_platforms");
+        economy.depositUncapped(planet.id, {
+            money: 1000,
+            materials: 1000,
+            population: 100,
+            science: 0
+        });
+        for (const structureType of ["shipyard", "orbital_platform"] as const) {
+            economy.build("beta", planet.id, { kind: "structure", structureType });
+        }
+        const orders = new MoveOrderManager(entities, { economy });
+        const ship = entities.add(makeShip("ship-a", "alpha", { q: 2, r: 5 }, 6));
+        ship.moveOrder = { destination: { q: 7, r: 5 }, route: row(5, 3, 7) };
+
+        expect(orders.run().moves[0]?.path).toEqual(row(5, 3, 6));
+        expect(ship).toMatchObject({ q: 6, r: 5 });
+        expect(ship.moveOrder?.destination).toEqual({ q: 7, r: 5 });
+        expect(ship.hp).toBeUndefined();
+        expect(economy.installationsAt(planet.id)[1]).not.toHaveProperty("hp");
     });
 
     it("re-plans each turn around obstacles the side knows about", () => {

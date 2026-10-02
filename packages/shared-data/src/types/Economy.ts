@@ -29,7 +29,16 @@ import {
     sumResources,
     zeroResources
 } from "./Resources.js";
-import { CombatBalance, HangarBalance, RepairBalance, SupplyShipBalance } from "./Combat.js";
+import {
+    CombatBalance,
+    DefenceStructureType,
+    DefencesBalance,
+    HangarBalance,
+    RepairBalance,
+    ShipClass,
+    SupplyShipBalance,
+    TargetClass
+} from "./Combat.js";
 import { HyperdriveBalance, HyperspaceBalance } from "./Hyperspace.js";
 import { SHIP_TYPE_INFO, shipDef } from "./ShipTypes.js";
 import { maxEnhancementTierFor, missingTechPrerequisite, TechId, TECHS } from "./Tech.js";
@@ -47,7 +56,8 @@ export const StructureType = z.enum([
     "depot",
     "archive",
     "quarters",
-    "warehouse"
+    "warehouse",
+    ...DefenceStructureType.options
 ]);
 export type StructureType = z.infer<typeof StructureType>;
 
@@ -141,6 +151,14 @@ export const ShipBalance = z.object({
     canColonise: z.boolean(),
     /** Can orbital-bombard an enemy location on its hex (see `client:bombard`). */
     canBombard: z.boolean(),
+    class: ShipClass,
+    /** Damage multiplier against each target class; 1 where absent (see `attackMultiplier`). */
+    attackMultipliers: z.partialRecord(TargetClass, z.number().min(0)),
+    /**
+     * Repairs anywhere out of combat; otherwise only aboard a hangar or at an owned shipyard
+     * (see `shipRepairPerTurn`).
+     */
+    repairsInSpace: z.boolean(),
     /** Absent for ship types without a hyperdrive. */
     hyperdrive: HyperdriveBalance.optional(),
     /** Absent for ship types that can't carry ships. */
@@ -188,6 +206,7 @@ export const EconomyBalance = z.object({
     combat: CombatBalance,
     supplyShips: SupplyShipBalance,
     repair: RepairBalance,
+    defences: DefencesBalance,
     groundUnits: z.record(GroundUnitType, GroundUnitBalance),
     groundUnitTiers: z.object({
         attackBonus: PerTier(z.number().int()),
@@ -263,9 +282,23 @@ export const Installation = z.object({
     type: StructureType,
     tier: EnhancementTier,
     /** Location the borrowed population returns to when demolished. */
-    populationFrom: EntityId
+    populationFrom: EntityId,
+    /** Orbital platforms: current hp; absent means full (see `platformStats`). */
+    hp: z.number().min(0).optional(),
+    /** Orbital platforms: last turn it fought (see `repairsAtEndOf`); absent means never. */
+    lastCombatTurn: z.number().int().min(0).optional()
 });
 export type Installation = z.infer<typeof Installation>;
+
+/** A location's Shield Generator pool (see `shieldRecharge`). */
+export const ShieldState = z.object({
+    hp: z.number().min(0),
+    /** Funding priority of its upkeep, alongside the location's orders (see `shieldUpkeepOrder`). */
+    priority: BuildPriority,
+    /** Share (0-1) of its upkeep supplied at the last end of turn. */
+    supplied: z.number().min(0).max(1)
+});
+export type ShieldState = z.infer<typeof ShieldState>;
 
 /** Private to the owning side; never part of the shared entity data. */
 export const LocationEconomy = z.object({
@@ -286,7 +319,9 @@ export const LocationEconomy = z.object({
      * order here, which breaks priority ties. Active orders (see `partitionOrders`) are funded
      * concurrently by priority (see `fundLocationOrders`); ready ones wait to complete.
      */
-    orders: z.array(BuildOrder)
+    orders: z.array(BuildOrder),
+    /** Present while a Shield Generator is built here. */
+    shield: ShieldState.optional()
 });
 export type LocationEconomy = z.infer<typeof LocationEconomy>;
 
@@ -352,9 +387,13 @@ export const STRUCTURE_INFO: Record<
     },
     advanced_shipyard: {
         name: "Advanced Shipyard",
-        description: "Builds Frigates, Advanced Fighter Squadrons and, with Docks, Star Destroyers."
+        description:
+            "Builds Frigates, Advanced Fighter Squadrons, Bomber Squadrons and, with Docks, Star Destroyers and Super Star Destroyers."
     },
-    docks: { name: "Docks", description: "Raises the ship cap. Needed for Star Destroyers." },
+    docks: {
+        name: "Docks",
+        description: "Raises the ship cap. Needed for Star Destroyers and Super Star Destroyers."
+    },
     science_academy: {
         name: "Science Academy",
         description: "Produces science each turn and researches techs.",
@@ -365,7 +404,19 @@ export const STRUCTURE_INFO: Record<
     depot: { name: "Depot", description: "Raises the materials cap." },
     archive: { name: "Archive", description: "Raises the science cap." },
     quarters: { name: "Quarters", description: "Raises the population cap." },
-    warehouse: { name: "Warehouse", description: "Raises every stockpile cap a little." }
+    warehouse: { name: "Warehouse", description: "Raises every stockpile cap a little." },
+    defensive_battery: {
+        name: "Defensive Battery",
+        description: "Fires on ships bombarding this location and on transports invading it."
+    },
+    shield_generator: {
+        name: "Shield Generator",
+        description: "Absorbs orbital bombardment while charged. Needs upkeep each turn."
+    },
+    orbital_platform: {
+        name: "Orbital Platform",
+        description: "Armed station that blocks enemy ships from entering this hex until destroyed."
+    }
 };
 
 export function structureDef(
@@ -794,32 +845,67 @@ export function fundOrders<T extends FundableOrder>(
 }
 
 /**
- * One end of turn's funding at a location: its active orders draw (see `fundOrders`), then
- * the slots freed by orders that just became fully funded pass straight on, and the newly
- * active orders draw from what is left. Each order draws at most once. `orders` in the result
- * is every order of the location, in list order, with `applied` updated.
+ * One end of turn's funding at a location: its active orders and `standing` draws (such as
+ * the shield upkeep, see `shieldUpkeepOrder`; their ids must not clash with order ids) draw
+ * together (see `fundOrders`), then the slots freed by orders that just became fully funded
+ * pass straight on, and the newly active orders draw from what is left. Each draws at most
+ * once. `orders` in the result is every order of the location, in list order, with `applied`
+ * updated; `drawn` also has the standing draws.
  */
 export function fundLocationOrders<T extends PartitionableOrder & FundableOrder>(
     stockpile: Resources,
     location: Pick<LocationEconomy, "installations"> & { orders: readonly T[] },
-    balance: EconomyBalance
+    balance: EconomyBalance,
+    standing: readonly FundableOrder[] = []
 ): FundingResult<T> {
     const drawn: Record<OrderId, Resources> = {};
     let orders = [...location.orders];
     let left = { ...stockpile };
+    let pending = standing;
     for (;;) {
         const fresh = partitionOrders(
             { installations: location.installations, orders },
             balance
         ).active.filter((o) => !(o.id in drawn));
-        if (fresh.length === 0) break;
-        const funded = fundOrders(left, fresh);
+        if (fresh.length === 0 && pending.length === 0) break;
+        const funded = fundOrders<FundableOrder>(left, [...pending, ...fresh]);
+        pending = [];
         left = funded.stockpile;
         Object.assign(drawn, funded.drawn);
-        const updated = new Map(funded.orders.map((o) => [o.id, o]));
-        orders = orders.map((o) => updated.get(o.id) ?? o);
+        const applied = new Map(funded.orders.map((o) => [o.id, o.applied]));
+        orders = orders.map((o) => {
+            const next = applied.get(o.id);
+            return next ? { ...o, applied: next } : o;
+        });
     }
     return { stockpile: left, drawn, orders };
+}
+
+/** Id of the shield upkeep's standing draw in `fundLocationOrders`. */
+export const SHIELD_UPKEEP_ID = "shield-upkeep";
+
+/**
+ * The shield upkeep as a standing draw: it draws up to the full upkeep each end of turn at the
+ * shield's priority, alongside the location's orders.
+ */
+export function shieldUpkeepOrder(shield: ShieldState, balance: EconomyBalance): FundableOrder {
+    const upkeep = balance.defences.shield_generator.upkeep;
+    return {
+        id: SHIELD_UPKEEP_ID,
+        priority: shield.priority,
+        cost: { ...upkeep },
+        applied: zeroResources(),
+        ratePerTurn: { ...upkeep }
+    };
+}
+
+/** Lowest supplied share (0-1) across the resources `need` asks for; 1 when it asks for none. */
+export function suppliedFraction(need: Resources, drawn: Resources): number {
+    let fraction = 1;
+    for (const k of RESOURCE_KEYS) {
+        if (need[k] > 0) fraction = Math.min(fraction, drawn[k] / need[k]);
+    }
+    return Math.max(0, Math.min(1, fraction));
 }
 
 /** Water-fills `available` across `caps` (in insertion order); returns what is left over. */

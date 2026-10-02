@@ -2,7 +2,51 @@ import { z } from "zod";
 import type { EconomyBalance, StructureType } from "./Economy.js";
 import { GroundUnitType } from "./GroundUnitTypes.js";
 import { AxialCoord, EnhancementTier, EntityId, ShipType, SideId } from "./PrimitiveTypes.js";
+import { Resources } from "./Resources.js";
 import type { TechId } from "./Tech.js";
+
+/** Role of a ship type in combat (see `ShipBalance.attackMultipliers`). */
+export const ShipClass = z.enum(["strike_craft", "capital", "support"]);
+export type ShipClass = z.infer<typeof ShipClass>;
+
+/** What an attack multiplier can single out: a ship class or an Orbital Platform. */
+export const TargetClass = z.enum([...ShipClass.options, "orbital_platform"]);
+export type TargetClass = z.infer<typeof TargetClass>;
+
+/** Installations that defend their location; their combat stats come from `EconomyBalance.defences`. */
+export const DefenceStructureType = z.enum([
+    "defensive_battery",
+    "shield_generator",
+    "orbital_platform"
+]);
+export type DefenceStructureType = z.infer<typeof DefenceStructureType>;
+
+export function isDefenceStructure(type: StructureType): type is DefenceStructureType {
+    return (DefenceStructureType.options as readonly StructureType[]).includes(type);
+}
+
+/** Combat stats of defensive installations at tier 1, scaled up by `structureTierOutput`. */
+export const DefencesBalance = z.object({
+    /** Fires on bombarding ships and invading transports; never takes damage. */
+    defensive_battery: z.object({
+        attack: z.number().int().min(0),
+        defence: z.number().int().min(0)
+    }),
+    /** A pool of hp that absorbs bombarding ships' shots (see `shieldRecharge`). */
+    shield_generator: z.object({
+        capacity: z.number().int().min(0),
+        rechargePerTurn: z.number().int().min(0),
+        /** Drawn each end of turn alongside the location's orders; not tier scaled. */
+        upkeep: Resources
+    }),
+    /** Defends its hex like an enemy warship; damage persists and it repairs out of combat. */
+    orbital_platform: z.object({
+        attack: z.number().int().min(0),
+        defence: z.number().int().min(0),
+        hp: z.number().int().positive()
+    })
+});
+export type DefencesBalance = z.infer<typeof DefencesBalance>;
 
 /** Movement points a ship spends boarding a carrier's hangar; unloading is free. */
 export const HANGAR_LOAD_COST = 1;
@@ -92,7 +136,14 @@ export type RepairContext = {
     atOwnedShipyard?: boolean;
     /** Aboard a carrier. */
     carried?: boolean;
+    /** Repairs only aboard a carrier or at an owned shipyard (see `ShipBalance.repairsInSpace`). */
+    needsDock?: boolean;
 };
+
+/** Whether a vessel repairing in `context` regains hp at all (see `RepairContext.needsDock`). */
+export function canRepairIn(context: RepairContext): boolean {
+    return !context.needsDock || !!context.carried || !!context.atOwnedShipyard;
+}
 
 /**
  * Whether a vessel last in combat on `lastCombatTurn` repairs at the end of `endingTurn`: it
@@ -107,7 +158,7 @@ export function repairsAtEndOf(lastCombatTurn: number | undefined, endingTurn: n
  * Hp a vessel at `hp` of `maxHp` regains at an end of turn it is eligible to repair (see
  * `repairsAtEndOf`): `round(maxHp * fraction)`, at least `minPerTurn`, capped at the missing hp,
  * where `fraction` is `baseFraction` plus the known techs' and the context's bonuses. 0 when
- * undamaged or destroyed.
+ * undamaged, destroyed, or unable to repair where it is (see `canRepairIn`).
  */
 export function shipRepairPerTurn(
     balance: EconomyBalance,
@@ -116,7 +167,7 @@ export function shipRepairPerTurn(
     techs: readonly TechId[],
     context: RepairContext = {}
 ): number {
-    if (hp <= 0 || hp >= maxHp) return 0;
+    if (hp <= 0 || hp >= maxHp || !canRepairIn(context)) return 0;
     const repair = balance.repair;
     const bonuses = repair.techBonus as Partial<Record<TechId, number>>;
     let fraction = repair.baseFraction;
@@ -124,6 +175,22 @@ export function shipRepairPerTurn(
     if (context.atOwnedShipyard) fraction += repair.atOwnedShipyardBonus;
     if (context.carried) fraction += repair.carriedBonus;
     const amount = Math.max(repair.minPerTurn, Math.round(maxHp * fraction));
+    return Math.min(amount, maxHp - hp);
+}
+
+/**
+ * Hp an Orbital Platform at `hp` of `maxHp` regains at an end of turn it is eligible to repair
+ * (see `repairsAtEndOf`): `round(maxHp * baseFraction)`, at least `minPerTurn`, capped at the
+ * missing hp. 0 when undamaged or destroyed.
+ */
+export function installationRepairPerTurn(
+    balance: EconomyBalance,
+    hp: number,
+    maxHp: number
+): number {
+    if (hp <= 0 || hp >= maxHp) return 0;
+    const repair = balance.repair;
+    const amount = Math.max(repair.minPerTurn, Math.round(maxHp * repair.baseFraction));
     return Math.min(amount, maxHp - hp);
 }
 
@@ -144,6 +211,78 @@ export function canCarryShip(
 /** Whether `shipType` can orbital-bombard enemy locations. */
 export function canBombardShip(balance: EconomyBalance, shipType: ShipType): boolean {
     return balance.ships[shipType].canBombard;
+}
+
+/**
+ * Damage multiplier of `shipType`'s attacks against a `target` class: its
+ * `attackMultipliers` entry, else 1. Targets without a class (batteries, supply ships, ground
+ * units) and attackers that aren't ships always get 1.
+ */
+export function attackMultiplier(
+    balance: EconomyBalance,
+    shipType: ShipType | undefined,
+    target: TargetClass | undefined
+): number {
+    if (!shipType || !target) return 1;
+    return balance.ships[shipType].attackMultipliers[target] ?? 1;
+}
+
+/** `value` scaled by the structure tier multiplier (see `structureTierOutput`), rounded up. */
+function tierScaled(value: number, tier: number, balance: EconomyBalance): number {
+    return Math.ceil(value * (balance.structureTierOutput[tier - 1] ?? 1));
+}
+
+/** Tier-scaled Defensive Battery attack and defence. */
+export function batteryStats(
+    tier: number,
+    balance: EconomyBalance
+): { attack: number; defence: number } {
+    const base = balance.defences.defensive_battery;
+    return {
+        attack: tierScaled(base.attack, tier, balance),
+        defence: tierScaled(base.defence, tier, balance)
+    };
+}
+
+/** Tier-scaled Orbital Platform attack, defence and full hp. */
+export function platformStats(
+    tier: number,
+    balance: EconomyBalance
+): { attack: number; defence: number; hp: number } {
+    const base = balance.defences.orbital_platform;
+    return {
+        attack: tierScaled(base.attack, tier, balance),
+        defence: tierScaled(base.defence, tier, balance),
+        hp: tierScaled(base.hp, tier, balance)
+    };
+}
+
+/** Tier-scaled Shield Generator capacity and recharge, and its (unscaled) upkeep. */
+export function shieldStats(
+    tier: number,
+    balance: EconomyBalance
+): { capacity: number; rechargePerTurn: number; upkeep: Resources } {
+    const base = balance.defences.shield_generator;
+    return {
+        capacity: tierScaled(base.capacity, tier, balance),
+        rechargePerTurn: tierScaled(base.rechargePerTurn, tier, balance),
+        upkeep: { ...base.upkeep }
+    };
+}
+
+/**
+ * Shield hp after an end of turn whose upkeep was `supplied` (0-1): the cap is
+ * `capacity * supplied`; below it the shield gains `rechargePerTurn * supplied` up to the cap,
+ * otherwise it drops to the cap (so an unsupplied shield falls to 0). Both are rounded down.
+ */
+export function shieldRecharge(
+    hp: number,
+    capacity: number,
+    rechargePerTurn: number,
+    supplied: number
+): number {
+    const cap = Math.floor(capacity * supplied);
+    return hp < cap ? Math.min(cap, hp + Math.floor(rechargePerTurn * supplied)) : cap;
 }
 
 /** Supply ship hp, defence and evasion for a side knowing `techs`. */
@@ -197,14 +336,19 @@ export const CombatOutcome = z.enum(["attacker_won", "attacker_destroyed", "inco
 export type CombatOutcome = z.infer<typeof CombatOutcome>;
 
 export const CombatParticipant = z.object({
-    /** Entity id for ships and supply ships, unit id for ground units. */
+    /**
+     * Entity id for ships and supply ships, unit id for ground units, installation id for
+     * defensive installations.
+     */
     id: EntityId,
-    kind: z.enum(["ship", "supply_ship", "ground_unit"]),
+    kind: z.enum(["ship", "supply_ship", "ground_unit", "installation"]),
     sideId: SideId,
     role: z.enum(["attacker", "defender"]),
     shipType: ShipType.optional(),
     unitType: GroundUnitType.optional(),
+    structureType: DefenceStructureType.optional(),
     tier: EnhancementTier.optional(),
+    /** 0 for Defensive Batteries, which can't be damaged. */
     maxHp: z.number().min(0),
     hpBefore: z.number().min(0),
     hpAfter: z.number().min(0),
@@ -247,8 +391,14 @@ export const CombatResult = z.object({
     /** Ground combat: the invaded location and whether the attacker captured it. */
     locationId: EntityId.optional(),
     captured: z.boolean().optional(),
-    /** Bombardment: installations destroyed on the target location. */
+    /**
+     * Installations destroyed: by bombardment on the target location, or Orbital Platforms
+     * destroyed in space combat.
+     */
     destroyedInstallationIds: z.array(EntityId).optional(),
+    /** Bombardment of a location with a Shield Generator: shield hp before and after. */
+    shieldBefore: z.number().min(0).optional(),
+    shieldAfter: z.number().min(0).optional(),
     /** Hyperjump: where a jumper that didn't clear the hex was moved to. */
     displacedTo: AxialCoord.optional()
 });

@@ -1,10 +1,13 @@
 import {
+    batteryStats,
     GROUND_UNIT_TYPE_INFO,
     groundUnitDef,
     groundUnitStats,
     GroundUnitType,
     isFullyFunded,
+    platformStats,
     RESOURCE_KEYS,
+    shieldStats,
     SHIP_TYPE_INFO,
     shipStats,
     ShipType,
@@ -13,6 +16,7 @@ import {
     STRUCTURE_INFO,
     structureOutput,
     StructureType,
+    TargetClass,
     TECHS,
     TechId,
     type BuildCategory,
@@ -23,7 +27,8 @@ import {
     type EnhancementTarget,
     type GroundUnit,
     type LocationEconomy,
-    type Resources
+    type Resources,
+    type ShipClass
 } from "@space/shared-data";
 import { formatNumber, RESOURCE_LABELS, RESOURCE_SHORT_LABELS } from "../../components/format.js";
 
@@ -90,6 +95,46 @@ export function capSummary(bonus: Resources): string[] {
     );
 }
 
+const SHIP_CLASS_LABELS: Record<ShipClass, string> = {
+    strike_craft: "Strike craft",
+    capital: "Capital ship",
+    support: "Support ship"
+};
+
+const TARGET_CLASS_LABELS: Record<TargetClass, string> = {
+    strike_craft: "strike craft",
+    capital: "capital ships",
+    support: "support ships",
+    orbital_platform: "orbital platforms"
+};
+
+/** Tier 1 combat stats of a defensive structure; empty for other structures. */
+export function defenceSummary(type: StructureType, balance: EconomyBalance): string[] {
+    switch (type) {
+        case "defensive_battery": {
+            const { attack, defence } = batteryStats(1, balance);
+            return [`Attack ${attack}`, `Defence ${defence}`];
+        }
+        case "shield_generator": {
+            const { capacity, rechargePerTurn, upkeep } = shieldStats(1, balance);
+            const cost = RESOURCE_KEYS.filter((key) => upkeep[key] > 0)
+                .map((key) => `${formatNumber(upkeep[key])} ${RESOURCE_SHORT_LABELS[key]}`)
+                .join(" + ");
+            return [
+                `${formatNumber(capacity)} shield HP`,
+                `+${formatNumber(rechargePerTurn)} HP/turn`,
+                ...(cost ? [`Upkeep ${cost}/turn`] : [])
+            ];
+        }
+        case "orbital_platform": {
+            const { attack, defence, hp } = platformStats(1, balance);
+            return [`${formatNumber(hp)} HP`, `Attack ${attack}`, `Defence ${defence}`];
+        }
+        default:
+            return [];
+    }
+}
+
 export function itemDescription(item: BuildItem, balance: EconomyBalance): string | undefined {
     switch (item.kind) {
         case "structure":
@@ -116,7 +161,16 @@ export function itemStats(item: BuildItem, balance: EconomyBalance): string[] {
                 `Attack ${attack}`,
                 `Defence ${defence}`
             ];
+            stats.push(SHIP_CLASS_LABELS[def.class]);
+            for (const target of TargetClass.options) {
+                const multiplier = def.attackMultipliers[target];
+                if (multiplier !== undefined && multiplier !== 1) {
+                    stats.push(`×${formatNumber(multiplier)} vs ${TARGET_CLASS_LABELS[target]}`);
+                }
+            }
+            if (!def.repairsInSpace) stats.push("Repairs only docked or carried");
             if (def.canColonise) stats.push("Can colonise");
+            if (def.canBombard) stats.push("Can bombard");
             if (def.unitCapacity) stats.push(`Carries ${def.unitCapacity} units`);
             if (def.hangar?.capacity) {
                 const kinds = def.hangar.carries.map((t) => SHIP_TYPE_INFO[t].name).join(", ");
@@ -130,6 +184,7 @@ export function itemStats(item: BuildItem, balance: EconomyBalance): string[] {
                 ...outputSummary(def.produces ?? {}),
                 ...capSummary(structureCapBonus(item.structureType, 1, balance))
             ];
+            stats.push(...defenceSummary(item.structureType, balance));
             if (def.shipCapBonus) stats.push(`+${def.shipCapBonus} ship cap`);
             if (def.pillageProtection) {
                 stats.push(`${Math.round(def.pillageProtection * 100)}% pillage protection`);
