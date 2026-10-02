@@ -1,0 +1,236 @@
+.modal__panel.research-tree-modal {
+    width: 100%;
+    height: 100%;
+    max-height: 100%;
+}
+
+.research-tree-modal .modal__body {
+    display: flex;
+    padding: 0;
+    overflow: hidden;
+}
+
+.research-tree__detail {
+    color: #8ea3c7;
+    font-size: 0.85rem;
+    font-weight: 400;
+}
+
+.research-tree__priority {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.research-tree__legend {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+}
+
+.research-tree__key {
+    padding: 0.05rem 0.45rem;
+    border: 1px solid;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    white-space: nowrap;
+}
+
+.research-tree__key--known {
+    border-color: #2f7a57;
+    color: #7ee2ad;
+}
+
+.research-tree__key--researching {
+    border-color: #8a6a2a;
+    color: #ffd166;
+}
+
+.research-tree__key--available {
+    border-color: #6a54b0;
+    color: #c9a0ff;
+}
+
+.research-tree__key--locked {
+    border-color: #3a4560;
+    color: #7d8aa6;
+}
+
+.research-tree {
+    flex: 1;
+    min-width: 0;
+    overflow: auto;
+    cursor: grab;
+    background:
+        radial-gradient(circle at 20% 10%, rgba(80, 60, 160, 0.12), transparent 50%), #0b1226;
+}
+
+.research-tree--dragging {
+    cursor: grabbing;
+    user-select: none;
+}
+
+.research-tree__canvas {
+    position: relative;
+}
+
+.research-tree__edges {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+}
+
+.research-tree__edge {
+    fill: none;
+    stroke: #33405f;
+    stroke-width: 2;
+    transition: stroke 120ms;
+}
+
+.research-tree__edge--met {
+    stroke: #2f7a57;
+}
+
+.research-tree__edge--lit {
+    stroke: #c9a0ff;
+    stroke-width: 3;
+}
+
+.research-tree__node {
+    position: absolute;
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.5rem;
+    border: 1px solid #3a3160;
+    border-radius: 0.45rem;
+    background: #141a36;
+    color: inherit;
+    text-align: left;
+    font: inherit;
+    cursor: inherit;
+    transition:
+        border-color 120ms,
+        box-shadow 120ms,
+        opacity 120ms;
+}
+
+.research-tree__node--available {
+    border-color: #6a54b0;
+    cursor: pointer;
+}
+
+.research-tree__node--available:hover,
+.research-tree__node--available:focus-visible {
+    border-color: #c9a0ff;
+    box-shadow: 0 0 0 2px rgba(201, 160, 255, 0.35);
+}
+
+.research-tree__node--known {
+    border-color: #2f7a57;
+    background: #12261f;
+}
+
+.research-tree__node--researching {
+    border-color: #8a6a2a;
+    background: #262012;
+}
+
+.research-tree__node--locked {
+    opacity: 0.6;
+}
+
+.research-tree__node--lit {
+    opacity: 1;
+    box-shadow: 0 0 0 2px rgba(201, 160, 255, 0.5);
+}
+
+.research-tree__image {
+    pointer-events: none;
+}
+
+.research-tree__node-text {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    min-width: 0;
+}
+
+.research-tree__node-text strong {
+    font-size: 0.9rem;
+    line-height: 1.2;
+}
+
+.research-tree__meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.2rem 0.5rem;
+    font-size: 0.75rem;
+}
+
+.research-tree__turns {
+    color: #9ab3d4;
+}
+
+.research-tree__status {
+    font-size: 0.75rem;
+    color: #9ab3d4;
+}
+
+.research-tree__node--known .research-tree__status {
+    color: #7ee2ad;
+}
+
+.research-tree__node--researching .research-tree__status {
+    color: #ffd166;
+}
+
+.research-tree__tooltip {
+    position: absolute;
+    z-index: 2;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    width: 17rem;
+    padding: 0.65rem 0.75rem;
+    border: 1px solid #4b3a73;
+    border-radius: 0.45rem;
+    background: #10162e;
+    box-shadow: 0 0.6rem 1.6rem rgba(0, 0, 0, 0.55);
+    font-size: 0.85rem;
+    pointer-events: none;
+}
+
+.research-tree__tooltip--flip {
+    transform: translateX(-100%);
+}
+
+.research-tree__tooltip-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.research-tree__tooltip p {
+    margin: 0;
+    color: #c7d3ea;
+}
+
+.research-tree__requires {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    color: #ff8a8a;
+    font-size: 0.8rem;
+}
+
+.research-tree__requires--met {
+    color: #7ee2ad;
+}
+
+.research-tree__reason {
+    color: #ffb36b;
+    font-size: 0.8rem;
+}

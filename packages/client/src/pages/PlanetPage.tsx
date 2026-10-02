@@ -47,12 +47,12 @@ import { GarrisonList, OrbitList } from "./location/ForcesLists.js";
 import { InstallationGrid } from "./location/InstallationGrid.js";
 import {
     GROUND_UNIT_ITEMS,
-    RESEARCH_ITEMS,
     settleReadyOrders,
     SHIP_ITEMS,
     STRUCTURE_ITEMS,
     upgradeItem
 } from "./location/locationItems.js";
+import { ResearchTree } from "./location/ResearchTree.js";
 import { StockpileStrip } from "./location/StockpileStrip.js";
 import { UpgradePopup } from "./location/UpgradePopup.js";
 import "./PlanetPage.css";
@@ -424,13 +424,7 @@ function OwnLocationPanel({ world, location, economy, context, actions }: OwnLoc
                 />
             )}
             {popup?.kind === "build" && popup.category === "research" && (
-                <BuildPopup
-                    {...buildPopupProps}
-                    title="Research"
-                    detail={`${techs.length}/${TechId.options.length} techs known`}
-                    items={RESEARCH_ITEMS}
-                    actionLabel="Research"
-                />
+                <ResearchTree {...buildPopupProps} />
             )}
             {popup?.kind === "upgrade" && upgrade && (
                 <UpgradePopup
