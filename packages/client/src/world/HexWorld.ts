@@ -66,6 +66,7 @@ import {
 import { BEAM_MS, CombatEffects } from "./CombatEffects.js";
 import { Explosions, JUMP_ARRIVE_MS, JUMP_DEPART_MS, JumpFlashes } from "./Explosions.js";
 import { ShipMotion, SUPPLY_SHIP_MOTION, type MotionSpeeds, type ShipPose } from "./ShipMotion.js";
+import { SHIP_SPRITE_MIN_HEX_SIZE, shipSprite, type ShipSprite } from "./ShipSprites.js";
 
 export type Camera = {
     x: number;
@@ -1708,7 +1709,16 @@ export class HexWorld {
         if (entity.kind === "ship" && entity.hyperdriveCharging) {
             this._drawChargeGlow(ctx, center, size, fullColour);
         }
-        drawEntityPlaceholder(ctx, center, size * scale, entity, this.balance, fullColour, heading);
+        drawEntityPlaceholder(
+            ctx,
+            center,
+            size * scale,
+            entity,
+            this.balance,
+            fullColour,
+            heading,
+            size
+        );
         if (scale < 1 || !fullColour) return;
         this._drawHpBar(ctx, center, size, entity);
         const carried =
@@ -1817,7 +1827,8 @@ export class HexWorld {
                 entity,
                 this.balance,
                 true,
-                pose.heading + t * t * Math.PI
+                pose.heading + t * t * Math.PI,
+                size
             );
             ctx.restore();
             return true;
@@ -2199,7 +2210,9 @@ function drawEntityPlaceholder(
     balance: EconomyBalance | null,
     fullColour: boolean,
     /** Ship heading override (radians); defaults to the entity's facing. */
-    heading?: number
+    heading?: number,
+    /** On-screen hex size that picks ship sprites over triangles; `hexSize` when absent. */
+    zoomedHexSize = hexSize
 ) {
     const scale = (entity.scale ?? 0.5) * hexSize;
     const alpha = fullColour ? 1 : 0.55;
@@ -2371,6 +2384,11 @@ function drawEntityPlaceholder(
             ctx.translate(center.x, center.y);
             ctx.rotate(heading ?? axialDirectionAngle(entity.facing));
             ctx.fillStyle = sideColour(entity.sideId, "#d0d0d0");
+            const sprite = zoomedHexSize >= SHIP_SPRITE_MIN_HEX_SIZE && shipSprite(entity.shipType);
+            if (sprite) {
+                drawShipSprite(ctx, sprite, scale, hexSize, sideColour(entity.sideId, "#d0d0d0"));
+                break;
+            }
             if (canColonise(entity, balance)) {
                 drawColonyPod(ctx, scale, hexSize);
                 break;
@@ -2414,6 +2432,26 @@ function drawEntityPlaceholder(
     }
 
     ctx.restore();
+}
+
+/**
+ * Top-down picture with a glow in the side colour; nose along +x (context already rotated,
+ * the picture's nose points up). Its longer side spans about the triangle hull's length.
+ */
+function drawShipSprite(
+    ctx: DrawCtx,
+    sprite: ShipSprite,
+    scale: number,
+    hexSize: number,
+    colour: string
+) {
+    const length = scale * 1.9;
+    const w = sprite.aspect >= 1 ? length : length * sprite.aspect;
+    const h = sprite.aspect >= 1 ? length / sprite.aspect : length;
+    ctx.rotate(Math.PI / 2);
+    ctx.shadowColor = colour;
+    ctx.shadowBlur = Math.max(3, hexSize * 0.12);
+    ctx.drawImage(sprite.image, -w / 2, -h / 2, w, h);
 }
 
 /** Boxy freighter: cab in the side colour towing two cargo pods; nose along `heading`. */
