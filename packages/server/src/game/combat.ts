@@ -199,6 +199,29 @@ export function spaceExchange(
 }
 
 /**
+ * One-way orbital fire: each attacker splits its attack across living defenders (see
+ * `splitAttack`) with no return fire. Used for bombardment.
+ */
+export function orbitalStrike(
+    attackers: readonly Fighter[],
+    defenders: readonly Fighter[],
+    combat: CombatBalance,
+    rng: () => number
+): void {
+    for (const attacker of attackers) {
+        if (attacker.attack <= 0) continue;
+        const targets = defenders.filter(isAlive);
+        if (targets.length === 0) return;
+        const shares = splitAttack(attacker.attack, targets);
+        targets.forEach((t, i) => {
+            t.attacked += 1;
+            if (shares[i]! <= 0) return;
+            hit(attacker, t, combatDamage(shares[i]!, t.defence, combat, rng()));
+        });
+    }
+}
+
+/**
  * Ground rounds until one side is wiped out or `combat.groundMaxRounds` is reached. In each
  * round every surviving unit with attack above 0 hits one enemy, spreading round-robin over the
  * enemies alive at the start of the round (attackers roll first, then defenders, in order);

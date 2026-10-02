@@ -78,7 +78,8 @@ describe("economy balance config", () => {
             requiresTech: "transports",
             maxTier: 3,
             unitCapacity: 4,
-            canColonise: false
+            canColonise: false,
+            canBombard: false
         });
         expect(economy.ships.frigate.requires).toEqual(["advanced_shipyard"]);
         expect(economy.ships.colony_ship).toMatchObject({ canColonise: true, maxTier: 1 });
@@ -92,7 +93,9 @@ describe("economy balance config", () => {
             maxMovementPoints: 2,
             hp: 30,
             requires: ["advanced_shipyard", "docks"],
-            maxTier: 3
+            maxTier: 3,
+            unitCapacity: 4,
+            canBombard: true
         });
         expect(economy.shipTiers).toEqual({
             hpMultiplier: [1, 1.5, 2],
@@ -215,7 +218,8 @@ describe("economy balance config", () => {
             spread: 0.25,
             minDamage: 1,
             defenceScale: 10,
-            groundMaxRounds: 6
+            groundMaxRounds: 6,
+            bombardmentInstallationChance: 0.4
         });
         expect(economy.supplyShips).toEqual({
             hp: 6,
@@ -229,6 +233,28 @@ describe("economy balance config", () => {
             }
         });
         expect(economy.groundUnits.infantry.hp).toBe(10);
+    });
+
+    it("defaults and merges out-of-combat repair rates", () => {
+        expect(defaultEconomyBalance().repair).toEqual({
+            baseFraction: 0.1,
+            minPerTurn: 1,
+            techBonus: { damage_control_1: 0.05, damage_control_2: 0.1 },
+            atOwnedShipyardBonus: 0.15,
+            carriedBonus: 0.05
+        });
+        const economy = Config.parse({
+            economy: { repair: { minPerTurn: 2, techBonus: { damage_control_2: 0.2 } } }
+        }).economy;
+        expect(economy.repair).toMatchObject({
+            baseFraction: 0.1,
+            minPerTurn: 2,
+            techBonus: { damage_control_1: 0.05, damage_control_2: 0.2 }
+        });
+        expect(() => Config.parse({ economy: { repair: { baseFraction: 1.5 } } })).toThrow();
+        expect(() =>
+            Config.parse({ economy: { repair: { techBonus: { warp_repair: 0.1 } } } })
+        ).toThrow();
     });
 
     it("adds, changes and removes hangars", () => {

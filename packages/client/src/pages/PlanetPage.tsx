@@ -489,13 +489,16 @@ function UnownedLocationPanel({
 function EnemyLocationPanel({
     world,
     location,
-    onInvade
+    onInvade,
+    onBombard
 }: {
     world: HexWorld;
     location: LocationEntity;
     onInvade: (shipIds: EntityId[]) => void;
+    onBombard: (shipIds: EntityId[]) => void;
 }) {
     const invasion = world.invasionAt(location.q, location.r);
+    const bombardment = world.bombardmentAt(location.q, location.r);
     const landing = invasion
         ? invasion.ships.reduce((n, ship) => n + world.carriedUnitIds(ship).length, 0)
         : 0;
@@ -511,7 +514,7 @@ function EnemyLocationPanel({
                 {invasion ? (
                     <div className="planet-page__colonise">
                         <span>
-                            {invasion.ships.length} transport
+                            {invasion.ships.length} ship
                             {invasion.ships.length === 1 ? "" : "s"} in orbit carrying {landing}{" "}
                             unit
                             {landing === 1 ? "" : "s"}. All of them land and fight the garrison.
@@ -526,7 +529,30 @@ function EnemyLocationPanel({
                     </div>
                 ) : (
                     <p className="planet-page__muted">
-                        Bring transports carrying ground units onto this hex to invade.
+                        Bring ships carrying ground units onto this hex to invade.
+                    </p>
+                )}
+            </Card>
+            <Card area="bombard" title="Orbital bombardment">
+                {bombardment ? (
+                    <div className="planet-page__colonise">
+                        <span>
+                            {bombardment.ships.length} capital ship
+                            {bombardment.ships.length === 1 ? "" : "s"} ready to fire (1 MP each).
+                            Hits the garrison with no return fire; each ship may destroy an
+                            installation. Does not capture the world.
+                        </span>
+                        <button
+                            type="button"
+                            className="planet-page__primary planet-page__primary--danger"
+                            onClick={() => onBombard(bombardment.ships.map((s) => s.id))}
+                        >
+                            Bombard
+                        </button>
+                    </div>
+                ) : (
+                    <p className="planet-page__muted">
+                        Bring a Star Destroyer with movement left onto this hex to bombard.
                     </p>
                 )}
             </Card>
@@ -686,6 +712,7 @@ export function PlanetPage() {
                             world={world}
                             location={location}
                             onInvade={(shipIds) => actions.invade(location.id, shipIds)}
+                            onBombard={(shipIds) => actions.bombard(location.id, shipIds)}
                         />
                     )}
                 </section>

@@ -100,7 +100,7 @@ export const ShipEntity = EntityBase.extend({
     hp: z.number().min(0).optional(),
     /** Absent means tier 1. */
     tier: EnhancementTier.optional(),
-    /** Ground units aboard; transports only. */
+    /** Ground units aboard (ships with `ShipBalance.unitCapacity`). */
     carriedUnitIds: z.array(EntityId).optional(),
     /**
      * Ships aboard this carrier's hangar (see `ShipBalance.hangar`); absent when empty. Only
@@ -126,7 +126,9 @@ export const ShipEntity = EntityBase.extend({
     /** Hyperdrive engaged (a jump is pending); visible to every side that sees the ship. */
     hyperdriveCharging: z.boolean().optional(),
     /** Turns before the hyperdrive can be engaged again; absent means ready. Owner only. */
-    hyperdriveCooldown: z.number().int().min(0).optional()
+    hyperdriveCooldown: z.number().int().min(0).optional(),
+    /** Last turn it fought (see `repairsAtEndOf`); absent means never. Owner only. */
+    lastCombatTurn: z.number().int().min(0).optional()
 });
 export type ShipEntity = z.infer<typeof ShipEntity>;
 export type ShipMoveOrder = NonNullable<ShipEntity["moveOrder"]>;
@@ -161,7 +163,9 @@ export const SupplyShipEntity = EntityBase.extend({
     /** At its destination, waiting for stockpile room to unload the rest of its cargo. */
     waiting: z.boolean().optional(),
     /** Current hp; absent means full (see `supplyShipStats`). */
-    hp: z.number().min(0).optional()
+    hp: z.number().min(0).optional(),
+    /** Last turn it was attacked (see `repairsAtEndOf`); absent means never. Owner only. */
+    lastCombatTurn: z.number().int().min(0).optional()
 });
 export type SupplyShipEntity = z.infer<typeof SupplyShipEntity>;
 

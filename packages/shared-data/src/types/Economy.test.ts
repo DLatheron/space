@@ -6,6 +6,7 @@ import {
     buildItemTurns,
     buildSlots,
     canBuild,
+    canBombardShip,
     canCarryShip,
     combatDamage,
     countQueuedShips,
@@ -27,8 +28,10 @@ import {
     partitionOrders,
     queueCategory,
     ratePerTurn,
+    repairsAtEndOf,
     resourceUnits,
     shipCapFor,
+    shipRepairPerTurn,
     shipStats,
     siteForEntity,
     slotsForEntity,
@@ -102,6 +105,7 @@ function ship(overrides: Partial<ShipBalance>): ShipBalance {
         maxTier: 3,
         unitCapacity: 0,
         canColonise: false,
+        canBombard: false,
         ...overrides
     };
 }
@@ -197,6 +201,8 @@ const balance: EconomyBalance = {
             attack: 8,
             defence: 8,
             requires: ["advanced_shipyard", "docks"],
+            unitCapacity: 4,
+            canBombard: true,
             hyperdrive: { cooldownTurns: 4, accuracy: { onTarget: 30, oneOff: 50, twoOff: 20 } },
             hangar: { capacity: 4, carries: ["fighter_squadron", "advanced_fighter_squadron"] }
         })
@@ -208,7 +214,13 @@ const balance: EconomyBalance = {
         attackBonus: [0, 1, 2],
         defenceBonus: [0, 1, 2]
     },
-    combat: { spread: 0.25, minDamage: 1, defenceScale: 10, groundMaxRounds: 6 },
+    combat: {
+        spread: 0.25,
+        minDamage: 1,
+        defenceScale: 10,
+        groundMaxRounds: 6,
+        bombardmentInstallationChance: 0.4
+    },
     supplyShips: {
         hp: 6,
         defence: 1,
@@ -219,6 +231,13 @@ const balance: EconomyBalance = {
             evasive_manoeuvres_2: { hp: 0, defence: 0, evasion: 0.4 },
             armoured_freighters: { hp: 6, defence: 2, evasion: 0 }
         }
+    },
+    repair: {
+        baseFraction: 0.1,
+        minPerTurn: 1,
+        techBonus: { damage_control_1: 0.05, damage_control_2: 0.1 },
+        atOwnedShipyardBonus: 0.15,
+        carriedBonus: 0.05
     },
     hyperspace: {
         hazards: {
@@ -1297,11 +1316,50 @@ describe("combat helpers", () => {
         ).toBe(0.75);
     });
 
+    it("repairs a base fraction of max hp per turn, at least minPerTurn, capped at max", () => {
+        expect(balance.repair.baseFraction).toBe(0.1);
+        expect(shipRepairPerTurn(balance, 10, 40, [])).toBe(4);
+        expect(shipRepairPerTurn(balance, 1, 6, [])).toBe(1);
+        expect(shipRepairPerTurn(balance, 38, 40, [])).toBe(2);
+        expect(shipRepairPerTurn(balance, 40, 40, [])).toBe(0);
+        expect(shipRepairPerTurn(balance, 0, 40, [])).toBe(0);
+        const noMin = { ...balance, repair: { ...balance.repair, minPerTurn: 0 } };
+        expect(shipRepairPerTurn(noMin, 1, 4, [])).toBe(0);
+    });
+
+    it("adds tech, shipyard and carrier repair bonuses", () => {
+        expect(shipRepairPerTurn(balance, 1, 40, ["damage_control_1"])).toBe(6);
+        expect(shipRepairPerTurn(balance, 1, 40, ["damage_control_1", "damage_control_2"])).toBe(
+            10
+        );
+        expect(shipRepairPerTurn(balance, 1, 40, ["armoured_freighters"])).toBe(4);
+        expect(shipRepairPerTurn(balance, 1, 40, [], { atOwnedShipyard: true })).toBe(10);
+        expect(shipRepairPerTurn(balance, 1, 40, [], { carried: true })).toBe(6);
+        expect(
+            shipRepairPerTurn(balance, 1, 40, ["damage_control_1", "damage_control_2"], {
+                atOwnedShipyard: true,
+                carried: true
+            })
+        ).toBe(18);
+        expect(
+            shipRepairPerTurn(balance, 35, 40, ["damage_control_2"], { atOwnedShipyard: true })
+        ).toBe(5);
+    });
+
+    it("repairs only after a whole turn without combat", () => {
+        expect(repairsAtEndOf(undefined, 1)).toBe(true);
+        expect(repairsAtEndOf(3, 4)).toBe(true);
+        expect(repairsAtEndOf(4, 4)).toBe(false);
+    });
+
     it("reads hangars from the balance", () => {
         expect(hangarFor(balance, "star_destroyer")?.capacity).toBe(4);
         expect(hangarFor(balance, "frigate")).toBeUndefined();
         expect(canCarryShip(balance, "star_destroyer", "fighter_squadron")).toBe(true);
         expect(canCarryShip(balance, "star_destroyer", "scout")).toBe(false);
         expect(canCarryShip(balance, "frigate", "fighter_squadron")).toBe(false);
+        expect(canBombardShip(balance, "star_destroyer")).toBe(true);
+        expect(canBombardShip(balance, "frigate")).toBe(false);
+        expect(balance.ships.star_destroyer.unitCapacity).toBe(4);
     });
 });

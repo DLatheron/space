@@ -31,6 +31,7 @@ import {
     type MoveOrderKnowledge,
     type ShipMoveEvent
 } from "./MoveOrderManager.js";
+import { RepairManager } from "./RepairManager.js";
 import { ResearchManager } from "./ResearchManager.js";
 import { Side, type VisibilityDiff } from "./Side.js";
 import { SupplyManager, type SupplyKnowledge } from "./SupplyManager.js";
@@ -126,13 +127,19 @@ export class Game {
             research,
             homes: galaxy.homePlanets
         });
-        this._battles = new BattleManager(this._entities, this._economy, { rng: options.rng });
+        this._battles = new BattleManager(this._entities, this._economy, {
+            rng: options.rng,
+            turn: () => this._turns.combatTurn
+        });
         this._carriers = new CarrierManager(this._entities, this._economy.balance);
         this._supply = new SupplyManager(this._entities, this._economy, {
             battles: this._battles,
             knowledge: (sideId) => this._supplyKnowledge(sideId)
         });
-        this._ground = new GroundManager(this._entities, this._economy, { rng: options.rng });
+        this._ground = new GroundManager(this._entities, this._economy, {
+            rng: options.rng,
+            turn: () => this._turns.combatTurn
+        });
         this._moveOrders = new MoveOrderManager(this._entities, {
             economy: this._economy,
             knowledge: (sideId) => this._moveKnowledge(sideId)
@@ -149,7 +156,11 @@ export class Game {
             this._entities,
             this._economy,
             this._supply,
-            { hyperspace: this._hyperspace, moveOrders: this._moveOrders }
+            {
+                hyperspace: this._hyperspace,
+                moveOrders: this._moveOrders,
+                repairs: new RepairManager(this._entities, this._economy)
+            }
         );
 
         for (const side of this._sides.values()) {
@@ -332,6 +343,10 @@ export class Game {
 
         this._messageManager.registerHandler("client:invade", (_context, payload, from) => {
             this._handleInvade(from, payload.locationId, payload.shipIds);
+        });
+
+        this._messageManager.registerHandler("client:bombard", (_context, payload, from) => {
+            this._handleBombard(from, payload.locationId, payload.shipIds);
         });
     }
 
@@ -692,6 +707,28 @@ export class Game {
         );
         this._broadcastCombat(combat);
         this._refreshVisibility([axialKey(location.q, location.r)]);
+        this._sendEconomyState(client.sideId!);
+        this._sendEconomyState(defenderSideId);
+    }
+
+    private _handleBombard(client: Client, locationId: EntityId, shipIds: EntityId[]) {
+        const result = this._ground.bombard(client.sideId, locationId, shipIds);
+        if (!result.ok) return this._reject(client, "bombardment", result.error);
+        const { location, defenderSideId, combat } = result;
+        this.logger.info(
+            "Side",
+            client.sideId,
+            "bombarded",
+            location.id,
+            combat.outcome,
+            "units lost",
+            combat.destroyedUnitIds.length,
+            "installations lost",
+            combat.destroyedInstallationIds?.length ?? 0
+        );
+        this._broadcastCombat(combat);
+        this._refreshVisibility([axialKey(location.q, location.r)]);
+        for (const shipId of shipIds) this._refreshShipHex(shipId);
         this._sendEconomyState(client.sideId!);
         this._sendEconomyState(defenderSideId);
     }

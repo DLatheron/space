@@ -11,7 +11,8 @@ const CAUSE_LABELS: Record<CombatResult["cause"], string> = {
     move: "Attack",
     ambush: "Ambush",
     hyperjump: "Jump-in attack",
-    invasion: "Invasion"
+    invasion: "Invasion",
+    bombardment: "Orbital bombardment"
 };
 
 export function sideName(sideId: SideId): string {
@@ -22,7 +23,10 @@ export function sideName(sideId: SideId): string {
 export function combatTitle(world: HexWorld, result: CombatResult): string {
     if (result.kind === "ground") {
         const location = result.locationId ? world.findEntityById(result.locationId) : undefined;
-        return `Invasion of ${location?.name ?? "a location"}`;
+        const place = location?.name ?? "a location";
+        return result.cause === "bombardment"
+            ? `Orbital bombardment of ${place}`
+            : `Invasion of ${place}`;
     }
     return `${CAUSE_LABELS[result.cause]} at ${result.hex.q}, ${result.hex.r}`;
 }
@@ -31,6 +35,25 @@ export function combatTitle(world: HexWorld, result: CombatResult): string {
 export function combatOutcome(result: CombatResult): string {
     const attacker = sideName(result.attackerSideId);
     if (result.kind === "ground") {
+        if (result.cause === "bombardment") {
+            const installations = result.destroyedInstallationIds?.length ?? 0;
+            const units = result.destroyedUnitIds.length;
+            const bits: string[] = [];
+            if (units) bits.push(`${units} unit${units === 1 ? "" : "s"} destroyed`);
+            if (installations) {
+                bits.push(
+                    `${installations} installation${installations === 1 ? "" : "s"} destroyed`
+                );
+            }
+            if (result.outcome === "attacker_won") {
+                return bits.length
+                    ? `${attacker} wiped the target (${bits.join(", ")})`
+                    : `${attacker} cleared the target`;
+            }
+            return bits.length
+                ? `${attacker} struck (${bits.join(", ")})`
+                : `${attacker}'s bombardment dealt no lasting damage`;
+        }
         if (result.captured) return `${attacker} captured it`;
         return result.outcome === "attacker_destroyed"
             ? `${attacker}'s invasion repelled`
@@ -71,6 +94,13 @@ export function combatLosses(result: CombatResult): string {
     for (const p of result.participants) {
         if (p.destroyed) lost.set(p.sideId, (lost.get(p.sideId) ?? 0) + 1);
     }
-    if (!lost.size) return "No losses";
-    return [...lost].map(([side, n]) => `${sideName(side)} lost ${n}`).join(" · ");
+    const parts: string[] = [];
+    if (lost.size) {
+        parts.push([...lost].map(([side, n]) => `${sideName(side)} lost ${n}`).join(" · "));
+    }
+    const installations = result.destroyedInstallationIds?.length ?? 0;
+    if (installations) {
+        parts.push(`${installations} installation${installations === 1 ? "" : "s"} destroyed`);
+    }
+    return parts.length ? parts.join(" · ") : "No losses";
 }

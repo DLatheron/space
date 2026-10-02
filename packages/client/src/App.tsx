@@ -238,6 +238,10 @@ export function App() {
                 sendMessage({ type: "client:invade", payload: { locationId, shipIds } });
                 appendLog(`invade — ${locationId} from ${shipIds.join(", ")}`);
             },
+            bombard: (locationId, shipIds) => {
+                sendMessage({ type: "client:bombard", payload: { locationId, shipIds } });
+                appendLog(`bombard — ${locationId} from ${shipIds.join(", ")}`);
+            },
             cancelMoveOrder: (shipId) => {
                 sendMessage({ type: "client:ship:order:cancel", payload: { shipId } });
                 appendLog(`cancel move order — ${shipId}`);

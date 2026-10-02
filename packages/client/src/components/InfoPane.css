@@ -65,6 +65,12 @@
     font-weight: 600;
 }
 
+.info-pane__bombard {
+    border-color: #ff6b6b;
+    color: #ff6b6b;
+    font-weight: 600;
+}
+
 .info-pane__open {
     border-color: #6fb3ff;
     color: #6fb3ff;
@@ -183,6 +189,16 @@
 
 .info-pane__hp-fill--critical {
     background: #ff6b8a;
+}
+
+.info-pane__repair {
+    display: block;
+    font-size: 0.75rem;
+    color: #5cffb0;
+}
+
+.info-pane__repair--blocked {
+    color: #7f93b5;
 }
 
 .info-pane__stack-item {

@@ -408,3 +408,137 @@ describe("GroundManager invasion", () => {
         expect(second.ok && second.combat.participants.map((p) => p.hpBefore)).toEqual([4, 4]);
     });
 });
+
+describe("GroundManager star destroyer cargo", () => {
+    it("loads and unloads ground units aboard a star destroyer like a transport", () => {
+        const { entities, ground, home, infantry } = groundWorld();
+        const destroyer = makeShip(entities, "sd-a", "alpha", home.q, home.r, "star_destroyer");
+        expect(DEFAULTS.ships.star_destroyer.unitCapacity).toBe(4);
+        const ids = Array.from({ length: 4 }, () => infantry("alpha", home.id).id);
+
+        expect(ground.load("alpha", destroyer.id, ids)).toEqual({ ok: true });
+        expect(destroyer.carriedUnitIds).toEqual(ids);
+        expect(ground.unload("alpha", destroyer.id, home.id, ids.slice(0, 2))).toEqual({
+            ok: true
+        });
+        expect(destroyer.carriedUnitIds).toEqual(ids.slice(2));
+        expect(home.garrison).toEqual(expect.arrayContaining(ids.slice(0, 2)));
+    });
+});
+
+describe("GroundManager bombardment", () => {
+    it("fires one-way at a garrison, spends movement, and may destroy installations", () => {
+        const world = groundWorld(() => 0.1);
+        const { entities, economy, ground, target, infantry } = world;
+        const destroyer = makeShip(
+            entities,
+            "sd-bombard",
+            "alpha",
+            target.q,
+            target.r,
+            "star_destroyer"
+        );
+        const defender = infantry("beta", target.id);
+        economy.deposit(target.id, { money: 500, materials: 500, population: 50, science: 0 });
+        economy.build("beta", target.id, { kind: "structure", structureType: "mine" });
+        economy.fund();
+        economy.fund();
+        economy.completeReady();
+        const mineId = economy.locationEconomy(target.id)!.installations[0]!.id;
+        const mpBefore = destroyer.movementPoints;
+
+        const result = ground.bombard("alpha", target.id, [destroyer.id]);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.combat).toMatchObject({
+            kind: "ground",
+            cause: "bombardment",
+            attackerSideId: "alpha",
+            defenderSideIds: ["beta"],
+            rounds: 1,
+            captured: false,
+            attackerMovedIn: false,
+            locationId: target.id
+        });
+        expect(destroyer.movementPoints).toBe(mpBefore - 1);
+        expect(destroyer.lastCombatTurn).toBe(1);
+        expect(target.sideId).toBe("beta");
+        // Attack 8 vs defence 1: round(8 * 10/11) = 7; infantry hp 10 → damaged, not killed.
+        expect(economy.units.get(defender.id)?.hp).toBe(3);
+        expect(result.combat.destroyedUnitIds).toEqual([]);
+        // Chance 0.4 with rng 0.1 → hit; second rng pick also 0.1 → index 0.
+        expect(result.combat.destroyedInstallationIds).toEqual([mineId]);
+        expect(economy.locationEconomy(target.id)!.installations).toEqual([]);
+        expect(result.combat.participants).toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({
+                    id: destroyer.id,
+                    kind: "ship",
+                    role: "attacker",
+                    shipType: "star_destroyer",
+                    damageDealt: 7
+                }),
+                expect.objectContaining({
+                    id: defender.id,
+                    kind: "ground_unit",
+                    role: "defender",
+                    hpAfter: 3,
+                    destroyed: false
+                })
+            ])
+        );
+    });
+
+    it("rejects bombardments that are not possible", () => {
+        const { entities, ground, home, target } = groundWorld();
+        const destroyer = makeShip(entities, "sd-b", "alpha", home.q, home.r, "star_destroyer");
+        const frigate = makeShip(entities, "frigate-b", "alpha", target.q, target.r, "frigate");
+
+        expect(ground.bombard("alpha", target.id, [destroyer.id])).toEqual({
+            ok: false,
+            error: "Ship sd-b is not at the location"
+        });
+        entities.move(destroyer, target);
+        expect(ground.bombard("alpha", target.id, [frigate.id])).toEqual({
+            ok: false,
+            error: "Frigate cannot bombard"
+        });
+        expect(ground.bombard("alpha", home.id, [destroyer.id])).toEqual({
+            ok: false,
+            error: "Location is already yours"
+        });
+        destroyer.movementPoints = 0;
+        expect(ground.bombard("alpha", target.id, [destroyer.id])).toEqual({
+            ok: false,
+            error: "Ship sd-b has no movement left to bombard"
+        });
+        destroyer.movementPoints = 2;
+        expect(ground.bombard("alpha", target.id, [destroyer.id])).toEqual({
+            ok: false,
+            error: "Nothing to bombard"
+        });
+    });
+
+    it("wipes an undefended installation-only target without capturing", () => {
+        const world = groundWorld(() => 0);
+        const { entities, economy, ground, target } = world;
+        const destroyer = makeShip(entities, "sd-c", "alpha", target.q, target.r, "star_destroyer");
+        economy.deposit(target.id, { money: 200, materials: 200, population: 20, science: 0 });
+        economy.build("beta", target.id, { kind: "structure", structureType: "mine" });
+        economy.fund();
+        economy.fund();
+        economy.completeReady();
+        const mineId = economy.locationEconomy(target.id)!.installations[0]!.id;
+
+        const result = ground.bombard("alpha", target.id, [destroyer.id]);
+        expect(result.ok && result.combat).toMatchObject({
+            cause: "bombardment",
+            outcome: "attacker_won",
+            captured: false,
+            destroyedUnitIds: [],
+            destroyedInstallationIds: [mineId]
+        });
+        expect(target.sideId).toBe("beta");
+        expect(economy.locationEconomy(target.id)!.installations).toEqual([]);
+    });
+});

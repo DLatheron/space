@@ -14,6 +14,7 @@ import {
     type Pixel
 } from "@space/maths";
 import {
+    canBombardShip,
     canCarryShip,
     hangarFor,
     hexHasObstacle,
@@ -22,9 +23,12 @@ import {
     MAX_SCATTER_RING,
     MOVE_COST_PER_HEX,
     PLANET_LEVEL_MAX,
+    REPAIR_YARD_STRUCTURES,
+    repairsAtEndOf,
     RESOURCE_KEYS,
     ringHexes,
     SHIP_TYPE_INFO,
+    shipRepairPerTurn,
     shipStats,
     siteForEntity,
     stockpileCap,
@@ -151,6 +155,10 @@ export function isBuildSite(entity: EntitySummary): entity is LocationEntity {
 
 export function isTransport(ship: ShipEntity, balance: EconomyBalance | null): boolean {
     return (balance?.ships[ship.shipType].unitCapacity ?? 0) > 0;
+}
+
+export function canBombard(ship: ShipEntity, balance: EconomyBalance | null): boolean {
+    return !!balance && canBombardShip(balance, ship.shipType);
 }
 
 export function canColonise(ship: ShipEntity, balance: EconomyBalance | null): boolean {
@@ -987,6 +995,31 @@ export class HexWorld {
         return { hp, max: Math.max(max, hp) };
     }
 
+    /**
+     * Repair outlook for one of our damaged ships or supply ships: hp regained at the coming
+     * end of turn, or `blocked` when it fought this turn (see `repairsAtEndOf`).
+     */
+    repairOf(
+        entity: MobileEntity
+    ): { status: "repairing"; perTurn: number } | { status: "blocked" } | undefined {
+        const balance = this.balance;
+        const hp = this.hpOf(entity);
+        if (!balance || !hp || !this.turn || entity.sideId !== this.sideId) return undefined;
+        if (hp.hp <= 0 || hp.hp >= hp.max) return undefined;
+        if (!repairsAtEndOf(entity.lastCombatTurn, this.turn.turn)) return { status: "blocked" };
+        const yards: readonly string[] = REPAIR_YARD_STRUCTURES;
+        const atOwnedShipyard = this.entitiesAt(entity.q, entity.r).some(
+            (e) =>
+                isLocationEntity(e) &&
+                !!this.locationEconomy(e.id)?.installations.some((i) => yards.includes(i.type))
+        );
+        const perTurn = shipRepairPerTurn(balance, hp.hp, hp.max, this.economy?.techs ?? [], {
+            atOwnedShipyard,
+            carried: entity.kind === "ship" && !!entity.carriedBy
+        });
+        return { status: "repairing", perTurn };
+    }
+
     /** Supply ship stats: with our techs for our own, base stats for anyone else's. */
     supplyStatsOf(supplyShip: SupplyShipEntity): ReturnType<typeof supplyShipStats> {
         const techs = supplyShip.sideId === this.sideId ? (this.economy?.techs ?? []) : [];
@@ -1043,6 +1076,31 @@ export class HexWorld {
             return undefined;
         }
         return this.invasionAt(ship.q, ship.r);
+    }
+
+    /** Enemy location on `hex` plus our ships there that can orbital-bombard. */
+    bombardmentAt(
+        q: number,
+        r: number
+    ): { location: LocationEntity; ships: ShipEntity[] } | undefined {
+        const location = this.entitiesAt(q, r).find(
+            (e): e is LocationEntity =>
+                isLocationEntity(e) && e.sideId !== null && e.sideId !== this.sideId
+        );
+        if (!location) return undefined;
+        const ships = this.ownShipsAt(q, r).filter(
+            (s) => canBombard(s, this.balance) && s.movementPoints > 0
+        );
+        return ships.length ? { location, ships } : undefined;
+    }
+
+    /** Bombardment the selected capable ship could launch from its hex. */
+    get bombardmentOption(): { location: LocationEntity; ships: ShipEntity[] } | undefined {
+        const ship = this.selectedShip;
+        if (!ship || ship.sideId !== this.sideId || !canBombard(ship, this.balance)) {
+            return undefined;
+        }
+        return this.bombardmentAt(ship.q, ship.r);
     }
 
     /** Optimistically mark our side ready until the server confirms via `server:turn:state`. */

@@ -4,6 +4,7 @@ import type { EntityManager } from "./EntityManager.js";
 import type { HyperjumpEvent, HyperspaceManager } from "./HyperspaceManager.js";
 import type { EntityOf } from "./map/types.js";
 import type { MoveOrderManager, MoveOrderResult } from "./MoveOrderManager.js";
+import type { RepairEvent, RepairManager } from "./RepairManager.js";
 import type { SupplyManager, SupplyMoveResult } from "./SupplyManager.js";
 
 export type SupplyAdvance = SupplyMoveResult & {
@@ -24,11 +25,14 @@ export type EndTurnResult = {
     economy?: EconomyAdvance;
     /** Supply results of the advance (present when `advanced` and supply is attached). */
     supply?: SupplyAdvance;
+    /** Out-of-combat repairs made by the advance (present when repairs are attached). */
+    repairs?: RepairEvent[];
 };
 
 export type TurnOptions = {
     hyperspace?: HyperspaceManager;
     moveOrders?: MoveOrderManager;
+    repairs?: RepairManager;
 };
 
 type Advance = Omit<EndTurnResult, "advanced" | "state">;
@@ -51,7 +55,9 @@ type Advance = Omit<EndTurnResult, "advanced" | "state">;
  * 8. released population is sent home;
  * 9. dispatch: demand by priority, nearest source, reserve cargo, pack ships;
  * 10. ships launched in steps 8 and 9 make their first move (as in steps 5 and 6). Cargo
- *    they deliver is only used by next turn's funding.
+ *    they deliver is only used by next turn's funding;
+ * 11. damaged ships and supply ships with no combat during the turn just ended (including
+ *    this end of turn) repair.
  */
 export class TurnManager {
     private readonly _entities: EntityManager;
@@ -59,8 +65,11 @@ export class TurnManager {
     private readonly _supply: SupplyManager | undefined;
     private readonly _hyperspace: HyperspaceManager | undefined;
     private readonly _moveOrders: MoveOrderManager | undefined;
+    private readonly _repairs: RepairManager | undefined;
     private readonly _sideReady = new Map<SideId, boolean>();
     private _turn = 1;
+    /** The turn that is ending, while an advance runs. */
+    private _ending: number | undefined;
 
     constructor(
         sideIds: Iterable<SideId>,
@@ -74,11 +83,17 @@ export class TurnManager {
         this._supply = supply;
         this._hyperspace = options.hyperspace;
         this._moveOrders = options.moveOrders;
+        this._repairs = options.repairs;
         for (const sideId of sideIds) this._sideReady.set(sideId, false);
     }
 
     get turn(): number {
         return this._turn;
+    }
+
+    /** Turn combat counts against: the turn being played, or the one ending during an advance. */
+    get combatTurn(): number {
+        return this._ending ?? this._turn;
     }
 
     isReady(sideId: SideId): boolean {
@@ -102,6 +117,18 @@ export class TurnManager {
     }
 
     private _advance(): Advance {
+        const ending = this._turn;
+        this._ending = ending;
+        try {
+            const advance = this._resolve();
+            const repairs = this._repairs?.repair(ending);
+            return repairs ? { ...advance, repairs } : advance;
+        } finally {
+            this._ending = undefined;
+        }
+    }
+
+    private _resolve(): Advance {
         for (const sideId of this._sideReady.keys()) this._sideReady.set(sideId, false);
         for (const ship of this._entities.ofKind("ship")) {
             ship.movementPoints = ship.maxMovementPoints;

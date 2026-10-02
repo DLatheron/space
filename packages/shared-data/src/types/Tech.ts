@@ -19,7 +19,9 @@ export const TechId = z.enum([
     "hyperdrive_calibration_2",
     "evasive_manoeuvres_1",
     "evasive_manoeuvres_2",
-    "armoured_freighters"
+    "armoured_freighters",
+    "damage_control_1",
+    "damage_control_2"
 ]);
 export type TechId = z.infer<typeof TechId>;
 
@@ -145,6 +147,20 @@ export const TECHS: Record<TechId, TechDefinition> = {
         cost: { money: 50, materials: 100, population: 0, science: 120 },
         buildTurns: 3,
         requires: []
+    },
+    damage_control_1: {
+        name: "Damage Control I",
+        description: "Damaged ships and supply ships repair faster out of combat.",
+        cost: { money: 50, materials: 50, population: 0, science: 100 },
+        buildTurns: 3,
+        requires: []
+    },
+    damage_control_2: {
+        name: "Damage Control II",
+        description: "Damaged ships and supply ships repair much faster out of combat.",
+        cost: { money: 100, materials: 100, population: 0, science: 200 },
+        buildTurns: 4,
+        requires: ["damage_control_1"]
     }
 };
 

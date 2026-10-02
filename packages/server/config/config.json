@@ -274,8 +274,9 @@
                 "requires": ["advanced_shipyard", "docks"],
                 "requiresTech": null,
                 "maxTier": 3,
-                "unitCapacity": 0,
+                "unitCapacity": 4,
                 "canColonise": false,
+                "canBombard": true,
                 "hangar": { "capacity": 4, "carries": ["fighter_squadron", "advanced_fighter_squadron"] },
                 "hyperdrive": {
                     "cooldownTurns": 4,
@@ -290,7 +291,7 @@
             "attackBonus": [0, 1, 2],
             "defenceBonus": [0, 1, 2]
         },
-        "combat": { "spread": 0.25, "minDamage": 1, "defenceScale": 10, "groundMaxRounds": 6 },
+        "combat": { "spread": 0.25, "minDamage": 1, "defenceScale": 10, "groundMaxRounds": 6, "bombardmentInstallationChance": 0.4 },
         "supplyShips": {
             "hp": 6,
             "defence": 1,
@@ -301,6 +302,13 @@
                 "evasive_manoeuvres_2": { "hp": 0, "defence": 0, "evasion": 0.15 },
                 "armoured_freighters": { "hp": 6, "defence": 2, "evasion": 0 }
             }
+        },
+        "repair": {
+            "baseFraction": 0.1,
+            "minPerTurn": 1,
+            "techBonus": { "damage_control_1": 0.05, "damage_control_2": 0.1 },
+            "atOwnedShipyardBonus": 0.15,
+            "carriedBonus": 0.05
         },
         "hyperspace": {
             "hazards": {

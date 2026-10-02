@@ -199,6 +199,8 @@ function ship(defaults: ShipBalance) {
             /** Ground units it can carry; 0 for none. */
             unitCapacity: z.int().min(0).default(defaults.unitCapacity),
             canColonise: z.boolean().default(defaults.canColonise),
+            /** Orbital bombardment of enemy locations on its hex. */
+            canBombard: z.boolean().default(defaults.canBombard),
             hyperdrive: hyperdrive(defaults.hyperdrive),
             /** Ships it can carry; `null` removes a default hangar. */
             hangar: hangar(defaults.hangar)
@@ -242,7 +244,8 @@ const SHIP_DEFAULTS = {
     requires: ["shipyard"],
     requiresTech: null,
     unitCapacity: 0,
-    canColonise: false
+    canColonise: false,
+    canBombard: false
 } satisfies Partial<ShipBalance>;
 
 const DEFAULT_STRUCTURE_BUILD_SLOTS: EconomyBalance["buildSlots"]["structures"] = {
@@ -432,6 +435,8 @@ export const EconomyBalanceConfig = z
                     defence: 8,
                     requires: ["advanced_shipyard", "docks"],
                     maxTier: 3,
+                    unitCapacity: 4,
+                    canBombard: true,
                     hangar: { capacity: 4, carries: ["fighter_squadron", "advanced_fighter_squadron"] },
                     hyperdrive: {
                         cooldownTurns: 4,
@@ -466,7 +471,12 @@ export const EconomyBalanceConfig = z
                 minDamage: z.int().min(0).default(1),
                 defenceScale: z.number().positive().default(10),
                 /** Ground combat rounds before undecided invaders re-embark. */
-                groundMaxRounds: z.int().min(1).default(6)
+                groundMaxRounds: z.int().min(1).default(6),
+                /**
+                 * Chance each bombarding ship destroys one random installation after firing on
+                 * the garrison.
+                 */
+                bombardmentInstallationChance: z.number().min(0).max(1).default(0.4)
             })
             .strict()
             .prefault({}),
@@ -487,6 +497,30 @@ export const EconomyBalanceConfig = z
                     })
                     .strict()
                     .prefault({})
+            })
+            .strict()
+            .prefault({}),
+        /**
+         * Ships and supply ships with no combat during a whole turn regain
+         * `max(minPerTurn, round(maxHp * fraction))` hp at its end, capped at max; `fraction` is
+         * `baseFraction` plus every applicable bonus.
+         */
+        repair: z
+            .object({
+                baseFraction: z.number().min(0).max(1).default(0.1),
+                minPerTurn: z.int().min(0).default(1),
+                /** Added per known tech. */
+                techBonus: z
+                    .object({
+                        damage_control_1: z.number().min(0).max(1).default(0.05),
+                        damage_control_2: z.number().min(0).max(1).default(0.1)
+                    })
+                    .strict()
+                    .prefault({}),
+                /** On the hex of an owned location with a Shipyard or Advanced Shipyard. */
+                atOwnedShipyardBonus: z.number().min(0).max(1).default(0.15),
+                /** Aboard a carrier's hangar. */
+                carriedBonus: z.number().min(0).max(1).default(0.05)
             })
             .strict()
             .prefault({}),

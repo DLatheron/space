@@ -97,6 +97,15 @@ export const ClientToServerMessage = z.discriminatedUnion("type", [
          */
         type: z.literal("client:invade"),
         payload: z.object({ locationId: EntityId, shipIds: z.array(EntityId).min(1) })
+    }),
+    z.object({
+        /**
+         * Orbital bombardment of an enemy location on the ships' hex. Armed capital ships with
+         * `canBombard` each spend `BOMBARD_COST` movement; ground units take fire with no return
+         * fire, then each ship may destroy an installation (see `server:combat`).
+         */
+        type: z.literal("client:bombard"),
+        payload: z.object({ locationId: EntityId, shipIds: z.array(EntityId).min(1) })
     })
 ]);
 export type ClientToServerMessage = z.infer<typeof ClientToServerMessage>;

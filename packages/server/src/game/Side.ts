@@ -282,8 +282,8 @@ export class Side {
 
     /**
      * Wire snapshot as this side may see it: other sides' supply routes and reservations, ship
-     * move orders, jump targets, hyperdrive cooldowns and carried ship ids are hidden (charging
-     * and the carried ship count stay visible).
+     * move orders, jump targets, hyperdrive cooldowns, carried ship ids and last combat turns
+     * are hidden (charging and the carried ship count stay visible).
      */
     summarize(entity: Entity): EntitySummary {
         const summary = entityToSummary(entity);
@@ -294,11 +294,13 @@ export class Side {
             delete summary.hyperjump;
             delete summary.hyperdriveCooldown;
             delete summary.carriedShipIds;
+            delete summary.lastCombatTurn;
             return summary;
         }
         if (summary.kind !== "supply_ship" || summary.sideId === this.id) return summary;
         const redacted = { ...summary, reservedFor: [] };
         delete redacted.route;
+        delete redacted.lastCombatTurn;
         return redacted;
     }
 }

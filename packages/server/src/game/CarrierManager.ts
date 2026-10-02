@@ -58,6 +58,9 @@ export class CarrierManager {
             if ((ship.carriedShipIds ?? []).length > 0) {
                 return { ok: false, error: `Ship ${shipId} is carrying ships` };
             }
+            if ((ship.carriedUnitIds ?? []).length > 0) {
+                return { ok: false, error: `Ship ${shipId} is carrying units` };
+            }
             if (!canCarryShip(this._balance, carrier.shipType, ship.shipType)) {
                 const carrierName = SHIP_TYPE_INFO[carrier.shipType].name;
                 return {

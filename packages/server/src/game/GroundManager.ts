@@ -1,5 +1,8 @@
 import {
+    BOMBARD_COST,
+    canBombardShip,
     shipDef,
+    SHIP_TYPE_INFO,
     type CombatOutcome,
     type CombatResult,
     type EntityId,
@@ -8,7 +11,14 @@ import {
     type SideId
 } from "@space/shared-data";
 import { hasEnemyWarships } from "./Battle.js";
-import { groundRounds, isAlive, toParticipant, unitFighter } from "./combat.js";
+import {
+    groundRounds,
+    isAlive,
+    orbitalStrike,
+    shipFighter,
+    toParticipant,
+    unitFighter
+} from "./combat.js";
 import type { EconomyManager } from "./EconomyManager.js";
 import type { EntityManager } from "./EntityManager.js";
 import type { EntityOf } from "./map/types.js";
@@ -28,27 +38,44 @@ export type InvadeResult =
       }
     | { ok: false; error: string };
 
+export type BombardResult =
+    | {
+          ok: true;
+          location: LocationEntity;
+          defenderSideId: SideId;
+          combat: CombatResult;
+      }
+    | { ok: false; error: string };
+
 export type GroundOptions = {
     /** Random numbers in [0, 1) for damage rolls; defaults to `Math.random`. */
     rng?: () => number;
+    /**
+     * Turn combat counts against for bombarding ships (`lastCombatTurn`); defaults to 1.
+     */
+    turn?: () => number;
 };
 
 /**
- * Transports, invasions and automatic ground combat. Units board and land only at locations on
- * the transport's hex. Invading needs the orbit free of enemy ships; landing on an undefended
- * enemy location captures it at once, otherwise ground combat is fought in rounds (see
- * `groundRounds`). Wiping out the defenders captures the location; invaders that are wiped out
- * are destroyed; undecided invaders stay aboard their transports. Damage persists on units.
+ * Transports, invasions, orbital bombardment and automatic ground combat. Units board and land
+ * only at locations on the transport's hex. Invading needs the orbit free of enemy ships;
+ * landing on an undefended enemy location captures it at once, otherwise ground combat is
+ * fought in rounds (see `groundRounds`). Wiping out the defenders captures the location;
+ * invaders that are wiped out are destroyed; undecided invaders stay aboard their transports.
+ * Damage persists on units. Bombardment fires one-way from capable ships in orbit and may
+ * destroy installations; it never captures the location.
  */
 export class GroundManager {
     private readonly _entities: EntityManager;
     private readonly _economy: EconomyManager;
     private readonly _rng: () => number;
+    private readonly _turn: () => number;
 
     constructor(entities: EntityManager, economy: EconomyManager, options: GroundOptions = {}) {
         this._entities = entities;
         this._economy = economy;
         this._rng = options.rng ?? Math.random;
+        this._turn = options.turn ?? (() => 1);
     }
 
     /** Board garrisoned units at an owned location on the transport's hex. */
@@ -193,6 +220,120 @@ export class GroundManager {
                 captured
             },
             landedUnitIds: captured ? survivors : []
+        };
+    }
+
+    /**
+     * Fire orbital bombardment from capable ships on an enemy location on their hex. Ships
+     * spend `BOMBARD_COST` movement each. Garrison units take one-way fire; each ship may then
+     * destroy one random installation. Does not capture the location.
+     */
+    bombard(sideId: SideId | null, locationId: EntityId, shipIds: EntityId[]): BombardResult {
+        if (!sideId) return { ok: false, error: "You are not assigned to a side" };
+        const location = this._economy.locationEntity(locationId);
+        if (!location) return { ok: false, error: `Unknown location ${locationId}` };
+        const defenderSideId = location.sideId;
+        if (!defenderSideId) return { ok: false, error: "Unowned locations are colonised" };
+        if (defenderSideId === sideId) return { ok: false, error: "Location is already yours" };
+        if (new Set(shipIds).size !== shipIds.length) {
+            return { ok: false, error: "A ship is listed more than once" };
+        }
+
+        const balance = this._economy.balance;
+        const ships: EntityOf<"ship">[] = [];
+        for (const shipId of shipIds) {
+            const ship = this._entities.getOfKind(shipId, "ship");
+            if (!ship || ship.sideId !== sideId) {
+                return { ok: false, error: `Unknown ship ${shipId}` };
+            }
+            if (ship.carriedBy) {
+                return { ok: false, error: `Ship ${shipId} is aboard a carrier` };
+            }
+            if (!canBombardShip(balance, ship.shipType)) {
+                return {
+                    ok: false,
+                    error: `${SHIP_TYPE_INFO[ship.shipType].name} cannot bombard`
+                };
+            }
+            if (ship.q !== location.q || ship.r !== location.r) {
+                return { ok: false, error: `Ship ${shipId} is not at the location` };
+            }
+            if (ship.movementPoints < BOMBARD_COST) {
+                return { ok: false, error: `Ship ${shipId} has no movement left to bombard` };
+            }
+            ships.push(ship);
+        }
+
+        const units = this._economy.units;
+        const defenders = units.garrisonOf(locationId);
+        const installationsBefore = this._economy.locationEconomy(locationId)?.installations ?? [];
+        if (defenders.length === 0 && installationsBefore.length === 0) {
+            return { ok: false, error: "Nothing to bombard" };
+        }
+
+        const attackerFighters = ships.map((s) => shipFighter(s, "attacker", balance));
+        const defenderFighters = defenders.map((u) => unitFighter(u, "defender", balance));
+        orbitalStrike(attackerFighters, defenderFighters, balance.combat, this._rng);
+
+        const turn = this._turn();
+        for (const ship of ships) {
+            ship.movementPoints -= BOMBARD_COST;
+            ship.lastCombatTurn = turn;
+            delete ship.moveOrder;
+            delete ship.hyperjump;
+            delete ship.hyperdriveCharging;
+        }
+
+        const byId = new Map<EntityId, GroundUnit>(defenders.map((u) => [u.id, u]));
+        for (const f of defenderFighters) {
+            const unit = byId.get(f.id)!;
+            if (f.hp < f.maxHp) unit.hp = f.hp;
+        }
+        const destroyedUnitIds = defenderFighters.filter((f) => !isAlive(f)).map((f) => f.id);
+        this._economy.onUnitsDestroyed(destroyedUnitIds, location);
+
+        const destroyedInstallationIds: EntityId[] = [];
+        const remaining = [
+            ...(this._economy.locationEconomy(locationId)?.installations ?? [])
+        ];
+        for (const _ship of ships) {
+            if (remaining.length === 0) break;
+            if (this._rng() >= balance.combat.bombardmentInstallationChance) continue;
+            const index = Math.floor(this._rng() * remaining.length);
+            const [hit] = remaining.splice(index, 1);
+            if (hit) destroyedInstallationIds.push(hit.id);
+        }
+        this._economy.destroyInstallations(locationId, destroyedInstallationIds);
+
+        const garrisonCleared =
+            defenderFighters.length === 0
+                ? destroyedInstallationIds.length > 0
+                : !defenderFighters.some(isAlive);
+        const outcome: CombatOutcome = garrisonCleared ? "attacker_won" : "inconclusive";
+
+        const hex = { q: location.q, r: location.r };
+        const all = [...attackerFighters, ...defenderFighters];
+        return {
+            ok: true,
+            location,
+            defenderSideId,
+            combat: {
+                kind: "ground",
+                cause: "bombardment",
+                hex,
+                from: { ...hex },
+                attackerSideId: sideId,
+                defenderSideIds: [defenderSideId],
+                participants: all.map(toParticipant),
+                destroyedIds: [],
+                destroyedUnitIds,
+                outcome,
+                attackerMovedIn: false,
+                rounds: 1,
+                locationId,
+                captured: false,
+                destroyedInstallationIds
+            }
         };
     }
 

@@ -17,6 +17,7 @@ export type GameActions = {
     load: (shipId: EntityId, unitIds: EntityId[]) => void;
     unload: (shipId: EntityId, locationId: EntityId, unitIds: EntityId[]) => void;
     invade: (locationId: EntityId, shipIds: EntityId[]) => void;
+    bombard: (locationId: EntityId, shipIds: EntityId[]) => void;
     cancelMoveOrder: (shipId: EntityId) => void;
     hyperjump: (shipId: EntityId, target: AxialCoord) => void;
     cancelHyperjump: (shipId: EntityId) => void;

@@ -46,7 +46,13 @@ type InfoPaneProps = {
     onEndTurn: () => void;
     actions: Pick<
         GameActions,
-        "colonise" | "invade" | "cancelMoveOrder" | "cancelHyperjump" | "loadShips" | "unloadShips"
+        | "colonise"
+        | "invade"
+        | "bombard"
+        | "cancelMoveOrder"
+        | "cancelHyperjump"
+        | "loadShips"
+        | "unloadShips"
     >;
     onOpenLocation: (locationId: string) => void;
 };
@@ -58,6 +64,7 @@ export function InfoPane({ world, onEndTurn, actions, onOpenLocation }: InfoPane
     const ownReady = world.ownSideReady;
     const colonisable = world.colonisableLocation;
     const invasion = world.invasionOption;
+    const bombardment = world.bombardmentOption;
     const focus = world.mapFocus;
     const sides = Object.entries(turn?.sideReady ?? {}).sort(([a], [b]) => a.localeCompare(b));
 
@@ -98,7 +105,7 @@ export function InfoPane({ world, onEndTurn, actions, onOpenLocation }: InfoPane
                     <button
                         type="button"
                         className="info-pane__invade"
-                        title={`Land every unit aboard ${invasion.ships.length} transport${invasion.ships.length === 1 ? "" : "s"} here`}
+                        title={`Land every unit aboard ${invasion.ships.length} ship${invasion.ships.length === 1 ? "" : "s"} here`}
                         onClick={() =>
                             actions.invade(
                                 invasion.location.id,
@@ -107,6 +114,21 @@ export function InfoPane({ world, onEndTurn, actions, onOpenLocation }: InfoPane
                         }
                     >
                         Invade {invasion.location.name ?? KIND_LABELS[invasion.location.kind]}
+                    </button>
+                )}
+                {bombardment && (
+                    <button
+                        type="button"
+                        className="info-pane__bombard"
+                        title={`Orbital bombardment from ${bombardment.ships.length} ship${bombardment.ships.length === 1 ? "" : "s"} (1 MP each)`}
+                        onClick={() =>
+                            actions.bombard(
+                                bombardment.location.id,
+                                bombardment.ships.map((s) => s.id)
+                            )
+                        }
+                    >
+                        Bombard {bombardment.location.name ?? KIND_LABELS[bombardment.location.kind]}
                     </button>
                 )}
                 <button type="button" onClick={onEndTurn} disabled={ownReady || !turn}>
@@ -268,6 +290,16 @@ function HpValue({ hp }: { hp: { hp: number; max: number } }) {
                     style={{ width: `${ratio * 100}%` }}
                 />
             </span>
+        </span>
+    );
+}
+
+function RepairNote({ repair }: { repair: NonNullable<ReturnType<HexWorld["repairOf"]>> }) {
+    return repair.status === "repairing" ? (
+        <span className="info-pane__repair">Repairing +{formatNumber(repair.perTurn)}/turn</span>
+    ) : (
+        <span className="info-pane__repair info-pane__repair--blocked">
+            Repairs resume after a turn out of combat
         </span>
     );
 }
@@ -553,8 +585,9 @@ function EntityDetails({ world, entity }: { world: HexWorld; entity: EntitySumma
         entity.kind === "ship" && isTransport(entity, world.balance)
             ? world.carriedUnitIds(entity).map((id) => world.groundUnit(id))
             : undefined;
-    const hp =
-        entity.kind === "ship" || entity.kind === "supply_ship" ? world.hpOf(entity) : undefined;
+    const mobile = entity.kind === "ship" || entity.kind === "supply_ship";
+    const hp = mobile ? world.hpOf(entity) : undefined;
+    const repair = mobile ? world.repairOf(entity) : undefined;
     const stats =
         entity.kind === "ship" && world.balance
             ? shipStats(entity.shipType, entity.tier ?? 1, world.balance)
@@ -625,6 +658,7 @@ function EntityDetails({ world, entity }: { world: HexWorld; entity: EntitySumma
                                 <dt>Hull</dt>
                                 <dd>
                                     <HpValue hp={hp} />
+                                    {repair && <RepairNote repair={repair} />}
                                 </dd>
                             </div>
                         )}
@@ -703,6 +737,7 @@ function EntityDetails({ world, entity }: { world: HexWorld; entity: EntitySumma
                                 <dt>Hull</dt>
                                 <dd>
                                     <HpValue hp={hp} />
+                                    {repair && <RepairNote repair={repair} />}
                                 </dd>
                             </div>
                         )}

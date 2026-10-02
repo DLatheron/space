@@ -55,6 +55,11 @@ export type BattleOptions = {
     balance?: EconomyBalance;
     /** Random numbers in [0, 1) for evasion and damage rolls; defaults to `Math.random`. */
     rng?: () => number;
+    /**
+     * Turn combat counts against, recorded as `lastCombatTurn` on every participant (see
+     * `TurnManager.combatTurn`); defaults to 1.
+     */
+    turn?: () => number;
 };
 
 function shipsAt(entities: EntityManager, hex: AxialCoord): EntityOf<"ship">[] {
@@ -97,12 +102,14 @@ export class BattleManager {
     private readonly _economy: EconomyManager | undefined;
     private readonly _balance: EconomyBalance;
     private readonly _rng: () => number;
+    private readonly _turn: () => number;
 
     constructor(entities: EntityManager, economy?: EconomyManager, options: BattleOptions = {}) {
         this._entities = entities;
         this._economy = economy;
         this._balance = options.balance ?? economy?.balance ?? defaultEconomyBalance();
         this._rng = options.rng ?? Math.random;
+        this._turn = options.turn ?? (() => 1);
     }
 
     /**
@@ -292,14 +299,18 @@ export class BattleManager {
         };
     }
 
-    /** Write fighters' hp back to their vessels and destroy those at 0 hp. */
+    /**
+     * Write fighters' hp and the combat turn back to their vessels and destroy those at 0 hp.
+     */
     private _apply(
         fighters: readonly Fighter[]
     ): Pick<CombatResult, "destroyedIds" | "destroyedUnitIds"> {
         const lost: Vessel[] = [];
+        const turn = this._turn();
         for (const f of fighters) {
             const vessel = this._entities.get(f.id);
             if (vessel?.kind !== "ship" && vessel?.kind !== "supply_ship") continue;
+            vessel.lastCombatTurn = turn;
             if (!isAlive(f)) {
                 lost.push(vessel);
             } else if (vessel.kind === "ship") {

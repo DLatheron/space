@@ -29,7 +29,7 @@ import {
     sumResources,
     zeroResources
 } from "./Resources.js";
-import { CombatBalance, HangarBalance, SupplyShipBalance } from "./Combat.js";
+import { CombatBalance, HangarBalance, RepairBalance, SupplyShipBalance } from "./Combat.js";
 import { HyperdriveBalance, HyperspaceBalance } from "./Hyperspace.js";
 import { SHIP_TYPE_INFO, shipDef } from "./ShipTypes.js";
 import { maxEnhancementTierFor, missingTechPrerequisite, TechId, TECHS } from "./Tech.js";
@@ -139,6 +139,8 @@ export const ShipBalance = z.object({
     unitCapacity: z.number().int().min(0),
     /** Can be consumed to claim an unowned planet, moon or mineable asteroid on its hex. */
     canColonise: z.boolean(),
+    /** Can orbital-bombard an enemy location on its hex (see `client:bombard`). */
+    canBombard: z.boolean(),
     /** Absent for ship types without a hyperdrive. */
     hyperdrive: HyperdriveBalance.optional(),
     /** Absent for ship types that can't carry ships. */
@@ -185,6 +187,7 @@ export const EconomyBalance = z.object({
     hyperspace: HyperspaceBalance,
     combat: CombatBalance,
     supplyShips: SupplyShipBalance,
+    repair: RepairBalance,
     groundUnits: z.record(GroundUnitType, GroundUnitBalance),
     groundUnitTiers: z.object({
         attackBonus: PerTier(z.number().int()),

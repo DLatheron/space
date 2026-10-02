@@ -53,7 +53,14 @@ const TECH_IMAGES: Partial<Record<TechId, string>> = {
     advanced_shipyard: "research/advanced-shipbuilding.jpg",
     transports: "research/troop-transports.webp",
     enhancement_tier_2: "research/refits.jpg",
-    enhancement_tier_3: "research/advanced-refits.jpg"
+    enhancement_tier_3: "research/advanced-refits.jpg",
+    hyperdrive_calibration_1: "research/hyperdrive-calibration-i.jpg",
+    hyperdrive_calibration_2: "research/hyperdrive-calibration-ii.avif",
+    evasive_manoeuvres_1: "research/evasive-manoeuvres-i.jpg",
+    evasive_manoeuvres_2: "research/evasive-manoeuvres-ii.jpg",
+    armoured_freighters: "research/armoured-freighters.jpg",
+    damage_control_1: "research/damage-control-i.webp",
+    damage_control_2: "research/damage-control-ii.webp"
 };
 
 export type ImageSubject =

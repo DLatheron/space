@@ -624,6 +624,31 @@ export class EconomyManager {
         return { ok: true };
     }
 
+    /**
+     * Destroy installations at a location (e.g. orbital bombardment). Borrowed population goes
+     * home; enhancements targeting them are cancelled. Unknown ids are ignored.
+     */
+    destroyInstallations(locationId: EntityId, installationIds: readonly EntityId[]): void {
+        if (installationIds.length === 0) return;
+        const location = this.locationEntity(locationId);
+        if (!location?.sideId) return;
+        const record = this._record(locationId);
+        const wanted = new Set(installationIds);
+        const removed = record.installations.filter((i) => wanted.has(i.id));
+        if (removed.length === 0) return;
+        const keep = record.installations.filter((i) => !wanted.has(i.id));
+        record.installations = keep;
+        for (const installation of removed) {
+            this._cancelEnhancementsFor("installation", installation.id);
+            this.releasePopulation({
+                sideId: location.sideId,
+                amount: structureDef(installation.type, this._balance).cost.population,
+                homeId: installation.populationFrom,
+                from: { q: location.q, r: location.r }
+            });
+        }
+    }
+
     private _checkEnhancementTarget(
         sideId: SideId,
         location: LocationEntity,

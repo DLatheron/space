@@ -1,11 +1,14 @@
 import { z } from "zod";
-import type { EconomyBalance } from "./Economy.js";
+import type { EconomyBalance, StructureType } from "./Economy.js";
 import { GroundUnitType } from "./GroundUnitTypes.js";
 import { AxialCoord, EnhancementTier, EntityId, ShipType, SideId } from "./PrimitiveTypes.js";
 import type { TechId } from "./Tech.js";
 
 /** Movement points a ship spends boarding a carrier's hangar; unloading is free. */
 export const HANGAR_LOAD_COST = 1;
+
+/** Movement points a ship spends for one orbital bombardment action. */
+export const BOMBARD_COST = 1;
 
 /** Present on ship types that can carry other ships. */
 export const HangarBalance = z.object({
@@ -25,7 +28,12 @@ export const CombatBalance = z.object({
     /** Damage is scaled by `defenceScale / (defenceScale + target defence)`. */
     defenceScale: z.number().positive(),
     /** Ground combat rounds before an undecided invasion re-embarks. */
-    groundMaxRounds: z.number().int().min(1)
+    groundMaxRounds: z.number().int().min(1),
+    /**
+     * Chance (0-1) each bombarding ship destroys one random installation after firing on the
+     * garrison (independent rolls; see `GroundManager.bombard`).
+     */
+    bombardmentInstallationChance: z.number().min(0).max(1)
 });
 export type CombatBalance = z.infer<typeof CombatBalance>;
 
@@ -53,6 +61,72 @@ export const SupplyShipBalance = z.object({
 });
 export type SupplyShipBalance = z.infer<typeof SupplyShipBalance>;
 
+/**
+ * Out-of-combat repair of ships and supply ships (see `shipRepairPerTurn`). Fractions are of
+ * the vessel's max hp per end of turn and add together.
+ */
+export const RepairBalance = z.object({
+    baseFraction: z.number().min(0).max(1),
+    /** Least hp regained per turn by a damaged vessel that is repairing. */
+    minPerTurn: z.number().int().min(0),
+    /** Added per known tech. */
+    techBonus: z.object({
+        damage_control_1: z.number().min(0).max(1),
+        damage_control_2: z.number().min(0).max(1)
+    }),
+    /** Added on the hex of a location its side owns with a Shipyard or Advanced Shipyard. */
+    atOwnedShipyardBonus: z.number().min(0).max(1),
+    /** Added while aboard a carrier's hangar. */
+    carriedBonus: z.number().min(0).max(1)
+});
+export type RepairBalance = z.infer<typeof RepairBalance>;
+
+/** Installations that give `RepairBalance.atOwnedShipyardBonus` at their location. */
+export const REPAIR_YARD_STRUCTURES = [
+    "shipyard",
+    "advanced_shipyard"
+] as const satisfies readonly StructureType[];
+
+export type RepairContext = {
+    /** On the hex of an owned location with a Shipyard or Advanced Shipyard. */
+    atOwnedShipyard?: boolean;
+    /** Aboard a carrier. */
+    carried?: boolean;
+};
+
+/**
+ * Whether a vessel last in combat on `lastCombatTurn` repairs at the end of `endingTurn`: it
+ * must have had no combat during that whole turn (combat during an end of turn counts against
+ * the turn that is ending).
+ */
+export function repairsAtEndOf(lastCombatTurn: number | undefined, endingTurn: number): boolean {
+    return lastCombatTurn === undefined || lastCombatTurn < endingTurn;
+}
+
+/**
+ * Hp a vessel at `hp` of `maxHp` regains at an end of turn it is eligible to repair (see
+ * `repairsAtEndOf`): `round(maxHp * fraction)`, at least `minPerTurn`, capped at the missing hp,
+ * where `fraction` is `baseFraction` plus the known techs' and the context's bonuses. 0 when
+ * undamaged or destroyed.
+ */
+export function shipRepairPerTurn(
+    balance: EconomyBalance,
+    hp: number,
+    maxHp: number,
+    techs: readonly TechId[],
+    context: RepairContext = {}
+): number {
+    if (hp <= 0 || hp >= maxHp) return 0;
+    const repair = balance.repair;
+    const bonuses = repair.techBonus as Partial<Record<TechId, number>>;
+    let fraction = repair.baseFraction;
+    for (const tech of techs) fraction += bonuses[tech] ?? 0;
+    if (context.atOwnedShipyard) fraction += repair.atOwnedShipyardBonus;
+    if (context.carried) fraction += repair.carriedBonus;
+    const amount = Math.max(repair.minPerTurn, Math.round(maxHp * fraction));
+    return Math.min(amount, maxHp - hp);
+}
+
 export function hangarFor(balance: EconomyBalance, shipType: ShipType): HangarBalance | undefined {
     return balance.ships[shipType].hangar;
 }
@@ -65,6 +139,11 @@ export function canCarryShip(
 ): boolean {
     const hangar = hangarFor(balance, carrierType);
     return !!hangar && hangar.capacity > 0 && hangar.carries.includes(shipType);
+}
+
+/** Whether `shipType` can orbital-bombard enemy locations. */
+export function canBombardShip(balance: EconomyBalance, shipType: ShipType): boolean {
+    return balance.ships[shipType].canBombard;
 }
 
 /** Supply ship hp, defence and evasion for a side knowing `techs`. */
@@ -108,9 +187,10 @@ export type CombatKind = z.infer<typeof CombatKind>;
 /**
  * `move`: a ship's manual move ran into enemies; `ambush`: a supply ship stepped towards
  * enemy warships it didn't know about and they attacked it; `hyperjump`: a ship landed among
- * enemies; `invasion`: ground units landed on a location.
+ * enemies; `invasion`: ground units landed on a location; `bombardment`: ships in orbit fired
+ * on a location's garrison and installations.
  */
-export const CombatCause = z.enum(["move", "ambush", "hyperjump", "invasion"]);
+export const CombatCause = z.enum(["move", "ambush", "hyperjump", "invasion", "bombardment"]);
 export type CombatCause = z.infer<typeof CombatCause>;
 
 export const CombatOutcome = z.enum(["attacker_won", "attacker_destroyed", "inconclusive"]);
@@ -167,6 +247,8 @@ export const CombatResult = z.object({
     /** Ground combat: the invaded location and whether the attacker captured it. */
     locationId: EntityId.optional(),
     captured: z.boolean().optional(),
+    /** Bombardment: installations destroyed on the target location. */
+    destroyedInstallationIds: z.array(EntityId).optional(),
     /** Hyperjump: where a jumper that didn't clear the hex was moved to. */
     displacedTo: AxialCoord.optional()
 });
