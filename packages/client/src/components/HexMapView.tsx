@@ -21,6 +21,7 @@ export function HexMapView({ world, onAction }: HexMapViewProps) {
     const onActionRef = useRef(onAction);
     const pointerDown = useRef(false);
     const dragging = useRef(false);
+    const button = useRef(0);
     const start = useRef<{ x: number; y: number } | null>(null);
     const last = useRef<{ x: number; y: number } | null>(null);
 
@@ -91,8 +92,10 @@ export function HexMapView({ world, onAction }: HexMapViewProps) {
         };
 
         const onPointerDown = (e: PointerEvent) => {
-            if (e.button !== 0) return;
+            if (e.button !== 0 && e.button !== 2) return;
+            if (pointerDown.current) return;
             pointerDown.current = true;
+            button.current = e.button;
             dragging.current = false;
             start.current = { x: e.clientX, y: e.clientY };
             last.current = { x: e.clientX, y: e.clientY };
@@ -133,11 +136,16 @@ export function HexMapView({ world, onAction }: HexMapViewProps) {
             return wasClick;
         };
         const onPointerUp = (e: PointerEvent) => {
-            if (!endPointer(e)) {
+            const sameButton = e.button === button.current;
+            if (!endPointer(e) || !sameButton) {
                 updateHover(e);
                 return;
             }
-            const action = world.handleClick(screenFromEvent(e), canvas);
+            const screen = screenFromEvent(e);
+            const action =
+                e.button === 2
+                    ? world.handleCommandClick(screen, canvas)
+                    : world.handleClick(screen, canvas);
             onActionRef.current?.(action);
             updateHover(e);
         };
@@ -171,6 +179,9 @@ export function HexMapView({ world, onAction }: HexMapViewProps) {
             parallaxRef.current.zoomAt(factor, screen.x, screen.y);
         };
 
+        const onContextMenu = (e: MouseEvent) => e.preventDefault();
+
+        canvas.addEventListener("contextmenu", onContextMenu);
         canvas.addEventListener("pointerdown", onPointerDown);
         canvas.addEventListener("pointermove", onPointerMove);
         canvas.addEventListener("pointerup", onPointerUp);
@@ -180,6 +191,7 @@ export function HexMapView({ world, onAction }: HexMapViewProps) {
         window.addEventListener("keydown", onKeyDown);
 
         return () => {
+            canvas.removeEventListener("contextmenu", onContextMenu);
             canvas.removeEventListener("pointerdown", onPointerDown);
             canvas.removeEventListener("pointermove", onPointerMove);
             canvas.removeEventListener("pointerup", onPointerUp);
@@ -210,8 +222,8 @@ export function HexMapView({ world, onAction }: HexMapViewProps) {
                     {targeting && (
                         <div className="hex-map-view__banner hex-map-view__banner--targeting">
                             <span>
-                                Hyperdrive targeting: click an explored hex within range to jump
-                                to · Esc to cancel
+                                Hyperdrive targeting: right-click an explored hex within range to
+                                jump to · Esc to cancel
                             </span>
                             <button type="button" onClick={() => world.cancelHyperjumpTargeting()}>
                                 Cancel
@@ -231,8 +243,8 @@ export function HexMapView({ world, onAction }: HexMapViewProps) {
             )}
             <div className="hex-map-view__hint">
                 {world.selectedShipId
-                    ? "Click any explored hex to move there (multi-turn routes continue at end of turn) · Click the ship's hex to cycle · Esc to deselect"
-                    : "Drag to pan · Scroll to zoom · Click to select / inspect (again to cycle) · Esc to clear"}
+                    ? "Right-click any explored hex to move there (multi-turn routes continue at end of turn) · Left-click to select (again to cycle) · Esc to deselect"
+                    : "Drag (either button) to pan · Scroll to zoom · Left-click to select / inspect (again to cycle) · Esc to clear"}
             </div>
         </div>
     );

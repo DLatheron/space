@@ -1363,12 +1363,12 @@ export class HexWorld {
         return this.isOnMap(hex.q, hex.r) ? hex : null;
     }
 
-    /** Decide what a click (not drag) at `screen` should do; selection changes are applied here. */
+    /**
+     * Selection click (left button, not a drag) at `screen`: selects, cycles or inspects what
+     * is there, or deselects on an empty hex; never orders a ship. Applied here.
+     */
     handleClick(screen: Pixel, canvas: HTMLCanvasElement): HexClickAction {
         const hex = this.pickHex(screen, canvas);
-        if (this.hyperjumpTargetingId) {
-            return this._targetingClick(hex);
-        }
         if (!hex) {
             return this._deselect();
         }
@@ -1376,8 +1376,8 @@ export class HexWorld {
         const tile = this._tiles.get(hexKey(hex.q, hex.r));
         const entities = tile?.entities.filter((e) => !isCarried(e)) ?? [];
 
-        // Clicking the hex of the current selection cycles through everything on it
-        // (never a move order); a lone selected ship stays selected (Escape deselects).
+        // Clicking the hex of the current selection cycles through everything on it; a lone
+        // selected ship stays selected.
         const cycle = this.clickCycle(entities);
         const index = cycle.findIndex(
             (e) => e.id === (this.selectedShipId ?? this.inspectedEntityId)
@@ -1387,33 +1387,6 @@ export class HexWorld {
         }
         if (index >= 0 && this.selectedShipId) {
             return { type: "none" };
-        }
-
-        // With a ship selected, any other hex is a destination, even one holding our own
-        // ships or locations: the ship goes as far as its MP allow now and the server keeps
-        // the rest as a move order.
-        const ship = this.selectedShip;
-        if (ship) {
-            if (!tile) {
-                return { type: "rejected", reason: "Ships can only be sent to explored hexes" };
-            }
-            if (ship.hyperdriveCharging) {
-                return {
-                    type: "rejected",
-                    reason: "Hyperdrive engaged: cancel the jump to move normally"
-                };
-            }
-            const move: HexClickAction = {
-                type: "move",
-                shipId: ship.id,
-                to: { q: hex.q, r: hex.r }
-            };
-            // A destination beyond this turn's reach leaves a standing order; deselect so
-            // the destination picker doesn't look like it still needs dismissing.
-            const route = this.previewRoute(hex);
-            const steps = Math.floor(ship.movementPoints / MOVE_COST_PER_HEX);
-            if (!route || route.length > steps) this._deselect();
-            return move;
         }
 
         const ownShip = cycle[0];
@@ -1426,7 +1399,44 @@ export class HexWorld {
         return first ? this._pick(first, true) : this._deselect();
     }
 
-    /** While targeting, a click on an explored hex picks the jump target; nothing else changes. */
+    /**
+     * Command click (right button, not a drag) at `screen` for the selected ship: the jump
+     * target while targeting, otherwise a move to any other explored hex (the ship goes as
+     * far as its MP allow now and the server keeps the rest as a move order). Does nothing
+     * without a selected ship.
+     */
+    handleCommandClick(screen: Pixel, canvas: HTMLCanvasElement): HexClickAction {
+        const hex = this.pickHex(screen, canvas);
+        if (this.hyperjumpTargetingId) {
+            return this._targetingClick(hex);
+        }
+        const ship = this.selectedShip;
+        if (!ship || !hex || (hex.q === ship.q && hex.r === ship.r)) {
+            return { type: "none" };
+        }
+        if (!this._tiles.has(hexKey(hex.q, hex.r))) {
+            return { type: "rejected", reason: "Ships can only be sent to explored hexes" };
+        }
+        if (ship.hyperdriveCharging) {
+            return {
+                type: "rejected",
+                reason: "Hyperdrive engaged: cancel the jump to move normally"
+            };
+        }
+        const move: HexClickAction = {
+            type: "move",
+            shipId: ship.id,
+            to: { q: hex.q, r: hex.r }
+        };
+        // A destination beyond this turn's reach leaves a standing order; deselect so
+        // the destination picker doesn't look like it still needs dismissing.
+        const route = this.previewRoute(hex);
+        const steps = Math.floor(ship.movementPoints / MOVE_COST_PER_HEX);
+        if (!route || route.length > steps) this._deselect();
+        return move;
+    }
+
+    /** While targeting, a command click on an explored hex picks the jump target. */
     private _targetingClick(hex: Axial | null): HexClickAction {
         const ship = this.hyperjumpTargeting;
         if (!ship) {

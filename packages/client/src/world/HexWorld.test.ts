@@ -64,6 +64,10 @@ function click(world: HexWorld, q: number, r: number) {
     return world.handleClick(world.worldToScreen(axialToPixel(q, r, 50), canvas), canvas);
 }
 
+function rightClick(world: HexWorld, q: number, r: number) {
+    return world.handleCommandClick(world.worldToScreen(axialToPixel(q, r, 50), canvas), canvas);
+}
+
 describe("HexWorld.handleClick", () => {
     it("cycles from our ship to the planet sharing its hex and back", () => {
         const world = makeWorld([planet, ship("ship-1", 2, 2)]);
@@ -76,10 +80,10 @@ describe("HexWorld.handleClick", () => {
         expect(click(world, 2, 2)).toEqual({ type: "select", shipId: "ship-1" });
     });
 
-    it("still moves the selected ship when another hex is clicked", () => {
+    it("moves the selected ship when another hex is right-clicked", () => {
         const world = makeWorld([planet, ship("ship-1", 2, 2)]);
         click(world, 2, 2);
-        expect(click(world, 3, 2)).toEqual({
+        expect(rightClick(world, 3, 2)).toEqual({
             type: "move",
             shipId: "ship-1",
             to: { q: 3, r: 2 }
@@ -99,14 +103,36 @@ describe("HexWorld.handleClick", () => {
     it("orders the selected ship onto hexes holding our other ships and locations", () => {
         const world = makeWorld([planet, ship("ship-1", 1, 1), ship("ship-2", 3, 1)]);
         click(world, 1, 1);
-        expect(click(world, 3, 1)).toEqual({ type: "move", shipId: "ship-1", to: { q: 3, r: 1 } });
+        expect(rightClick(world, 3, 1)).toEqual({
+            type: "move",
+            shipId: "ship-1",
+            to: { q: 3, r: 1 }
+        });
         expect(world.selectedShipId).toBe("ship-1");
-        expect(click(world, 2, 2)).toEqual({ type: "move", shipId: "ship-1", to: { q: 2, r: 2 } });
+        expect(rightClick(world, 2, 2)).toEqual({
+            type: "move",
+            shipId: "ship-1",
+            to: { q: 2, r: 2 }
+        });
         expect(world.selectedShipId).toBe("ship-1");
+    });
 
-        // Selecting elsewhere takes a deselect (Escape) first.
-        world.selectShip(null);
+    it("always selects on left click, even with a ship selected", () => {
+        const world = makeWorld([planet, ship("ship-1", 1, 1), ship("ship-2", 3, 1)]);
+        click(world, 1, 1);
         expect(click(world, 3, 1)).toEqual({ type: "select", shipId: "ship-2" });
+        expect(click(world, 2, 2)).toEqual({ type: "open-location", locationId: "planet-1" });
+        expect(click(world, 4, 4)).toEqual({ type: "deselect" });
+        expect(world.selectedShipId).toBeNull();
+        expect(world.inspectedEntityId).toBeNull();
+    });
+
+    it("ignores right clicks without a selected ship or on its own hex", () => {
+        const world = makeWorld([planet, ship("ship-1", 1, 1)]);
+        expect(rightClick(world, 2, 2)).toEqual({ type: "none" });
+        click(world, 1, 1);
+        expect(rightClick(world, 1, 1)).toEqual({ type: "none" });
+        expect(world.selectedShipId).toBe("ship-1");
     });
 
     it("cycles through everything on the selected ship's hex", () => {
@@ -128,32 +154,44 @@ describe("HexWorld.handleClick", () => {
     it("sends a long-range move to an explored hex beyond this turn's movement", () => {
         const world = makeWorld([planet, ship("ship-1", 0, 0, { movementPoints: 1 })]);
         click(world, 0, 0);
-        expect(click(world, 4, 4)).toEqual({ type: "move", shipId: "ship-1", to: { q: 4, r: 4 } });
+        expect(rightClick(world, 4, 4)).toEqual({
+            type: "move",
+            shipId: "ship-1",
+            to: { q: 4, r: 4 }
+        });
         // Leaving a standing order deselects the ship.
         expect(world.selectedShipId).toBeNull();
         // A far location is a destination too while a ship is selected.
         click(world, 0, 0);
-        expect(click(world, 2, 2)).toEqual({ type: "move", shipId: "ship-1", to: { q: 2, r: 2 } });
+        expect(rightClick(world, 2, 2)).toEqual({
+            type: "move",
+            shipId: "ship-1",
+            to: { q: 2, r: 2 }
+        });
         expect(world.selectedShipId).toBeNull();
     });
 
     it("stores a move order even with no movement left", () => {
         const world = makeWorld([ship("ship-1", 0, 0, { movementPoints: 0 })]);
         click(world, 0, 0);
-        expect(click(world, 3, 1)).toEqual({ type: "move", shipId: "ship-1", to: { q: 3, r: 1 } });
+        expect(rightClick(world, 3, 1)).toEqual({
+            type: "move",
+            shipId: "ship-1",
+            to: { q: 3, r: 1 }
+        });
     });
 
     it("rejects moves into unexplored hexes without changing the selection", () => {
         const world = makeWorld([ship("ship-1", 1, 1)]);
         click(world, 1, 1);
-        expect(click(world, 6, 2)).toMatchObject({ type: "rejected" });
+        expect(rightClick(world, 6, 2)).toMatchObject({ type: "rejected" });
         expect(world.selectedShipId).toBe("ship-1");
     });
 
     it("rejects normal moves while the hyperdrive is charging", () => {
         const world = makeWorld([ship("ship-1", 1, 1, { hyperdriveCharging: true })]);
         click(world, 1, 1);
-        expect(click(world, 2, 1)).toMatchObject({ type: "rejected" });
+        expect(rightClick(world, 2, 1)).toMatchObject({ type: "rejected" });
     });
 
     it("previews routes through explored hexes only", () => {
@@ -437,13 +475,13 @@ describe("HexWorld repair outlook", () => {
 });
 
 describe("HexWorld hyperjump targeting", () => {
-    it("sends the next click on an explored hex as the jump target", () => {
+    it("sends the next right click on an explored hex as the jump target", () => {
         const world = makeWorld([planet, ship("ship-1", 1, 1)]);
         world.startHyperjumpTargeting("ship-1");
         expect(world.selectedShipId).toBe("ship-1");
         expect(world.hyperjumpTargeting?.id).toBe("ship-1");
 
-        expect(click(world, 2, 2)).toEqual({
+        expect(rightClick(world, 2, 2)).toEqual({
             type: "hyperjump",
             shipId: "ship-1",
             target: { q: 2, r: 2 }
@@ -455,11 +493,11 @@ describe("HexWorld hyperjump targeting", () => {
     it("stays in targeting mode after clicks on unexplored hexes or the ship's own hex", () => {
         const world = makeWorld([ship("ship-1", 1, 1), ship("ship-2", 3, 3)]);
         world.startHyperjumpTargeting("ship-1");
-        expect(click(world, 6, 1)).toMatchObject({ type: "rejected" });
-        expect(click(world, 1, 1)).toMatchObject({ type: "rejected" });
+        expect(rightClick(world, 6, 1)).toMatchObject({ type: "rejected" });
+        expect(rightClick(world, 1, 1)).toMatchObject({ type: "rejected" });
         expect(world.hyperjumpTargeting?.id).toBe("ship-1");
         // Another of our ships' hexes is a target rather than a selection.
-        expect(click(world, 3, 3)).toEqual({
+        expect(rightClick(world, 3, 3)).toEqual({
             type: "hyperjump",
             shipId: "ship-1",
             target: { q: 3, r: 3 }
@@ -472,10 +510,20 @@ describe("HexWorld hyperjump targeting", () => {
         world.startHyperjumpTargeting("ship-1");
         world.cancelHyperjumpTargeting();
         expect(world.hyperjumpTargeting).toBeUndefined();
-        expect(click(world, 2, 1)).toEqual({ type: "move", shipId: "ship-1", to: { q: 2, r: 1 } });
+        expect(rightClick(world, 2, 1)).toEqual({
+            type: "move",
+            shipId: "ship-1",
+            to: { q: 2, r: 1 }
+        });
 
         world.startHyperjumpTargeting("ship-1");
         world.selectShip("ship-2");
+        expect(world.hyperjumpTargetingId).toBeNull();
+
+        // A left click selecting another ship also ends targeting.
+        world.selectShip("ship-1");
+        world.startHyperjumpTargeting("ship-1");
+        expect(click(world, 3, 3)).toEqual({ type: "select", shipId: "ship-2" });
         expect(world.hyperjumpTargetingId).toBeNull();
     });
 
@@ -489,13 +537,13 @@ describe("HexWorld hyperjump targeting", () => {
         const world = makeWorld([ship("ship-1", 1, 1)], balance);
         expect(world.jumpRange()).toBeCloseTo(2.41, 2);
         world.startHyperjumpTargeting("ship-1");
-        expect(click(world, 4, 1)).toEqual({
+        expect(rightClick(world, 4, 1)).toEqual({
             type: "rejected",
             reason: "Beyond hyperdrive range (2.4 hexes)"
         });
-        expect(click(world, 3, 3)).toMatchObject({ type: "rejected" });
+        expect(rightClick(world, 3, 3)).toMatchObject({ type: "rejected" });
         expect(world.hyperjumpTargeting?.id).toBe("ship-1");
-        expect(click(world, 3, 1)).toEqual({
+        expect(rightClick(world, 3, 1)).toEqual({
             type: "hyperjump",
             shipId: "ship-1",
             target: { q: 3, r: 1 }

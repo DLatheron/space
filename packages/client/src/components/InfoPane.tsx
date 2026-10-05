@@ -128,7 +128,8 @@ export function InfoPane({ world, onEndTurn, actions, onOpenLocation }: InfoPane
                             )
                         }
                     >
-                        Bombard {bombardment.location.name ?? KIND_LABELS[bombardment.location.kind]}
+                        Bombard{" "}
+                        {bombardment.location.name ?? KIND_LABELS[bombardment.location.kind]}
                     </button>
                 )}
                 <button type="button" onClick={onEndTurn} disabled={ownReady || !turn}>
@@ -433,9 +434,8 @@ function ShipOrders({
             {hyperdrive && blocked && <p className="info-pane__hint">{blocked}</p>}
             {targeting && (
                 <p className="info-pane__hint">
-                    Click an explored hex inside the dashed range circle. The jump may scatter
-                    up to{" "}
-                    {plural(MAX_SCATTER_RING, "hex")} from the target.
+                    Right-click an explored hex inside the dashed range circle. The jump may scatter
+                    up to {plural(MAX_SCATTER_RING, "hex")} from the target.
                 </p>
             )}
         </div>
