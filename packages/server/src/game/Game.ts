@@ -11,7 +11,9 @@ import {
     OrderId,
     QueueDirection,
     ServerToClientMessage,
-    SideId
+    SideId,
+    SpaceStructureType,
+    spaceStructureStats
 } from "@space/shared-data";
 import { CastToArray, Logger, MessageManager } from "@space/misc";
 import { Client } from "./Client.js";
@@ -33,7 +35,9 @@ import {
 } from "./MoveOrderManager.js";
 import { RepairManager } from "./RepairManager.js";
 import { ResearchManager } from "./ResearchManager.js";
-import { Side, type VisibilityDiff } from "./Side.js";
+import { DEFAULT_SITE_VISION_RANGE, Side, type VisibilityDiff } from "./Side.js";
+import type { EntityOf } from "./map/types.js";
+import { SpaceStructureManager, type StargateEvent } from "./SpaceStructureManager.js";
 import { SupplyManager, type SupplyKnowledge } from "./SupplyManager.js";
 import { TurnManager, type EndTurnResult } from "./TurnManager.js";
 
@@ -50,6 +54,11 @@ function randomSegment(length: number): string {
 
 function generateGameId(): GameId {
     return `${randomSegment(4)}-${randomSegment(4)}`;
+}
+
+/** Entities a combat removed from the map: ships and supply ships, then space structures. */
+function combatRemovals(combat: CombatResult): EntityId[] {
+    return [...combat.destroyedIds, ...(combat.destroyedStructureIds ?? [])];
 }
 
 export type GameOptions = {
@@ -89,6 +98,7 @@ export class Game {
     private readonly _moveOrders: MoveOrderManager;
     private readonly _hyperspace: HyperspaceManager;
     private readonly _carriers: CarrierManager;
+    private readonly _structures: SpaceStructureManager;
     private _isDestroying = false;
     private _nextSideIndex = 0;
 
@@ -132,6 +142,10 @@ export class Game {
             turn: () => this._turns.combatTurn
         });
         this._carriers = new CarrierManager(this._entities, this._economy.balance);
+        this._structures = new SpaceStructureManager(this._entities, this._economy, {
+            rng: options.rng,
+            turn: () => this._turns.combatTurn
+        });
         this._supply = new SupplyManager(this._entities, this._economy, {
             battles: this._battles,
             knowledge: (sideId) => this._supplyKnowledge(sideId)
@@ -159,12 +173,18 @@ export class Game {
             {
                 hyperspace: this._hyperspace,
                 moveOrders: this._moveOrders,
-                repairs: new RepairManager(this._entities, this._economy)
+                repairs: new RepairManager(this._entities, this._economy),
+                structures: this._structures
             }
         );
 
         for (const side of this._sides.values()) {
-            side.recomputeVisibility(this._entities, config.visionRange, config.supplyVisionRange);
+            side.recomputeVisibility(
+                this._entities,
+                config.visionRange,
+                config.supplyVisionRange,
+                this._structureVision
+            );
             if (config.revealMap) {
                 side.exploreAll(this._entities);
             }
@@ -246,6 +266,20 @@ export class Game {
     get carriers(): CarrierManager {
         return this._carriers;
     }
+
+    get structures(): SpaceStructureManager {
+        return this._structures;
+    }
+
+    /** Sight range of a space structure: its tier's range once built, a site's neighbours before. */
+    private readonly _structureVision = (structure: EntityOf<"space_structure">): number =>
+        structure.constructing
+            ? DEFAULT_SITE_VISION_RANGE
+            : spaceStructureStats(
+                  structure.structureType,
+                  structure.tier ?? 1,
+                  this._economy.balance
+              ).visionRange;
 
     side(sideId: SideId): Side | undefined {
         return this._sides.get(sideId);
@@ -355,6 +389,61 @@ export class Game {
         this._messageManager.registerHandler("client:bombard", (_context, payload, from) => {
             this._handleBombard(from, payload.locationId, payload.shipIds);
         });
+
+        this._messageManager.registerHandler(
+            "client:builder:construct",
+            (_context, payload, from) => {
+                this._handleConstruct(from, payload.shipId, payload.structureType);
+            }
+        );
+
+        this._messageManager.registerHandler("client:ship:stargate", (_context, payload, from) => {
+            this._handleStargate(from, payload.shipId, payload.gateId);
+        });
+    }
+
+    private _handleConstruct(client: Client, shipId: EntityId, type: SpaceStructureType) {
+        const result = this._structures.construct(client.sideId, shipId, type);
+        if (!result.ok) return this._reject(client, "construct", result.error);
+        const { structure } = result;
+        this.logger.info("Side", client.sideId, "started", type, structure.id, "at", structure);
+        this._refreshVisibility([axialKey(structure.q, structure.r)]);
+        this._sendEconomyState(client.sideId!);
+    }
+
+    private _handleStargate(client: Client, shipId: EntityId, gateId: EntityId) {
+        const result = this._structures.stargate(client.sideId, shipId, gateId);
+        if (!result.ok) return this._reject(client, "stargate", result.error);
+        this.logger.info("Ship", shipId, "used Stargate", result.fromGateId, "->", gateId);
+        this._broadcastStargate(result);
+        this._refreshVisibility([
+            axialKey(result.from.q, result.from.r),
+            axialKey(result.to.q, result.to.r)
+        ]);
+        this._sendEconomyState(result.sideId);
+    }
+
+    /** Sent before the tiles update to the owner and sides that can see either gate. */
+    private _broadcastStargate(event: StargateEvent) {
+        const message: ServerToClientMessage = {
+            type: "server:ship:stargated",
+            payload: {
+                shipId: event.shipId,
+                from: event.from,
+                to: event.to,
+                fromGateId: event.fromGateId,
+                toGateId: event.toGateId
+            }
+        };
+        for (const side of this._sides.values()) {
+            if (
+                side.id === event.sideId ||
+                side.seesAll([event.from]) ||
+                side.seesAll([event.to])
+            ) {
+                this.broadcastToSide(side.id, message);
+            }
+        }
     }
 
     /** What a side believes about a hex for supply routing. */
@@ -425,7 +514,7 @@ export class Game {
             touched.push(axialKey(combat.hex.q, combat.hex.r));
             touched.push(axialKey(combat.from.q, combat.from.r));
         }
-        this._refreshVisibility(touched, combat?.destroyedIds ?? []);
+        this._refreshVisibility(touched, combat ? combatRemovals(combat) : []);
         const economyChanged = !!ship && this._economy.onShipMoved(ship);
         if (combat) {
             for (const sideId of this._combatSides(combat)) this._sendEconomyState(sideId);
@@ -537,7 +626,7 @@ export class Game {
      * After an advance: hyperspace jumps with their landing combats, move order steps, supply
      * ship moves and ambushes (each visibility-filtered), then tiles and every side's economy.
      */
-    private _broadcastAdvance({ jumps, orders, economy, supply }: EndTurnResult) {
+    private _broadcastAdvance({ jumps, orders, economy, supply, ranged }: EndTurnResult) {
         if (economy && economy.completed.length > 0) {
             this.logger.info("Builds completed", economy.completed);
         }
@@ -550,7 +639,10 @@ export class Game {
                 touched.push(axialKey(jump.from.q, jump.from.r), axialKey(jump.to.q, jump.to.r));
                 if (jump.displacedTo)
                     touched.push(axialKey(jump.displacedTo.q, jump.displacedTo.r));
-                removed.push(...jump.destroyedIds, ...(jump.combat?.destroyedIds ?? []));
+                removed.push(
+                    ...jump.destroyedIds,
+                    ...(jump.combat ? combatRemovals(jump.combat) : [])
+                );
             }
         }
         if (orders) {
@@ -586,19 +678,39 @@ export class Game {
                 this._broadcastCombat(combat);
                 touched.push(axialKey(combat.hex.q, combat.hex.r));
                 touched.push(axialKey(combat.from.q, combat.from.r));
-                removed.push(...combat.destroyedIds);
+                removed.push(...combatRemovals(combat));
             }
             for (const arrival of supply.arrivals) {
                 touched.push(axialKey(arrival.at.q, arrival.at.r));
                 if (!arrival.waiting) removed.push(arrival.supplyShipId);
             }
+            for (const hop of supply.stargates) {
+                this._broadcastStargate({
+                    shipId: hop.ship.id,
+                    sideId: hop.ship.sideId,
+                    from: hop.from,
+                    to: hop.to,
+                    fromGateId: hop.fromGateId,
+                    toGateId: hop.toGateId
+                });
+                touched.push(axialKey(hop.from.q, hop.from.r), axialKey(hop.to.q, hop.to.r));
+            }
         }
-        // Ship hexes (spawns included) are resent so clients see restored MP.
-        for (const vessel of [
+        for (const combat of ranged ?? []) {
+            this.logger.info("Ranged fire", combat.outcome, "at", combat.hex, combat.destroyedIds);
+            this._broadcastCombat(combat);
+            touched.push(axialKey(combat.hex.q, combat.hex.r));
+            touched.push(axialKey(combat.from.q, combat.from.r));
+            removed.push(...combatRemovals(combat));
+        }
+        // Ship hexes (spawns included) are resent so clients see restored MP; structure hexes
+        // so completions, upgrades and repairs show.
+        for (const entity of [
             ...this._entities.ofKind("ship"),
-            ...this._entities.ofKind("supply_ship")
+            ...this._entities.ofKind("supply_ship"),
+            ...this._entities.ofKind("space_structure")
         ]) {
-            touched.push(axialKey(vessel.q, vessel.r));
+            touched.push(axialKey(entity.q, entity.r));
         }
         for (const unit of economy?.spawnedUnits ?? []) {
             const location =
@@ -632,17 +744,25 @@ export class Game {
             "at",
             locationId
         );
-        const location = this._economy.locationEntity(locationId);
-        if (location && (result.spawnedShip || result.spawnedUnit)) {
+        const location = this._economy.siteEntity(locationId);
+        const structureChanged = location?.kind === "space_structure" && result.completed;
+        if (location && (result.spawnedShip || result.spawnedUnit || structureChanged)) {
             this._refreshVisibility([axialKey(location.q, location.r)]);
         }
         this._sendEconomyState(client.sideId!);
     }
 
     private _handleCancel(client: Client, locationId: EntityId, orderId: OrderId) {
+        const site = this._entities.getOfKind(locationId, "space_structure");
+        const hex = site ? axialKey(site.q, site.r) : undefined;
         const result = this._economy.cancel(client.sideId, locationId, orderId);
         if (!result.ok) return this._reject(client, "cancel", result.error);
         this.logger.info("Side", client.sideId, "cancelled", orderId, "at", locationId);
+        if (hex && !this._entities.get(locationId)) {
+            this._refreshVisibility([hex], [locationId]);
+        } else if (site) {
+            this._refreshVisibility([hex!]);
+        }
         this._sendEconomyState(client.sideId!);
     }
 
@@ -764,7 +884,8 @@ export class Game {
             const diff = side.recomputeVisibility(
                 this._entities,
                 config.visionRange,
-                config.supplyVisionRange
+                config.supplyVisionRange,
+                this._structureVision
             );
             const forgotten = side.forgetEntities(destroyed);
             diff.forgetEntityIds = [...new Set([...diff.forgetEntityIds, ...forgotten])];

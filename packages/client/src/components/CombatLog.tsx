@@ -81,10 +81,11 @@ export function CombatLog({ world }: { world: HexWorld }) {
 
 /** Every participant with hp before → after, damage dealt and taken. */
 export function CombatDetails({ world, result }: { world: HexWorld; result: CombatResult }) {
-    const listed = result.participants.filter(
-        (p) => p.destroyed && (p.kind === "ship" || p.kind === "supply_ship")
-    ).length;
-    const alsoLost = result.destroyedIds.length - listed;
+    const listed = new Set([
+        ...result.participants.filter((p) => p.destroyed).map((p) => p.id),
+        ...(result.destroyedStructureIds ?? [])
+    ]);
+    const alsoLost = result.destroyedIds.filter((id) => !listed.has(id)).length;
     return (
         <div className="combat-log__details">
             <table className="combat-log__table">
@@ -137,6 +138,7 @@ export function CombatDetails({ world, result }: { world: HexWorld; result: Comb
             <p className="combat-log__muted">
                 {result.rounds} round{result.rounds === 1 ? "" : "s"}
                 {result.kind === "space" && result.attackerMovedIn && " · attacker moved in"}
+                {result.cause === "ranged" && ` · fired from ${result.from.q}, ${result.from.r}`}
                 {result.displacedTo &&
                     ` · jumper pushed to ${result.displacedTo.q}, ${result.displacedTo.r}`}
                 {result.shieldBefore !== undefined &&

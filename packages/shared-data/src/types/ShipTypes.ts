@@ -57,7 +57,9 @@ export const SHIP_TYPE_INFO: Record<ShipType, ShipTypeInfo> = {
         scale: 1,
         rotationSpeed: 100,
         moveSpeed: 0.8
-    }
+    },
+    // 180° turn 0.75s + 1 hex 0.8s → ≤ 1.55s
+    builder: { name: "Builder", scale: 0.55, rotationSpeed: 240, moveSpeed: 1.25 }
 };
 
 export function shipDef(shipType: ShipType, balance: EconomyBalance): ShipTypeDefinition {

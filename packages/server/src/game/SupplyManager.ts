@@ -16,8 +16,8 @@ import {
     type AxialCoord,
     type CargoReservation,
     type CombatResult,
+    type BuildSiteEntity,
     type EntityId,
-    type LocationEntity,
     type OrderDemand,
     type Resources,
     type SideId
@@ -68,11 +68,21 @@ export type SupplyArrival = {
     waiting: boolean;
 };
 
+/** A supply ship travelled between friendly Stargates (ending its movement for the turn). */
+export type SupplyStargate = {
+    ship: EntityOf<"supply_ship">;
+    from: AxialCoord;
+    to: AxialCoord;
+    fromGateId: EntityId;
+    toGateId: EntityId;
+};
+
 export type SupplyMoveResult = {
     moves: SupplyMove[];
     arrivals: SupplyArrival[];
     /** Ambushes: enemy warships or platforms the side didn't know about attacking its supply ships. */
     combats: CombatResult[];
+    stargates: SupplyStargate[];
 };
 
 type Load = { cargo: Resources; reservedFor: CargoReservation[] };
@@ -163,17 +173,76 @@ export class SupplyManager {
     /**
      * Route from `from` to `to` as the side believes the map to be, excluding `from`.
      * Avoids every hex believed hostile; failing that, only those currently seen.
-     * Null when there is none or the destination itself is hostile.
+     * Null when there is none or the destination itself is hostile. When it arrives in
+     * fewer turns, the route goes through a pair of the side's completed Stargates: the hop
+     * is a step between the two (non-adjacent) gate hexes.
      */
     planRoute(sideId: SideId, from: AxialCoord, to: AxialCoord): AxialCoord[] | null {
         const knowledge = this._knowledge(sideId);
         if (from.q === to.q && from.r === to.r) return [];
-        const route = this._findRoute(knowledge, from, to, knowledge.isHostile);
+        const route = this._planWith(sideId, knowledge, from, to, knowledge.isHostile);
         const isVisible = knowledge.isVisible;
         if (route || !isVisible) return route;
-        return this._findRoute(knowledge, from, to, (hex) => {
+        return this._planWith(sideId, knowledge, from, to, (hex) => {
             return isVisible(hex) && knowledge.isHostile(hex);
         });
+    }
+
+    private _planWith(
+        sideId: SideId,
+        knowledge: SupplyKnowledge,
+        from: AxialCoord,
+        to: AxialCoord,
+        isHostile: (hex: AxialCoord) => boolean
+    ): AxialCoord[] | null {
+        const direct = this._findRoute(knowledge, from, to, isHostile);
+        const gates = this._gates(sideId).filter((g) => !isHostile(g));
+        if (gates.length < 2) return direct;
+        const speed = Math.max(1, this._economy.research.supplySpeed(sideId));
+        const turns = (route: AxialCoord[]) => Math.ceil(route.length / speed);
+        let best = direct;
+        let bestTurns = direct ? turns(direct) : Infinity;
+        const toGate = new Map<EntityId, AxialCoord[] | null>();
+        const fromGate = new Map<EntityId, AxialCoord[] | null>();
+        for (const g of gates) {
+            toGate.set(g.id, this._routeOrEmpty(knowledge, from, g, isHostile));
+            fromGate.set(g.id, this._routeOrEmpty(knowledge, g, to, isHostile));
+        }
+        for (const entry of gates) {
+            const approach = toGate.get(entry.id);
+            if (!approach) continue;
+            for (const exit of gates) {
+                if (exit.id === entry.id) continue;
+                const onward = fromGate.get(exit.id);
+                if (!onward) continue;
+                // The hop happens in the turn the ship reaches the entry gate with
+                // movement left (or the next turn) and ends that turn's movement.
+                const total = Math.floor(approach.length / speed) + 1 + turns(onward);
+                if (total < bestTurns) {
+                    bestTurns = total;
+                    best = [...approach, { q: exit.q, r: exit.r }, ...onward];
+                }
+            }
+        }
+        return best;
+    }
+
+    private _gates(sideId: SideId): EntityOf<"space_structure">[] {
+        return this._entities
+            .ofKind("space_structure")
+            .filter(
+                (s) => s.structureType === "stargate" && s.sideId === sideId && !s.constructing
+            );
+    }
+
+    private _routeOrEmpty(
+        knowledge: SupplyKnowledge,
+        from: AxialCoord,
+        to: AxialCoord,
+        isHostile: (hex: AxialCoord) => boolean
+    ): AxialCoord[] | null {
+        if (from.q === to.q && from.r === to.r) return [];
+        return this._findRoute(knowledge, from, to, isHostile);
     }
 
     /**
@@ -188,7 +257,7 @@ export class SupplyManager {
      * those ships (used to give ships launched this turn their first move).
      */
     move(only?: Iterable<EntityId>): SupplyMoveResult {
-        const result: SupplyMoveResult = { moves: [], arrivals: [], combats: [] };
+        const result: SupplyMoveResult = { moves: [], arrivals: [], combats: [], stargates: [] };
         const filter = only ? new Set(only) : undefined;
         for (const ship of this._entities.ofKind("supply_ship")) {
             if (filter && !filter.has(ship.id)) continue;
@@ -209,12 +278,20 @@ export class SupplyManager {
                 }
                 const path: AxialCoord[] = [];
                 let ambushAt: AxialCoord | undefined;
-                for (const hex of route.slice(0, ship.speed)) {
+                let hopTo: AxialCoord | undefined;
+                let at: AxialCoord = { q: ship.q, r: ship.r };
+                for (const hex of route) {
+                    if (path.length >= ship.speed) break;
+                    if (axialDistance(at, hex) > 1) {
+                        hopTo = hex;
+                        break;
+                    }
                     if (hasAmbushers(this._entities, this._economy, hex, ship.sideId)) {
                         ambushAt = hex;
                         break;
                     }
                     path.push(hex);
+                    at = hex;
                 }
                 ship.route = route.slice(path.length);
                 if (path.length > 0) {
@@ -223,6 +300,13 @@ export class SupplyManager {
                     this._entities.move(ship.id, to);
                     ship.facing = facingAfterPath(from, path);
                     result.moves.push({ ship, from, to: { ...to }, path });
+                }
+                if (hopTo) {
+                    const hop = this._stargateHop(ship, hopTo);
+                    if (hop) {
+                        ship.route = route.slice(path.length + 1);
+                        result.stargates.push(hop);
+                    }
                 }
                 if (ambushAt) {
                     ambushed = true;
@@ -323,7 +407,7 @@ export class SupplyManager {
 
     private _dispatchSide(sideId: SideId): EntityOf<"supply_ship">[] {
         const knowledge = this._knowledge(sideId);
-        const locations = this._economy.ownedLocations(sideId);
+        const locations = this._economy.ownedSites(sideId);
         const byId = new Map(locations.map((l) => [l.id, l]));
         const available = new Map<EntityId, Resources>();
         const room = new Map<EntityId, Resources>();
@@ -350,7 +434,7 @@ export class SupplyManager {
         demands.sort((a, b) => tier(a) - tier(b));
 
         const distances = new Map<string, number | null>();
-        const distance = (from: LocationEntity, to: LocationEntity) => {
+        const distance = (from: BuildSiteEntity, to: BuildSiteEntity) => {
             const key = `${from.id}|${to.id}`;
             if (!distances.has(key)) {
                 distances.set(key, this.planRoute(sideId, from, to)?.length ?? null);
@@ -415,8 +499,8 @@ export class SupplyManager {
 
     private _spawn(
         sideId: SideId,
-        origin: LocationEntity,
-        destination: LocationEntity,
+        origin: BuildSiteEntity,
+        destination: BuildSiteEntity,
         cargo: Resources,
         reservedFor: CargoReservation[]
     ): EntityOf<"supply_ship"> {
@@ -444,9 +528,42 @@ export class SupplyManager {
         });
     }
 
+    /**
+     * Take the ship from the friendly Stargate on its hex to the one at `to`; undefined (and
+     * nothing happens) unless both are completed friendly gates and the exit is safe.
+     */
+    private _stargateHop(
+        ship: EntityOf<"supply_ship">,
+        to: AxialCoord
+    ): SupplyStargate | undefined {
+        const gateAt = (hex: AxialCoord) =>
+            this._entities
+                .entitiesAt(hex.q, hex.r)
+                .find(
+                    (e): e is EntityOf<"space_structure"> =>
+                        e.kind === "space_structure" &&
+                        e.structureType === "stargate" &&
+                        e.sideId === ship.sideId &&
+                        !e.constructing
+                );
+        const entry = gateAt(ship);
+        const exit = gateAt(to);
+        if (!entry || !exit || entry.id === exit.id) return undefined;
+        if (hasAmbushers(this._entities, this._economy, exit, ship.sideId)) return undefined;
+        const from = { q: ship.q, r: ship.r };
+        this._entities.move(ship.id, exit);
+        return {
+            ship,
+            from,
+            to: { q: exit.q, r: exit.r },
+            fromGateId: entry.id,
+            toGateId: exit.id
+        };
+    }
+
     /** The ship's destination, switched to the nearest owned location if it was lost. */
-    private _ensureDestination(ship: EntityOf<"supply_ship">): LocationEntity | undefined {
-        const current = this._economy.locationEntity(ship.destinationId);
+    private _ensureDestination(ship: EntityOf<"supply_ship">): BuildSiteEntity | undefined {
+        const current = this._economy.siteEntity(ship.destinationId);
         if (current?.sideId === ship.sideId) return current;
         const nearest = this._economy
             .ownedLocations(ship.sideId)

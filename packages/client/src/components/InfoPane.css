@@ -97,6 +97,30 @@
     margin: 0;
 }
 
+.info-pane__stargate {
+    border-color: #8cc8ff;
+    color: #8cc8ff;
+    font-weight: 600;
+}
+
+.info-pane__warning {
+    margin: 0;
+    color: #ffd166;
+    font-size: 0.8rem;
+}
+
+.info-pane__construct-cost {
+    display: block;
+    color: #9ab3d4;
+    font-size: 0.72rem;
+}
+
+.info-pane__reason {
+    display: block;
+    color: #ff9fb0;
+    font-size: 0.72rem;
+}
+
 .info-pane__hangar {
     display: grid;
     gap: 0.4rem;

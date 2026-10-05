@@ -55,3 +55,18 @@ export function destroyVessels(
     for (const id of destroyedShipIds) entities.remove(id);
     return { destroyedShipIds, destroyedUnitIds };
 }
+
+/**
+ * Remove destroyed space structures and close their economy entries (orders and stockpile
+ * are lost; supply ships heading there are redirected).
+ */
+export function destroySpaceStructures(
+    entities: EntityManager,
+    economy: EconomyManager | undefined,
+    ids: readonly EntityId[]
+): void {
+    for (const id of ids) {
+        economy?.removeSite(id);
+        entities.remove(id);
+    }
+}

@@ -1,7 +1,14 @@
 import type { ReactNode } from "react";
 import {
+    buildItemCost,
+    buildItemTurns,
+    canBuild,
+    canConstruct,
+    canEnterStargate,
+    DEFAULT_BUILD_PRIORITY,
     GROUND_UNIT_TYPE_INFO,
     HANGAR_LOAD_COST,
+    hexDistance,
     isFullyFunded,
     MAX_SCATTER_RING,
     MOVE_COST_PER_HEX,
@@ -9,21 +16,32 @@ import {
     SHIP_TYPE_INFO,
     shipStats,
     slotsForEntity,
+    SPACE_STRUCTURE_INFO,
+    spaceStructureMaxTier,
+    spaceStructureName,
+    spaceStructureStats,
+    SpaceStructureType,
+    type BuildItem,
+    type BuildOrder,
     type EntityKind,
     type EntitySummary
 } from "@space/shared-data";
 import { imageUrl } from "../assets/images.js";
 import type { GameActions } from "../gameActions.js";
 import { useHexWorldVersion } from "../hooks/index.js";
+import { orderProgress } from "../pages/location/locationItems.js";
 import {
+    hasBuildPage,
     HexWorld,
     isBuildSite,
     isLocationEntity,
     isTransport,
     sideColour,
     type MapFocus,
-    type ShipEntity
+    type ShipEntity,
+    type SpaceStructureEntity
 } from "../world/HexWorld.js";
+import { CostList } from "./CostList.js";
 import { formatNumber, formatResources } from "./format.js";
 import { Thumbnail } from "./Thumbnail.js";
 import "./InfoPane.css";
@@ -38,7 +56,8 @@ const KIND_LABELS: Record<EntityKind, string> = {
     asteroid_belt: "Asteroid belt",
     wormhole: "Wormhole",
     black_hole: "Black hole",
-    hyperspace_tunnel: "Hyperspace tunnel"
+    hyperspace_tunnel: "Hyperspace tunnel",
+    space_structure: "Space structure"
 };
 
 type InfoPaneProps = {
@@ -53,6 +72,10 @@ type InfoPaneProps = {
         | "cancelHyperjump"
         | "loadShips"
         | "unloadShips"
+        | "build"
+        | "cancel"
+        | "construct"
+        | "enterStargate"
     >;
     onOpenLocation: (locationId: string) => void;
 };
@@ -167,6 +190,10 @@ function entityTitle(entity: EntitySummary): string {
     if (entity.kind === "ship") {
         return entity.name ?? SHIP_TYPE_INFO[entity.shipType].name;
     }
+    if (entity.kind === "space_structure") {
+        const name = entity.name ?? spaceStructureName(entity.structureType);
+        return entity.constructing ? `${name} (site)` : name;
+    }
     return entity.name ?? KIND_LABELS[entity.kind];
 }
 
@@ -214,7 +241,8 @@ function FocusBody({
 
             {entity &&
                 focus.mode === "selection" &&
-                isBuildSite(entity) &&
+                hasBuildPage(entity, world.balance) &&
+                "sideId" in entity &&
                 entity.sideId === world.sideId && (
                     <button
                         type="button"
@@ -228,9 +256,17 @@ function FocusBody({
             {entity?.kind === "ship" && entity.id === world.selectedShipId && (
                 <>
                     <ShipOrders world={world} ship={entity} actions={actions} />
+                    <StargateControls world={world} ship={entity} actions={actions} />
                     <HangarControls world={world} ship={entity} actions={actions} />
+                    <BuilderControls world={world} ship={entity} actions={actions} />
                 </>
             )}
+
+            {entity?.kind === "space_structure" &&
+                focus.mode === "selection" &&
+                entity.sideId === world.sideId && (
+                    <StructureControls world={world} structure={entity} actions={actions} />
+                )}
 
             {entity ? (
                 <EntityDetails world={world} entity={entity} />
@@ -595,6 +631,343 @@ function HangarControls({
     );
 }
 
+/**
+ * Enter Stargate for one of our selected ships standing on a completed friendly gate: starts
+ * targeting on the map and lists the other gates to travel to directly.
+ */
+function StargateControls({
+    world,
+    ship,
+    actions
+}: {
+    world: HexWorld;
+    ship: ShipEntity;
+    actions: InfoPaneProps["actions"];
+}) {
+    const gate = world.stargateUnder(ship);
+    if (!gate) return null;
+    const check = canEnterStargate(ship, gate);
+    const destinations = world.stargateDestinations(ship);
+    const reason = !check.ok
+        ? check.reason
+        : destinations.length
+          ? undefined
+          : "No other completed Stargate to travel to";
+    const targeting = world.stargateTargeting?.id === ship.id;
+    return (
+        <div className="info-pane__hangar">
+            <h3>Stargate</h3>
+            {targeting ? (
+                <button
+                    type="button"
+                    className="info-pane__stargate"
+                    onClick={() => world.cancelStargateTargeting()}
+                >
+                    Cancel targeting
+                </button>
+            ) : (
+                <button
+                    type="button"
+                    className="info-pane__stargate"
+                    disabled={!!reason}
+                    title={reason ?? "Pick another of your Stargates to travel to instantly"}
+                    onClick={() => world.startStargateTargeting(ship.id)}
+                >
+                    Enter Stargate
+                </button>
+            )}
+            {reason && <p className="info-pane__hint">{reason}</p>}
+            {targeting && !reason && (
+                <>
+                    <ul>
+                        {destinations.map((g) => (
+                            <li key={g.id} className="info-pane__hangar-row">
+                                <span className="info-pane__hangar-name">
+                                    {g.name ?? `Stargate at ${g.q}, ${g.r}`}
+                                    <span className="info-pane__muted-inline">
+                                        {" "}
+                                        · {plural(hexDistance(ship, g), "hex")}
+                                    </span>
+                                </span>
+                                <button
+                                    type="button"
+                                    title="Travel there now"
+                                    onClick={() => {
+                                        world.cancelStargateTargeting();
+                                        actions.enterStargate(ship.id, g.id);
+                                    }}
+                                >
+                                    Travel
+                                </button>
+                            </li>
+                        ))}
+                    </ul>
+                    <p className="info-pane__hint">
+                        Travel is instant and uses all remaining movement. Ships aboard go along.
+                    </p>
+                </>
+            )}
+        </div>
+    );
+}
+
+/** Space structures one of our selected Builders could start on its hex. */
+function BuilderControls({
+    world,
+    ship,
+    actions
+}: {
+    world: HexWorld;
+    ship: ShipEntity;
+    actions: InfoPaneProps["actions"];
+}) {
+    const balance = world.balance;
+    if (!balance?.ships[ship.shipType]?.canConstruct || !balance.spaceStructures) return null;
+    const techs = world.economy?.techs ?? [];
+    const hexEntities = world.entitiesAt(ship.q, ship.r);
+    return (
+        <div className="info-pane__hangar">
+            <h3>Construct</h3>
+            <ul>
+                {SpaceStructureType.options.map((type) => {
+                    const def = balance.spaceStructures[type];
+                    const name = spaceStructureName(type);
+                    const check = canConstruct(ship, type, hexEntities, techs, balance);
+                    const reason = check.ok ? undefined : check.reason;
+                    return (
+                        <li key={type} className="info-pane__hangar-row">
+                            <Thumbnail
+                                src={imageUrl({ kind: "spaceStructure", structureType: type })}
+                                label={name}
+                                size="sm"
+                            />
+                            <span className="info-pane__hangar-name">
+                                {name}
+                                <span className="info-pane__construct-cost">
+                                    <CostList cost={def.cost} /> · {plural(def.buildTurns, "turn")}
+                                </span>
+                                {reason && <span className="info-pane__reason">{reason}</span>}
+                            </span>
+                            <button
+                                type="button"
+                                disabled={!!reason}
+                                title={reason ?? SPACE_STRUCTURE_INFO[type].description}
+                                onClick={() => actions.construct(ship.id, type)}
+                            >
+                                Build
+                            </button>
+                        </li>
+                    );
+                })}
+            </ul>
+            <p className="info-pane__hint">
+                Supply ships fund the site; it only progresses while a Builder stays on its hex. The
+                Builder isn&apos;t used up.
+            </p>
+        </div>
+    );
+}
+
+/** "40% · 120 Money of 300 Money" for an order's funding so far. */
+function OrderProgress({ order }: { order: BuildOrder }) {
+    return (
+        <>
+            {Math.round(orderProgress(order) * 100)}%
+            <span className="info-pane__muted-inline">
+                {" "}
+                · {formatResources(order.applied, "nothing")} of {formatResources(order.cost)}
+            </span>
+        </>
+    );
+}
+
+/**
+ * Construction progress and cancel for our construction sites; tier upgrades for our
+ * completed structures.
+ */
+function StructureControls({
+    world,
+    structure,
+    actions
+}: {
+    world: HexWorld;
+    structure: SpaceStructureEntity;
+    actions: InfoPaneProps["actions"];
+}) {
+    const balance = world.balance;
+    const context = world.buildContext;
+    const economy = world.locationEconomy(structure.id);
+    if (!balance?.spaceStructures) return null;
+
+    if (structure.constructing) {
+        const order = economy?.orders.find((o) => o.item.kind === "spaceStructure");
+        const builder = world.hasOwnBuilderAt(structure.q, structure.r);
+        return (
+            <div className="info-pane__orders">
+                <dl className="info-pane__facts">
+                    <div>
+                        <dt>Construction</dt>
+                        <dd>{order ? <OrderProgress order={order} /> : "Waiting for data…"}</dd>
+                    </div>
+                </dl>
+                {!builder && (
+                    <p className="info-pane__warning">
+                        No Builder on this hex: construction is paused until one returns.
+                    </p>
+                )}
+                {order && (
+                    <button
+                        type="button"
+                        className="info-pane__cancel-order"
+                        title="Abandon the site; funding already spent is lost"
+                        onClick={() => actions.cancel(structure.id, order.id)}
+                    >
+                        Cancel construction
+                    </button>
+                )}
+            </div>
+        );
+    }
+
+    const tier = structure.tier ?? 1;
+    const maxTier = spaceStructureMaxTier(structure.structureType, balance);
+    const pending = economy?.orders.find((o) => o.item.kind === "enhancement");
+    if (tier >= maxTier && !pending) return null;
+    const item: BuildItem = {
+        kind: "enhancement",
+        target: {
+            kind: "spaceStructure",
+            structureId: structure.id,
+            structureType: structure.structureType
+        },
+        tier: tier + 1
+    };
+    const check =
+        economy && context
+            ? canBuild(context, economy, item)
+            : { ok: false as const, reason: "Waiting for economy data" };
+    return (
+        <div className="info-pane__orders">
+            {pending && pending.item.kind === "enhancement" && (
+                <dl className="info-pane__facts">
+                    <div>
+                        <dt>Upgrading</dt>
+                        <dd>
+                            To tier {pending.item.tier} · <OrderProgress order={pending} />
+                        </dd>
+                    </div>
+                </dl>
+            )}
+            {pending && (
+                <button
+                    type="button"
+                    className="info-pane__cancel-order"
+                    onClick={() => actions.cancel(structure.id, pending.id)}
+                >
+                    Cancel upgrade
+                </button>
+            )}
+            {!pending && tier < maxTier && (
+                <>
+                    <button
+                        type="button"
+                        className="info-pane__open"
+                        disabled={!check.ok}
+                        title={check.ok ? "Funded over time by supply deliveries" : check.reason}
+                        onClick={() => actions.build(structure.id, item, DEFAULT_BUILD_PRIORITY)}
+                    >
+                        Upgrade to tier {tier + 1}
+                    </button>
+                    <p className="info-pane__hint">
+                        <CostList cost={buildItemCost(item, balance)} /> ·{" "}
+                        {plural(buildItemTurns(item, balance), "turn")}
+                        {!check.ok && ` · ${check.reason}`}
+                    </p>
+                </>
+            )}
+        </div>
+    );
+}
+
+/** Stats rows of a space structure or construction site. */
+function StructureFacts({
+    world,
+    structure
+}: {
+    world: HexWorld;
+    structure: SpaceStructureEntity;
+}) {
+    const balance = world.balance;
+    const def = balance?.spaceStructures?.[structure.structureType];
+    const tier = structure.tier ?? 1;
+    const stats =
+        balance && def ? spaceStructureStats(structure.structureType, tier, balance) : undefined;
+    const hp = world.hpOf(structure);
+    return (
+        <>
+            <div>
+                <dt>Structure</dt>
+                <dd>{spaceStructureName(structure.structureType)}</dd>
+            </div>
+            <div>
+                <dt>Status</dt>
+                <dd>{structure.constructing ? "Under construction" : "Operational"}</dd>
+            </div>
+            {balance && def && (
+                <div>
+                    <dt>Tier</dt>
+                    <dd>
+                        {tier}/{spaceStructureMaxTier(structure.structureType, balance)}
+                    </dd>
+                </div>
+            )}
+            {hp && !structure.constructing && (
+                <div>
+                    <dt>Hull</dt>
+                    <dd>
+                        <HpValue hp={hp} />
+                    </dd>
+                </div>
+            )}
+            {stats && (
+                <div>
+                    <dt>Attack / def.</dt>
+                    <dd>
+                        {stats.attack} / {stats.defence}
+                    </dd>
+                </div>
+            )}
+            {stats && stats.fireRadius > 0 && (
+                <div>
+                    <dt>Fire range</dt>
+                    <dd>{plural(stats.fireRadius, "hex")} · fires on enemy ships at end of turn</dd>
+                </div>
+            )}
+            {stats && (
+                <div>
+                    <dt>Vision</dt>
+                    <dd>{plural(stats.visionRange, "hex")}</dd>
+                </div>
+            )}
+            {def && def.repairBonus > 0 && (
+                <div>
+                    <dt>Repairs</dt>
+                    <dd>
+                        +{Math.round(def.repairBonus * 100)}% for own ships here
+                        {def.docksShips && " · docks strike craft"}
+                    </dd>
+                </div>
+            )}
+            {def && def.shipSlots > 0 && (
+                <div>
+                    <dt>Shipyard</dt>
+                    <dd>Builds {plural(def.shipSlots, "ship")} at a time</dd>
+                </div>
+            )}
+        </>
+    );
+}
+
 function EntityDetails({ world, entity }: { world: HexWorld; entity: EntitySummary }) {
     const economy = isLocationEntity(entity) ? world.locationEconomy(entity.id) : undefined;
     const garrison = isLocationEntity(entity)
@@ -630,7 +1003,9 @@ function EntityDetails({ world, entity }: { world: HexWorld; entity: EntitySumma
             ? imageUrl({ kind: "ship", shipType: entity.shipType })
             : entity.kind === "supply_ship"
               ? imageUrl({ kind: "supplyShip" })
-              : undefined;
+              : entity.kind === "space_structure"
+                ? imageUrl({ kind: "spaceStructure", structureType: entity.structureType })
+                : undefined;
 
     return (
         <div className="info-pane__entity">
@@ -786,6 +1161,9 @@ function EntityDetails({ world, entity }: { world: HexWorld; entity: EntitySumma
                             </div>
                         )}
                     </>
+                )}
+                {entity.kind === "space_structure" && (
+                    <StructureFacts world={world} structure={entity} />
                 )}
                 {entity.kind === "planet" && (
                     <>

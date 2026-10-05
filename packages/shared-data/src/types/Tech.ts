@@ -26,7 +26,15 @@ export const TechId = z.enum([
     "damage_control_2",
     "capital_ship_engineering",
     "planetary_shields",
-    "orbital_defence_platforms"
+    "orbital_defence_platforms",
+    "space_construction",
+    "sensor_arrays_2",
+    "sensor_arrays_3",
+    "space_stations_1",
+    "space_stations_2",
+    "space_stations_3",
+    "missile_batteries",
+    "stargates"
 ]);
 export type TechId = z.infer<typeof TechId>;
 
@@ -201,6 +209,62 @@ export const TECHS: Record<TechId, TechDefinition> = {
         cost: { money: 150, materials: 0, population: 0, science: 250 },
         buildTurns: 4,
         requires: ["advanced_shipyard"]
+    },
+    space_construction: {
+        name: "Space Construction",
+        description: "Unlocks the Builder, Sensor Arrays and Space Docks.",
+        cost: { money: 100, materials: 50, population: 0, science: 150 },
+        buildTurns: 3,
+        requires: []
+    },
+    sensor_arrays_2: {
+        name: "Deep Space Sensors",
+        description: "Sensor Arrays can be upgraded to tier 2, seeing further.",
+        cost: { money: 100, materials: 0, population: 0, science: 150 },
+        buildTurns: 3,
+        requires: ["space_construction"]
+    },
+    sensor_arrays_3: {
+        name: "Long Range Sensors",
+        description: "Sensor Arrays can be upgraded to tier 3, seeing much further.",
+        cost: { money: 150, materials: 0, population: 0, science: 300 },
+        buildTurns: 5,
+        requires: ["sensor_arrays_2"]
+    },
+    space_stations_1: {
+        name: "Space Stations",
+        description: "Unlocks the Space Station, which guards its hex and fires on nearby ships.",
+        cost: { money: 150, materials: 50, population: 0, science: 200 },
+        buildTurns: 4,
+        requires: ["space_construction"]
+    },
+    space_stations_2: {
+        name: "Fortified Stations",
+        description: "Space Stations can be upgraded to tier 2.",
+        cost: { money: 150, materials: 100, population: 0, science: 250 },
+        buildTurns: 4,
+        requires: ["space_stations_1"]
+    },
+    space_stations_3: {
+        name: "Battle Stations",
+        description: "Space Stations can be upgraded to tier 3.",
+        cost: { money: 250, materials: 150, population: 0, science: 400 },
+        buildTurns: 6,
+        requires: ["space_stations_2"]
+    },
+    missile_batteries: {
+        name: "Missile Batteries",
+        description: "Unlocks the Missile Battery, which fires on enemy ships within range.",
+        cost: { money: 120, materials: 50, population: 0, science: 180 },
+        buildTurns: 3,
+        requires: ["space_construction"]
+    },
+    stargates: {
+        name: "Stargates",
+        description: "Unlocks the Stargate: instant, exact travel between your gates.",
+        cost: { money: 250, materials: 100, population: 0, science: 400 },
+        buildTurns: 6,
+        requires: ["space_construction", "hyperdrive_calibration_1"]
     }
 };
 

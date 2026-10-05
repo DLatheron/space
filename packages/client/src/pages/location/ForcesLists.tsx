@@ -138,7 +138,8 @@ type OrbitListProps = {
     upgradingIds: ReadonlySet<EntityId>;
     onUnload: (shipId: EntityId, unitIds: EntityId[]) => void;
     onUnloadShips: (carrierId: EntityId, shipIds: EntityId[]) => void;
-    onUpgrade: (ship: ShipEntity) => void;
+    /** Absent where ships can't be refitted (a Space Dock). */
+    onUpgrade?: (ship: ShipEntity) => void;
 };
 
 /** Thumbnail, name, tier, class and hull of a ship. */
@@ -219,13 +220,15 @@ export function OrbitList({
                                         Launch all
                                     </button>
                                 )}
-                                <UpgradeAction
-                                    tier={tier}
-                                    maxTier={def.maxTier}
-                                    upgrading={upgradingIds.has(ship.id)}
-                                    name={ship.name ?? def.name}
-                                    onUpgrade={() => onUpgrade(ship)}
-                                />
+                                {onUpgrade && (
+                                    <UpgradeAction
+                                        tier={tier}
+                                        maxTier={def.maxTier}
+                                        upgrading={upgradingIds.has(ship.id)}
+                                        name={ship.name ?? def.name}
+                                        onUpgrade={() => onUpgrade(ship)}
+                                    />
+                                )}
                             </span>
                         </div>
                         {carried && (

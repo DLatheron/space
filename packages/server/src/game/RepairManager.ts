@@ -5,6 +5,7 @@ import {
     repairsAtEndOf,
     shipRepairPerTurn,
     shipStats,
+    spaceStructureStats,
     supplyShipStats,
     type EconomyBalance,
     type EntityId,
@@ -20,9 +21,9 @@ import { isLocationEntity } from "./GroundUnits.js";
 import type { EntityOf } from "./map/types.js";
 
 export type RepairEvent = {
-    /** Entity id for ships and supply ships, installation id for Orbital Platforms. */
+    /** Entity id for ships, supply ships and space structures, installation id for Orbital Platforms. */
     id: EntityId;
-    kind: "ship" | "supply_ship" | "installation";
+    kind: "ship" | "supply_ship" | "installation" | "space_structure";
     sideId: SideId;
     hpBefore: number;
     hpAfter: number;
@@ -82,6 +83,7 @@ export class RepairManager {
             });
         }
         events.push(...this._repairPlatforms(endingTurn));
+        events.push(...this._repairStructures(endingTurn));
         return events;
     }
 
@@ -128,21 +130,62 @@ export class RepairManager {
     }
 
     private _context(vessel: EntityOf<"ship"> | EntityOf<"supply_ship">): RepairContext {
-        const atOwnedShipyard = this._entities
-            .entitiesAt(vessel.q, vessel.r)
-            .some(
-                (entity) =>
-                    isLocationEntity(entity) &&
-                    entity.sideId === vessel.sideId &&
-                    !!this._economy
-                        ?.locationEconomy(entity.id)
-                        ?.installations.some((i) => YARDS.includes(i.type))
-            );
-        if (vessel.kind !== "ship") return { atOwnedShipyard };
+        const here = this._entities.entitiesAt(vessel.q, vessel.r);
+        const atOwnedShipyard = here.some(
+            (entity) =>
+                isLocationEntity(entity) &&
+                entity.sideId === vessel.sideId &&
+                !!this._economy
+                    ?.locationEconomy(entity.id)
+                    ?.installations.some((i) => YARDS.includes(i.type))
+        );
+        const structures = here.filter(
+            (entity): entity is EntityOf<"space_structure"> =>
+                entity.kind === "space_structure" &&
+                entity.sideId === vessel.sideId &&
+                !entity.constructing
+        );
+        const atSpaceDock = structures.some(
+            (s) => this._balance.spaceStructures[s.structureType].docksShips
+        );
+        const structureBonus = Math.max(
+            0,
+            ...structures.map((s) => this._balance.spaceStructures[s.structureType].repairBonus)
+        );
+        if (vessel.kind !== "ship") return { atOwnedShipyard, structureBonus };
         return {
             atOwnedShipyard,
+            atSpaceDock,
+            structureBonus,
             carried: !!vessel.carriedBy,
             needsDock: !this._balance.ships[vessel.shipType].repairsInSpace
         };
+    }
+
+    private _repairStructures(endingTurn: number): RepairEvent[] {
+        const events: RepairEvent[] = [];
+        for (const structure of this._entities.ofKind("space_structure")) {
+            if (structure.hp === undefined || structure.constructing) continue;
+            if (!repairsAtEndOf(structure.lastCombatTurn, endingTurn)) continue;
+            const maxHp = spaceStructureStats(
+                structure.structureType,
+                structure.tier ?? 1,
+                this._balance
+            ).hp;
+            const hpBefore = structure.hp;
+            const amount = installationRepairPerTurn(this._balance, hpBefore, maxHp);
+            if (amount <= 0) continue;
+            const hpAfter = hpBefore + amount;
+            if (hpAfter >= maxHp) delete structure.hp;
+            else structure.hp = hpAfter;
+            events.push({
+                id: structure.id,
+                kind: "space_structure",
+                sideId: structure.sideId,
+                hpBefore,
+                hpAfter
+            });
+        }
+        return events;
     }
 }

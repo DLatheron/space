@@ -161,6 +161,10 @@ export function HexMapView({ world, onAction }: HexMapViewProps) {
                 world.cancelHyperjumpTargeting();
                 return;
             }
+            if (e.key === "Escape" && world.stargateTargetingId) {
+                world.cancelStargateTargeting();
+                return;
+            }
             if (e.key === "Escape" && (world.selectedShipId || world.inspectedEntityId)) {
                 world.selectShip(null);
                 onActionRef.current?.({ type: "deselect" });
@@ -210,15 +214,27 @@ export function HexMapView({ world, onAction }: HexMapViewProps) {
     }, [world, notice]);
 
     const targeting = world.hyperjumpTargeting;
+    const stargateTargeting = world.stargateTargeting;
 
     return (
         <div className="hex-map-view">
             <canvas
                 ref={canvasRef}
-                className={`hex-map-view__canvas${targeting ? " hex-map-view__canvas--targeting" : ""}`}
+                className={`hex-map-view__canvas${targeting || stargateTargeting ? " hex-map-view__canvas--targeting" : ""}`}
             />
-            {(targeting || notice) && (
+            {(targeting || stargateTargeting || notice) && (
                 <div className="hex-map-view__banners">
+                    {stargateTargeting && (
+                        <div className="hex-map-view__banner hex-map-view__banner--targeting">
+                            <span>
+                                Stargate: right-click a friendly Stargate to travel there · Esc to
+                                cancel
+                            </span>
+                            <button type="button" onClick={() => world.cancelStargateTargeting()}>
+                                Cancel
+                            </button>
+                        </div>
+                    )}
                     {targeting && (
                         <div className="hex-map-view__banner hex-map-view__banner--targeting">
                             <span>

@@ -319,3 +319,147 @@ export class JumpFlashes {
         }
     }
 }
+
+/** Time a ship takes to fall into the departure gate's event horizon. */
+export const STARGATE_DEPART_MS = 800;
+/** Exit ripple length at the arrival gate; the ship scales in over its first part. */
+export const STARGATE_ARRIVE_MS = 900;
+const STARGATE_OPEN_MS = 250;
+const STARGATE_COLOUR = "90, 170, 255";
+const STARGATE_ARMS = 5;
+
+type StargateFlash = {
+    from: Pixel | null;
+    to: Pixel;
+    departAt: number;
+    arriveAt: number;
+    /** Hex size in world pixels. */
+    scale: number;
+    /** Starting angle of the swirl, so simultaneous gates don't spin in lockstep. */
+    phase: number;
+};
+
+/**
+ * Stargate transits in world space: a swirling blue event horizon opens at the departure gate
+ * and swallows the ship, then a matching horizon bursts open at the exit gate with ripples.
+ */
+export class StargateEffects {
+    private _flashes: StargateFlash[] = [];
+
+    spawn(flash: Omit<StargateFlash, "phase">) {
+        this._flashes.push({ ...flash, phase: Math.random() * Math.PI * 2 });
+    }
+
+    clear() {
+        this._flashes = [];
+    }
+
+    render(
+        ctx: CanvasRenderingContext2D,
+        now: number,
+        toScreen: (world: Pixel) => Pixel,
+        zoom: number
+    ) {
+        this._flashes = this._flashes.filter((f) => now - f.arriveAt < STARGATE_ARRIVE_MS);
+        if (!this._flashes.length) return;
+
+        ctx.save();
+        ctx.globalCompositeOperation = "lighter";
+        for (const flash of this._flashes) {
+            if (now < flash.departAt) continue;
+            const scale = flash.scale * zoom;
+            if (flash.from && now < flash.arriveAt + STARGATE_OPEN_MS) {
+                const span = flash.arriveAt - flash.departAt + STARGATE_OPEN_MS;
+                const t = (now - flash.departAt) / span;
+                this._drawHorizon(ctx, toScreen(flash.from), scale, t, flash.phase, now);
+            }
+            if (now >= flash.arriveAt) {
+                const age = now - flash.arriveAt;
+                this._drawHorizon(
+                    ctx,
+                    toScreen(flash.to),
+                    scale,
+                    age / STARGATE_ARRIVE_MS,
+                    flash.phase + Math.PI,
+                    now
+                );
+                this._drawRipples(ctx, toScreen(flash.to), scale, age);
+            }
+        }
+        ctx.restore();
+    }
+
+    /** Event horizon over its life `t` (0-1): opens, swirls, then closes. */
+    private _drawHorizon(
+        ctx: CanvasRenderingContext2D,
+        center: Pixel,
+        scale: number,
+        t: number,
+        phase: number,
+        now: number
+    ) {
+        if (t < 0 || t >= 1) return;
+        const open = Math.min(1, t / 0.2) * Math.min(1, (1 - t) / 0.25);
+        const radius = scale * 0.62 * open;
+        if (radius <= 0.5) return;
+
+        const g = ctx.createRadialGradient(center.x, center.y, 0, center.x, center.y, radius);
+        g.addColorStop(0, `rgba(220, 240, 255, ${0.75 * open})`);
+        g.addColorStop(0.45, `rgba(${STARGATE_COLOUR}, ${0.55 * open})`);
+        g.addColorStop(1, `rgba(${STARGATE_COLOUR}, 0)`);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
+        ctx.fill();
+
+        const spin = phase + now / 160;
+        ctx.strokeStyle = `rgba(170, 215, 255, ${0.8 * open})`;
+        ctx.lineWidth = Math.max(0.75, scale * 0.035);
+        for (let arm = 0; arm < STARGATE_ARMS; arm++) {
+            const start = spin + (arm / STARGATE_ARMS) * Math.PI * 2;
+            ctx.beginPath();
+            for (let i = 0; i <= 12; i++) {
+                const k = i / 12;
+                const a = start + k * Math.PI * 0.9;
+                const r = radius * (0.15 + 0.85 * k);
+                const x = center.x + Math.cos(a) * r;
+                const y = center.y + Math.sin(a) * r;
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+        }
+
+        ctx.strokeStyle = `rgba(${STARGATE_COLOUR}, ${open})`;
+        ctx.lineWidth = Math.max(1, scale * 0.06);
+        ctx.beginPath();
+        ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
+        ctx.stroke();
+    }
+
+    private _drawRipples(ctx: CanvasRenderingContext2D, center: Pixel, scale: number, age: number) {
+        for (let i = 0; i < 3; i++) {
+            const t = (age - i * 140) / (STARGATE_ARRIVE_MS * 0.7);
+            if (t <= 0 || t >= 1) continue;
+            ctx.globalAlpha = (1 - t) * 0.8;
+            ctx.strokeStyle = `rgb(${STARGATE_COLOUR})`;
+            ctx.lineWidth = Math.max(1, scale * 0.06 * (1 - t));
+            ctx.beginPath();
+            ctx.arc(center.x, center.y, scale * (0.3 + 1.4 * Math.sqrt(t)), 0, Math.PI * 2);
+            ctx.stroke();
+        }
+        if (age < 220) {
+            const k = 1 - age / 220;
+            const radius = scale * (0.3 + 0.5 * (1 - k));
+            const g = ctx.createRadialGradient(center.x, center.y, 0, center.x, center.y, radius);
+            g.addColorStop(0, `rgba(255, 255, 255, ${k})`);
+            g.addColorStop(1, `rgba(${STARGATE_COLOUR}, 0)`);
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = g;
+            ctx.beginPath();
+            ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+}

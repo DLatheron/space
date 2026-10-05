@@ -19,6 +19,8 @@ import {
     siteForEntity,
     slotsForEntity,
     slotsUsed,
+    spaceDockBuilds,
+    spaceStructureName,
     stockpileCap,
     structureDef,
     STRUCTURE_INFO,
@@ -30,6 +32,7 @@ import {
     type BuildContext,
     type BuildItem,
     type BuildPriority,
+    type BuildSiteEntity,
     type EnhancementTarget,
     type EntityId,
     type Installation,
@@ -72,7 +75,8 @@ export type GameOutletContext = {
 const SITE_LABELS: Record<StructureSite, string> = {
     planet: "Planet",
     moon: "Moon",
-    asteroid: "Asteroid"
+    asteroid: "Asteroid",
+    space: "Space structure"
 };
 
 function locationKindLabel(location: LocationEntity): string {
@@ -122,7 +126,8 @@ type Popup =
 
 type OwnLocationProps = {
     world: HexWorld;
-    location: LocationEntity;
+    /** A planet, moon or asteroid, or a Space Dock (economy site `space`). */
+    location: BuildSiteEntity;
     economy: LocationEconomy;
     context: BuildContext;
     actions: GameActions;
@@ -269,8 +274,65 @@ function OwnLocationPanel({ world, location, economy, context, actions }: OwnLoc
                 const unit = garrison.find((u) => u.id === target.unitId);
                 return unit && { tier: unit.tier, name: GROUND_UNIT_TYPE_INFO[unit.unitType].name };
             }
+            case "spaceStructure":
+                return undefined;
         }
     })();
+
+    if (economy.site === "space") {
+        const dockShips = SHIP_ITEMS.filter(
+            (item) => item.kind === "ship" && spaceDockBuilds(item.shipType, balance)
+        );
+        const hasUpgradeOrders = economy.orders.some(
+            (o) => queueCategory(o.item) === "installations"
+        );
+        return (
+            <div className="planet-page__grid planet-page__grid--space">
+                <Card
+                    area="orbit"
+                    title="Ships at the dock"
+                    detail={`${shipsHere.length} · ${context.shipCount}/${context.shipCap} ship cap`}
+                    action={
+                        slots.ships > 0 && (
+                            <OpenButton label="Build ship" onClick={() => openBuild("ships")} />
+                        )
+                    }
+                >
+                    {hasUpgradeOrders && queue("installations")}
+                    {queue("ships")}
+                    {shipsHere.length ? (
+                        <OrbitList
+                            ships={shipsHere}
+                            balance={balance}
+                            hpOf={(ship) => world.hpOf(ship)}
+                            hangar={(ship) =>
+                                world.hangarOf(ship) ? world.carriedShips(ship) : undefined
+                            }
+                            onUnloadShips={actions.unloadShips}
+                            aboard={() => undefined}
+                            upgradingIds={upgradingIds}
+                            onUnload={() => undefined}
+                        />
+                    ) : (
+                        <p className="planet-page__muted">No ships at the dock.</p>
+                    )}
+                    <p className="planet-page__muted">
+                        Orders here are funded by supply ship deliveries. Colony ships and
+                        transports can only be built at a planet&apos;s shipyard.
+                    </p>
+                </Card>
+                {popup?.kind === "build" && popup.category === "ships" && (
+                    <BuildPopup
+                        {...buildPopupProps}
+                        title="Build ship"
+                        detail={`${context.shipCount}/${context.shipCap} ships`}
+                        items={dockShips}
+                        actionLabel="Build"
+                    />
+                )}
+            </div>
+        );
+    }
 
     return (
         <div className={`planet-page__grid${showResearch ? " planet-page__grid--research" : ""}`}>
@@ -627,11 +689,17 @@ export function PlanetPage() {
 
     const found = locationId ? world.findEntityById(locationId) : undefined;
     const location = found && isLocationEntity(found) ? found : undefined;
+    const structure = found?.kind === "space_structure" ? found : undefined;
+    const site: BuildSiteEntity | undefined = location ?? structure;
     const economy = locationId ? world.locationEconomy(locationId) : undefined;
     const context = world.buildContext;
-    const own = !!location?.sideId && location.sideId === world.sideId;
-    const kindLabel = location ? locationKindLabel(location) : "Location";
-    const full = !!(location && own && economy && context);
+    const own = !!site?.sideId && site.sideId === world.sideId;
+    const kindLabel = location
+        ? locationKindLabel(location)
+        : structure
+          ? spaceStructureName(structure.structureType)
+          : "Location";
+    const full = !!(site && own && economy && context);
     // Ground combats resolve at once; the latest one this turn stays flagged in the header.
     const lastGround = locationId ? world.groundCombatsAt(locationId)[0] : undefined;
     const recentGround =
@@ -674,12 +742,18 @@ export function PlanetPage() {
                     <header className="planet-page__header">
                         <div className="planet-page__title">
                             <h2>
-                                {location?.name ?? `Unknown ${kindLabel.toLowerCase()}`}
+                                {site?.name ??
+                                    (structure ? kindLabel : `Unknown ${kindLabel.toLowerCase()}`)}
                                 {location && (
                                     <span className="planet-page__level">
                                         {location.kind === "planet"
                                             ? `Level ${location.level}`
                                             : kindLabel}
+                                    </span>
+                                )}
+                                {structure && (
+                                    <span className="planet-page__level">
+                                        Tier {structure.tier ?? 1}
                                     </span>
                                 )}
                                 {economy?.home && own && (
@@ -690,12 +764,12 @@ export function PlanetPage() {
                                 <div>
                                     <dt>Owner</dt>
                                     <dd>
-                                        {location ? (
-                                            location.sideId ? (
+                                        {site ? (
+                                            site.sideId ? (
                                                 <span
-                                                    className={`planet-page__side planet-page__side--${location.sideId}`}
+                                                    className={`planet-page__side planet-page__side--${site.sideId}`}
                                                 >
-                                                    {sideName(location.sideId)}
+                                                    {sideName(site.sideId)}
                                                     {own && " (you)"}
                                                 </span>
                                             ) : (
@@ -706,18 +780,22 @@ export function PlanetPage() {
                                         )}
                                     </dd>
                                 </div>
-                                <div>
-                                    <dt>System</dt>
-                                    <dd>{location?.systemId ?? "—"}</dd>
-                                </div>
+                                {!structure && (
+                                    <div>
+                                        <dt>System</dt>
+                                        <dd>{location?.systemId ?? "—"}</dd>
+                                    </div>
+                                )}
                                 <div>
                                     <dt>Hex</dt>
-                                    <dd>{location ? `${location.q}, ${location.r}` : "—"}</dd>
+                                    <dd>{site ? `${site.q}, ${site.r}` : "—"}</dd>
                                 </div>
-                                <div>
-                                    <dt>Slots</dt>
-                                    <dd>{location ? slotsForEntity(location) : "—"}</dd>
-                                </div>
+                                {!structure && (
+                                    <div>
+                                        <dt>Slots</dt>
+                                        <dd>{location ? slotsForEntity(location) : "—"}</dd>
+                                    </div>
+                                )}
                                 <div>
                                     <dt>Id</dt>
                                     <dd>
@@ -740,22 +818,27 @@ export function PlanetPage() {
                             Back to map
                         </button>
                     </header>
-                    {!location && (
+                    {!site && (
                         <p className="planet-page__muted">
                             This location is not in your known map (it may be out of sight).
                         </p>
                     )}
-                    {location && own && economy && context && (
+                    {site && own && economy && context && (
                         <OwnLocationPanel
                             world={world}
-                            location={location}
+                            location={site}
                             economy={economy}
                             context={context}
                             actions={actions}
                         />
                     )}
-                    {location && own && !(economy && context) && (
+                    {site && own && !(economy && context) && (
                         <p className="planet-page__muted">Waiting for economy data…</p>
+                    )}
+                    {structure && !own && (
+                        <p className="planet-page__muted">
+                            Controlled by {sideName(structure.sideId)}.
+                        </p>
                     )}
                     {location && !location.sideId && (
                         <UnownedLocationPanel

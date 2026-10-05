@@ -474,6 +474,210 @@ describe("HexWorld repair outlook", () => {
     });
 });
 
+const structure = (
+    id: string,
+    q: number,
+    r: number,
+    extra: Partial<Extract<EntitySummary, { kind: "space_structure" }>> = {}
+): EntitySummary => ({
+    id,
+    kind: "space_structure",
+    structureType: "sensor_array",
+    sideId: "alpha",
+    q,
+    r,
+    ...extra
+});
+
+describe("HexWorld space structures", () => {
+    it("cycles from our ships to a structure, then other vessels", () => {
+        const supply = {
+            id: "supply-1",
+            kind: "supply_ship",
+            sideId: "alpha",
+            q: 1,
+            r: 1,
+            facing: 0
+        } as EntitySummary;
+        const world = makeWorld([supply, structure("sensor-1", 1, 1), ship("ship-1", 1, 1)]);
+        expect(world.clickCycle(world.entitiesAt(1, 1)).map((e) => e.id)).toEqual([
+            "ship-1",
+            "sensor-1",
+            "supply-1"
+        ]);
+        expect(click(world, 1, 1)).toEqual({ type: "select", shipId: "ship-1" });
+        expect(click(world, 1, 1)).toEqual({ type: "inspect", entityId: "sensor-1" });
+        expect(world.mapFocus).toMatchObject({ mode: "selection", entity: { id: "sensor-1" } });
+    });
+
+    it("opens our completed space dock and inspects other structures", () => {
+        const world = makeWorld([
+            structure("dock-1", 2, 1, { structureType: "space_dock" }),
+            structure("dock-2", 0, 1, { structureType: "space_dock", constructing: true }),
+            structure("station-1", 3, 1, { structureType: "space_station", sideId: "beta" }),
+            structure("sensor-1", 4, 1)
+        ]);
+        expect(click(world, 2, 1)).toEqual({ type: "open-location", locationId: "dock-1" });
+        expect(world.inspectedEntityId).toBe("dock-1");
+        expect(click(world, 0, 1)).toEqual({ type: "inspect", entityId: "dock-2" });
+        expect(click(world, 3, 1)).toEqual({ type: "inspect", entityId: "station-1" });
+        expect(click(world, 4, 1)).toEqual({ type: "inspect", entityId: "sensor-1" });
+    });
+
+    it("doesn't open our dock when cycling onto it from a ship", () => {
+        const world = makeWorld([
+            structure("dock-1", 2, 1, { structureType: "space_dock" }),
+            ship("ship-1", 2, 1)
+        ]);
+        expect(click(world, 2, 1)).toEqual({ type: "select", shipId: "ship-1" });
+        expect(click(world, 2, 1)).toEqual({ type: "inspect", entityId: "dock-1" });
+    });
+
+    it("drops structures destroyed in combat", () => {
+        const world = makeWorld([
+            structure("station-1", 2, 1, { structureType: "space_station", sideId: "beta" }),
+            ship("ship-1", 2, 1)
+        ]);
+        world.applyCombat({
+            kind: "space",
+            cause: "move",
+            hex: { q: 2, r: 1 },
+            from: { q: 2, r: 1 },
+            attackerSideId: "alpha",
+            defenderSideIds: ["beta"],
+            participants: [],
+            destroyedIds: [],
+            destroyedStructureIds: ["station-1"],
+            destroyedUnitIds: [],
+            outcome: "attacker_won",
+            attackerMovedIn: false,
+            rounds: 1
+        });
+        expect(world.findEntityById("station-1")).toBeUndefined();
+    });
+});
+
+describe("HexWorld stargate targeting", () => {
+    const gate = (id: string, q: number, r: number, extra = {}) =>
+        structure(id, q, r, { structureType: "stargate", ...extra });
+    const gates = [
+        gate("gate-1", 1, 1),
+        gate("gate-2", 3, 3),
+        gate("gate-3", 4, 0, { constructing: true }),
+        gate("gate-4", 0, 4, { sideId: "beta" })
+    ];
+
+    it("sends a right click on another completed friendly gate", () => {
+        const world = makeWorld([...gates, ship("ship-1", 1, 1)]);
+        const shipEntity = world.findEntity("ship-1", "ship")!;
+        expect(world.stargateUnder(shipEntity)?.id).toBe("gate-1");
+        expect(world.stargateDestinations(shipEntity).map((g) => g.id)).toEqual(["gate-2"]);
+
+        world.startStargateTargeting("ship-1");
+        expect(world.selectedShipId).toBe("ship-1");
+        expect(world.stargateTargeting?.id).toBe("ship-1");
+        expect(rightClick(world, 3, 3)).toEqual({
+            type: "stargate",
+            shipId: "ship-1",
+            gateId: "gate-2"
+        });
+        expect(world.stargateTargeting).toBeUndefined();
+        expect(world.selectedShipId).toBe("ship-1");
+    });
+
+    it("rejects hexes without another completed friendly gate and keeps targeting", () => {
+        const world = makeWorld([...gates, ship("ship-1", 1, 1)]);
+        world.startStargateTargeting("ship-1");
+        expect(rightClick(world, 2, 2)).toMatchObject({ type: "rejected" });
+        expect(rightClick(world, 1, 1)).toMatchObject({ type: "rejected" });
+        expect(rightClick(world, 4, 0)).toMatchObject({ type: "rejected" });
+        expect(rightClick(world, 0, 4)).toMatchObject({ type: "rejected" });
+        expect(world.stargateTargeting?.id).toBe("ship-1");
+    });
+
+    it("rejects travel for a ship without movement left", () => {
+        const world = makeWorld([...gates, ship("ship-1", 1, 1, { movementPoints: 0 })]);
+        world.startStargateTargeting("ship-1");
+        expect(rightClick(world, 3, 3)).toEqual({
+            type: "rejected",
+            reason: "No movement points left"
+        });
+    });
+
+    it("leaves targeting on cancel or when the selection changes", () => {
+        const world = makeWorld([...gates, ship("ship-1", 1, 1), ship("ship-2", 2, 0)]);
+        world.startStargateTargeting("ship-1");
+        world.cancelStargateTargeting();
+        expect(world.stargateTargetingId).toBeNull();
+        expect(rightClick(world, 2, 1)).toEqual({
+            type: "move",
+            shipId: "ship-1",
+            to: { q: 2, r: 1 }
+        });
+
+        world.startStargateTargeting("ship-1");
+        world.selectShip("ship-2");
+        expect(world.stargateTargetingId).toBeNull();
+
+        world.startStargateTargeting("ship-1");
+        world.inspectEntity("gate-2");
+        expect(world.stargateTargetingId).toBeNull();
+
+        world.startStargateTargeting("ship-1");
+        expect(click(world, 2, 2)).toEqual({ type: "deselect" });
+        expect(world.stargateTargetingId).toBeNull();
+
+        world.startStargateTargeting("ship-1");
+        world.startHyperjumpTargeting("ship-1");
+        expect(world.stargateTargetingId).toBeNull();
+    });
+
+    it("moves a ship and its carried ships to the exit gate and spends its movement", () => {
+        const world = makeWorld([
+            ...gates,
+            ship("carrier-1", 1, 1, { shipType: "star_destroyer", carriedShipIds: ["fighter-1"] }),
+            ship("fighter-1", 1, 1, { shipType: "fighter_squadron", carriedBy: "carrier-1" })
+        ]);
+        world.startStargateTargeting("carrier-1");
+        world.applyShipStargated({
+            shipId: "carrier-1",
+            from: { q: 1, r: 1 },
+            to: { q: 3, r: 3 },
+            fromGateId: "gate-1",
+            toGateId: "gate-2"
+        });
+        expect(world.findEntity("carrier-1", "ship")).toMatchObject({
+            q: 3,
+            r: 3,
+            movementPoints: 0
+        });
+        expect(world.findEntity("fighter-1", "ship")).toMatchObject({ q: 3, r: 3 });
+        expect(world.entitiesAt(1, 1).map((e) => e.id)).toEqual(["gate-1"]);
+        expect(world.stargateTargetingId).toBeNull();
+    });
+
+    it("moves supply ships through gates too", () => {
+        const supply = {
+            id: "supply-1",
+            kind: "supply_ship",
+            sideId: "alpha",
+            q: 1,
+            r: 1,
+            facing: 0
+        } as EntitySummary;
+        const world = makeWorld([...gates, supply]);
+        world.applyShipStargated({
+            shipId: "supply-1",
+            from: { q: 1, r: 1 },
+            to: { q: 3, r: 3 },
+            fromGateId: "gate-1",
+            toGateId: "gate-2"
+        });
+        expect(world.findEntity("supply-1", "supply_ship")).toMatchObject({ q: 3, r: 3 });
+        expect(world.entitiesAt(1, 1).map((e) => e.id)).toEqual(["gate-1"]);
+    });
+});
+
 describe("HexWorld hyperjump targeting", () => {
     it("sends the next right click on an explored hex as the jump target", () => {
         const world = makeWorld([planet, ship("ship-1", 1, 1)]);

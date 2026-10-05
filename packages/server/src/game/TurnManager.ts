@@ -1,10 +1,11 @@
-import type { SideId, TurnState } from "@space/shared-data";
+import type { CombatResult, SideId, TurnState } from "@space/shared-data";
 import type { EconomyAdvance, EconomyManager } from "./EconomyManager.js";
 import type { EntityManager } from "./EntityManager.js";
 import type { HyperjumpEvent, HyperspaceManager } from "./HyperspaceManager.js";
 import type { EntityOf } from "./map/types.js";
 import type { MoveOrderManager, MoveOrderResult } from "./MoveOrderManager.js";
 import type { RepairEvent, RepairManager } from "./RepairManager.js";
+import type { SpaceStructureManager } from "./SpaceStructureManager.js";
 import type { SupplyManager, SupplyMoveResult } from "./SupplyManager.js";
 
 export type SupplyAdvance = SupplyMoveResult & {
@@ -27,12 +28,15 @@ export type EndTurnResult = {
     supply?: SupplyAdvance;
     /** Out-of-combat repairs made by the advance (present when repairs are attached). */
     repairs?: RepairEvent[];
+    /** Space Stations and Missile Batteries firing on enemy ships in range (when any fired). */
+    ranged?: CombatResult[];
 };
 
 export type TurnOptions = {
     hyperspace?: HyperspaceManager;
     moveOrders?: MoveOrderManager;
     repairs?: RepairManager;
+    structures?: SpaceStructureManager;
 };
 
 type Advance = Omit<EndTurnResult, "advanced" | "state">;
@@ -57,8 +61,10 @@ type Advance = Omit<EndTurnResult, "advanced" | "state">;
  * 9. dispatch: demand by priority, nearest source, reserve cargo, pack ships;
  * 10. ships launched in steps 8 and 9 make their first move (as in steps 5 and 6). Cargo
  *    they deliver is only used by next turn's funding;
- * 11. damaged ships, supply ships and Orbital Platforms with no combat during the turn just
- *    ended (including this end of turn) repair.
+ * 11. completed Space Stations and Missile Batteries fire on the nearest enemy ships within
+ *    their radius;
+ * 12. damaged ships, supply ships, Orbital Platforms and space structures with no combat
+ *    during the turn just ended (including this end of turn) repair.
  */
 export class TurnManager {
     private readonly _entities: EntityManager;
@@ -67,6 +73,7 @@ export class TurnManager {
     private readonly _hyperspace: HyperspaceManager | undefined;
     private readonly _moveOrders: MoveOrderManager | undefined;
     private readonly _repairs: RepairManager | undefined;
+    private readonly _structures: SpaceStructureManager | undefined;
     private readonly _sideReady = new Map<SideId, boolean>();
     private _turn = 1;
     /** The turn that is ending, while an advance runs. */
@@ -85,6 +92,7 @@ export class TurnManager {
         this._hyperspace = options.hyperspace;
         this._moveOrders = options.moveOrders;
         this._repairs = options.repairs;
+        this._structures = options.structures;
         for (const sideId of sideIds) this._sideReady.set(sideId, false);
     }
 
@@ -130,6 +138,12 @@ export class TurnManager {
     }
 
     private _resolve(): Advance {
+        const advance = this._resolveMovement();
+        const ranged = this._structures?.fireRanged();
+        return ranged && ranged.length > 0 ? { ...advance, ranged } : advance;
+    }
+
+    private _resolveMovement(): Advance {
         for (const sideId of this._sideReady.keys()) this._sideReady.set(sideId, false);
         for (const ship of this._entities.ofKind("ship")) {
             ship.movementPoints = ship.maxMovementPoints;
@@ -156,6 +170,7 @@ export class TurnManager {
                 moves: [...moved.moves, ...departed.moves],
                 arrivals: [...moved.arrivals, ...departed.arrivals],
                 combats: [...moved.combats, ...departed.combats],
+                stargates: [...moved.stargates, ...departed.stargates],
                 returning,
                 dispatched
             }

@@ -80,6 +80,7 @@ describe("economy balance config", () => {
             unitCapacity: 4,
             canColonise: false,
             canBombard: false,
+            canConstruct: false,
             class: "support",
             attackMultipliers: {},
             repairsInSpace: true
@@ -212,7 +213,8 @@ describe("economy balance config", () => {
             advanced_fighter_squadron: [5, 2],
             bomber_squadron: [4, 0],
             star_destroyer: [8, 8],
-            super_star_destroyer: [20, 14]
+            super_star_destroyer: [20, 14],
+            builder: [0, 2]
         });
         expect(economy.ships.star_destroyer.hangar).toEqual({
             capacity: 4,
@@ -288,7 +290,8 @@ describe("economy balance config", () => {
             advanced_fighter_squadron: "strike_craft",
             bomber_squadron: "strike_craft",
             star_destroyer: "capital",
-            super_star_destroyer: "capital"
+            super_star_destroyer: "capital",
+            builder: "support"
         });
         expect(economy.ships.fighter_squadron.attackMultipliers).toEqual({ orbital_platform: 2 });
         expect(economy.ships.bomber_squadron.attackMultipliers).toEqual({

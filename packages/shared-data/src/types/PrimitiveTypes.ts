@@ -45,7 +45,8 @@ export const EntityKind = z.enum([
     "asteroid_belt",
     "wormhole",
     "black_hole",
-    "hyperspace_tunnel"
+    "hyperspace_tunnel",
+    "space_structure"
 ]);
 export type EntityKind = z.infer<typeof EntityKind>;
 
@@ -83,9 +84,20 @@ export const ShipType = z.enum([
     "advanced_fighter_squadron",
     "bomber_squadron",
     "star_destroyer",
-    "super_star_destroyer"
+    "super_star_destroyer",
+    "builder"
 ]);
 export type ShipType = z.infer<typeof ShipType>;
+
+/** Installations a Builder constructs in open space; stats live in `EconomyBalance.spaceStructures`. */
+export const SpaceStructureType = z.enum([
+    "sensor_array",
+    "space_station",
+    "missile_battery",
+    "space_dock",
+    "stargate"
+]);
+export type SpaceStructureType = z.infer<typeof SpaceStructureType>;
 
 /** Pointy-top direction index 0–5: 0 = east, counter-clockwise on screen (see `axialNeighbor`). */
 export const HexDirection = z.number().int().min(0).max(5);
@@ -243,6 +255,25 @@ export const HyperspaceTunnelEntity = EntityBase.extend({
 });
 export type HyperspaceTunnelEntity = z.infer<typeof HyperspaceTunnelEntity>;
 
+/**
+ * A structure built by a Builder on an empty open-space hex. While `constructing` it is a
+ * construction site: it has no effect and its order (in the side's economy, keyed by this id)
+ * only progresses while one of the side's Builders is on the hex.
+ */
+export const SpaceStructureEntity = EntityBase.extend({
+    kind: z.literal("space_structure"),
+    structureType: SpaceStructureType,
+    sideId: SideId,
+    /** Absent means tier 1. */
+    tier: EnhancementTier.optional(),
+    /** Current hp; absent means full (see `spaceStructureStats`). */
+    hp: z.number().min(0).optional(),
+    constructing: z.boolean().optional(),
+    /** Last turn it fought (see `repairsAtEndOf`); absent means never. Owner only. */
+    lastCombatTurn: z.number().int().min(0).optional()
+});
+export type SpaceStructureEntity = z.infer<typeof SpaceStructureEntity>;
+
 export const EntitySummary = z.discriminatedUnion("kind", [
     ShipEntity,
     SupplyShipEntity,
@@ -253,7 +284,8 @@ export const EntitySummary = z.discriminatedUnion("kind", [
     AsteroidBeltEntity,
     WormholeEntity,
     BlackHoleEntity,
-    HyperspaceTunnelEntity
+    HyperspaceTunnelEntity,
+    SpaceStructureEntity
 ]);
 export type EntitySummary = z.infer<typeof EntitySummary>;
 

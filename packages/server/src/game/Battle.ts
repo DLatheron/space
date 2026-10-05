@@ -4,6 +4,7 @@ import {
     MOVE_COST_PER_HEX,
     platformStats,
     ringHexes,
+    spaceStructureStats,
     type AxialCoord,
     type CombatCause,
     type CombatOutcome,
@@ -21,11 +22,12 @@ import {
     platformFighter,
     shipFighter,
     spaceExchange,
+    structureFighter,
     supplyFighter,
     toParticipant,
     type Fighter
 } from "./combat.js";
-import { destroyVessels, type Vessel } from "./destroyShips.js";
+import { destroySpaceStructures, destroyVessels, type Vessel } from "./destroyShips.js";
 import type { EconomyManager } from "./EconomyManager.js";
 import type { EntityManager } from "./EntityManager.js";
 import { isLocationEntity } from "./GroundUnits.js";
@@ -117,9 +119,23 @@ export function enemyPlatformsAt(
     return platforms;
 }
 
+/** Space structures (sites included) on `hex` belonging to a side other than `sideId`. */
+export function enemyStructuresAt(
+    entities: EntityManager,
+    hex: AxialCoord,
+    sideId: SideId
+): EntityOf<"space_structure">[] {
+    return entities
+        .entitiesAt(hex.q, hex.r)
+        .filter(
+            (e): e is EntityOf<"space_structure"> =>
+                e.kind === "space_structure" && e.sideId !== sideId
+        );
+}
+
 /**
- * Whether a ship of `sideId` has to fight its way into `hex`: enemy vessels or an enemy
- * Orbital Platform hold it.
+ * Whether a ship of `sideId` has to fight its way into `hex`: enemy vessels, an enemy
+ * Orbital Platform or an enemy space structure hold it.
  */
 export function isDefendedHex(
     entities: EntityManager,
@@ -129,13 +145,15 @@ export function isDefendedHex(
 ): boolean {
     return (
         hasEnemyVessels(entities, hex, sideId) ||
+        enemyStructuresAt(entities, hex, sideId).length > 0 ||
         enemyPlatformsAt(entities, economy, hex, sideId).length > 0
     );
 }
 
 /**
  * Whether a supply ship of `sideId` stepping into `hex` is ambushed (see
- * `BattleManager.ambush`): enemy warships or an armed enemy Orbital Platform hold it.
+ * `BattleManager.ambush`): enemy warships, an armed enemy Orbital Platform or an armed,
+ * completed enemy space structure hold it.
  */
 export function hasAmbushers(
     entities: EntityManager,
@@ -145,6 +163,12 @@ export function hasAmbushers(
 ): boolean {
     if (hasEnemyWarships(entities, hex, sideId)) return true;
     if (!economy) return false;
+    const armedStructure = enemyStructuresAt(entities, hex, sideId).some(
+        (s) =>
+            !s.constructing &&
+            spaceStructureStats(s.structureType, s.tier ?? 1, economy.balance).attack > 0
+    );
+    if (armedStructure) return true;
     return enemyPlatformsAt(entities, economy, hex, sideId).some(
         ({ installation }) => platformStats(installation.tier, economy.balance).attack > 0
     );
@@ -244,7 +268,8 @@ export class BattleManager {
             ...shipsAt(this._entities, hex)
                 .filter((s) => s.sideId !== supplyShip.sideId)
                 .map((s) => shipFighter(s, "attacker", this._balance)),
-            ...this._platformFighters(hex, supplyShip.sideId, "attacker")
+            ...this._platformFighters(hex, supplyShip.sideId, "attacker"),
+            ...this._structureFighters(hex, supplyShip.sideId, "attacker")
         ];
         const attackerSideId = enemies[0]?.sideId;
         const aggressors = enemies.filter((f) => f.sideId === attackerSideId && f.attack > 0);
@@ -335,6 +360,13 @@ export class BattleManager {
         );
     }
 
+    /** Enemy space structures on `hex` (enemies of `sideId`) as fighters. */
+    private _structureFighters(hex: AxialCoord, sideId: SideId, role: Fighter["role"]): Fighter[] {
+        return enemyStructuresAt(this._entities, hex, sideId).map((s) =>
+            structureFighter(s, role, this._balance)
+        );
+    }
+
     private _fighterFor(vessel: Vessel, role: Fighter["role"]): Fighter {
         return vessel.kind === "ship"
             ? shipFighter(vessel, role, this._balance)
@@ -352,7 +384,8 @@ export class BattleManager {
             ...vesselsAt(this._entities, hex)
                 .filter((v) => v.sideId !== attacker.sideId)
                 .map((v) => this._fighterFor(v, "defender")),
-            ...this._platformFighters(hex, attacker.sideId, "defender")
+            ...this._platformFighters(hex, attacker.sideId, "defender"),
+            ...this._structureFighters(hex, attacker.sideId, "defender")
         ];
         const aggressor = shipFighter(attacker, "attacker", this._balance);
         spaceExchange(aggressor, defenders, this._balance.combat, this._rng);
@@ -387,11 +420,18 @@ export class BattleManager {
      */
     private _apply(
         fighters: readonly Fighter[]
-    ): Pick<CombatResult, "destroyedIds" | "destroyedUnitIds" | "destroyedInstallationIds"> {
+    ): Pick<
+        CombatResult,
+        "destroyedIds" | "destroyedUnitIds" | "destroyedInstallationIds" | "destroyedStructureIds"
+    > {
         const lost: Vessel[] = [];
         const turn = this._turn();
         const destroyedInstallationIds = this._applyPlatforms(fighters, turn);
-        const installations = destroyedInstallationIds.length ? { destroyedInstallationIds } : {};
+        const destroyedStructureIds = this._applyStructures(fighters, turn);
+        const installations = {
+            ...(destroyedInstallationIds.length ? { destroyedInstallationIds } : {}),
+            ...(destroyedStructureIds.length ? { destroyedStructureIds } : {})
+        };
         for (const f of fighters) {
             const vessel = this._entities.get(f.id);
             if (vessel?.kind !== "ship" && vessel?.kind !== "supply_ship") continue;
@@ -411,6 +451,22 @@ export class BattleManager {
             destroyedUnitIds: result.destroyedUnitIds,
             ...installations
         };
+    }
+
+    /** Space structure fighters' hp and combat turn onto their entities; returns those destroyed. */
+    private _applyStructures(fighters: readonly Fighter[], turn: number): EntityId[] {
+        const destroyed: EntityId[] = [];
+        for (const f of fighters) {
+            if (f.kind !== "space_structure") continue;
+            const structure = this._entities.getOfKind(f.id, "space_structure");
+            if (!structure) continue;
+            structure.lastCombatTurn = turn;
+            if (!isAlive(f)) destroyed.push(f.id);
+            else if (f.hp < f.maxHp) structure.hp = f.hp;
+            else delete structure.hp;
+        }
+        destroySpaceStructures(this._entities, this._economy, destroyed);
+        return destroyed;
     }
 
     /** Platform fighters' hp and combat turn onto their installations; returns those destroyed. */

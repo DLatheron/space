@@ -1,6 +1,7 @@
 import {
     GROUND_UNIT_TYPE_INFO,
     SHIP_TYPE_INFO,
+    spaceStructureName,
     STRUCTURE_INFO,
     type CombatParticipant,
     type CombatResult,
@@ -13,7 +14,8 @@ const CAUSE_LABELS: Record<CombatResult["cause"], string> = {
     ambush: "Ambush",
     hyperjump: "Jump-in attack",
     invasion: "Invasion",
-    bombardment: "Orbital bombardment"
+    bombardment: "Orbital bombardment",
+    ranged: "Structure fire"
 };
 
 export function sideName(sideId: SideId): string {
@@ -88,15 +90,31 @@ export function participantName(world: HexWorld, p: CombatParticipant): string {
         return p.structureType ? STRUCTURE_INFO[p.structureType].name : "Installation";
     }
     const entity = world.findEntityById(p.id);
+    if (p.kind === "space_structure") {
+        if (entity?.kind === "space_structure" && entity.name) return entity.name;
+        return p.spaceStructureType ? spaceStructureName(p.spaceStructureType) : "Structure";
+    }
     const typeName = p.shipType ? SHIP_TYPE_INFO[p.shipType].name : "Ship";
     return entity?.kind === "ship" && entity.name ? entity.name : typeName;
 }
 
-/** Losses per side, e.g. "Alpha lost 2 · Beta lost 1"; installations are counted separately. */
+/** Space structures a combat destroyed, from `destroyedStructureIds` or the participants. */
+export function destroyedStructureCount(result: CombatResult): number {
+    const ids = new Set(result.destroyedStructureIds ?? []);
+    for (const p of result.participants) {
+        if (p.destroyed && p.kind === "space_structure") ids.add(p.id);
+    }
+    return ids.size;
+}
+
+/**
+ * Losses per side, e.g. "Alpha lost 2 · Beta lost 1"; installations and space structures are
+ * counted separately.
+ */
 export function combatLosses(result: CombatResult): string {
     const lost = new Map<SideId, number>();
     for (const p of result.participants) {
-        if (p.destroyed && p.kind !== "installation") {
+        if (p.destroyed && p.kind !== "installation" && p.kind !== "space_structure") {
             lost.set(p.sideId, (lost.get(p.sideId) ?? 0) + 1);
         }
     }
@@ -107,6 +125,10 @@ export function combatLosses(result: CombatResult): string {
     const installations = result.destroyedInstallationIds?.length ?? 0;
     if (installations) {
         parts.push(`${installations} installation${installations === 1 ? "" : "s"} destroyed`);
+    }
+    const structures = destroyedStructureCount(result);
+    if (structures) {
+        parts.push(`${structures} structure${structures === 1 ? "" : "s"} destroyed`);
     }
     return parts.length ? parts.join(" · ") : "No losses";
 }

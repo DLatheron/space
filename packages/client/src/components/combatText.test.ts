@@ -59,4 +59,22 @@ describe("combat text", () => {
         } as CombatResult;
         expect(combatLosses(result)).toBe("Alpha lost 1 · 1 installation destroyed");
     });
+
+    it("names space structures and counts them apart from ship losses", () => {
+        const world = new HexWorld();
+        const station = participant({
+            id: "station-1",
+            kind: "space_structure",
+            sideId: "beta",
+            role: "defender",
+            spaceStructureType: "space_station",
+            shipType: undefined
+        });
+        expect(participantName(world, station)).toBe("Space Station");
+        const result = {
+            participants: [participant({ id: "s1" }), station],
+            destroyedStructureIds: ["station-1"]
+        } as CombatResult;
+        expect(combatLosses(result)).toBe("Alpha lost 1 · 1 structure destroyed");
+    });
 });

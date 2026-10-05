@@ -2,6 +2,7 @@ import type {
     BuildItem,
     GroundUnitType,
     ShipType,
+    SpaceStructureType,
     StructureType,
     TechId
 } from "@space/shared-data";
@@ -38,7 +39,16 @@ const SHIP_IMAGES: Partial<Record<ShipType, string>> = {
     advanced_fighter_squadron: "ships/advanced-fighter-squadron.webp",
     bomber_squadron: "ships/tie-bomber.avif",
     star_destroyer: "ships/star-destroyer.jpeg",
-    super_star_destroyer: "ships/super-star-destroyer.webp"
+    super_star_destroyer: "ships/super-star-destroyer.webp",
+    builder: "ships/builder.webp"
+};
+
+const SPACE_STRUCTURE_IMAGES: Partial<Record<SpaceStructureType, string>> = {
+    sensor_array: "space-structures/sensor-array.jpg",
+    space_station: "space-structures/space-station.jpg",
+    missile_battery: "space-structures/missile-battery.jpg",
+    space_dock: "space-structures/space-dock.jpg",
+    stargate: "space-structures/stargate.jpg"
 };
 
 const GROUND_UNIT_IMAGES: Partial<Record<GroundUnitType, string>> = {
@@ -66,13 +76,22 @@ const TECH_IMAGES: Partial<Record<TechId, string>> = {
     armoured_freighters: "research/armoured-freighters.jpg",
     damage_control_1: "research/damage-control-i.webp",
     damage_control_2: "research/damage-control-ii.webp",
-    capital_ship_engineering: "research/captital-ship-engineering.webp"
+    capital_ship_engineering: "research/captital-ship-engineering.webp",
+    space_construction: "research/space-construction.webp",
+    sensor_arrays_2: "research/deep-space-sensors.webp",
+    sensor_arrays_3: "research/long-range-sensors.webp",
+    space_stations_1: "research/space-stations.webp",
+    space_stations_2: "research/fortified-stations.webp",
+    space_stations_3: "research/battle-stations.webp",
+    missile_batteries: "research/missile-batteries.webp",
+    stargates: "research/stargates.webp"
 };
 
 export type ImageSubject =
     | { kind: "structure"; structureType: StructureType }
     | { kind: "ship"; shipType: ShipType }
     | { kind: "groundUnit"; unitType: GroundUnitType }
+    | { kind: "spaceStructure"; structureType: SpaceStructureType }
     | { kind: "supplyShip" };
 
 function url(path: string | undefined): string | undefined {
@@ -87,6 +106,8 @@ export function imageUrl(subject: ImageSubject): string | undefined {
             return url(SHIP_IMAGES[subject.shipType]);
         case "groundUnit":
             return url(GROUND_UNIT_IMAGES[subject.unitType]);
+        case "spaceStructure":
+            return url(SPACE_STRUCTURE_IMAGES[subject.structureType]);
         case "supplyShip":
             return url(SUPPLY_SHIP_IMAGE);
     }
@@ -105,6 +126,8 @@ export function buildItemImage(item: BuildItem): string | undefined {
             return imageUrl(item);
         case "groundUnit":
             return imageUrl(item);
+        case "spaceStructure":
+            return imageUrl(item);
         case "research":
             return techImage(item.techId);
         case "enhancement": {
@@ -116,6 +139,11 @@ export function buildItemImage(item: BuildItem): string | undefined {
                     return imageUrl({ kind: "ship", shipType: target.shipType });
                 case "groundUnit":
                     return imageUrl({ kind: "groundUnit", unitType: target.unitType });
+                case "spaceStructure":
+                    return imageUrl({
+                        kind: "spaceStructure",
+                        structureType: target.structureType
+                    });
             }
         }
     }

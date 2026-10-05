@@ -4,6 +4,7 @@ import {
     groundUnitStats,
     platformStats,
     shipStats,
+    spaceStructureStats,
     supplyShipStats,
     type CombatBalance,
     type CombatParticipant,
@@ -26,6 +27,7 @@ export type Fighter = {
     shipType?: CombatParticipant["shipType"];
     unitType?: CombatParticipant["unitType"];
     structureType?: CombatParticipant["structureType"];
+    spaceStructureType?: CombatParticipant["spaceStructureType"];
     /** Installations: the location they stand on. */
     locationId?: EntityId;
     tier?: number;
@@ -191,6 +193,33 @@ export function platformFighter(
     );
 }
 
+/** A space structure; unarmed ones (attack 0) defend their hex but never hit back. */
+export function structureFighter(
+    structure: EntityOf<"space_structure">,
+    role: Fighter["role"],
+    balance: EconomyBalance
+): Fighter {
+    const tier = structure.tier ?? 1;
+    const stats = spaceStructureStats(structure.structureType, tier, balance);
+    const armed = !structure.constructing;
+    return fighter(
+        {
+            id: structure.id,
+            kind: "space_structure",
+            sideId: structure.sideId,
+            role,
+            spaceStructureType: structure.structureType,
+            tier,
+            targetClass: "orbital_platform",
+            attack: armed ? stats.attack : 0,
+            defence: stats.defence,
+            evasion: 0,
+            maxHp: stats.hp
+        },
+        structure.hp ?? stats.hp
+    );
+}
+
 export function toParticipant(f: Fighter): CombatParticipant {
     return {
         id: f.id,
@@ -200,6 +229,7 @@ export function toParticipant(f: Fighter): CombatParticipant {
         ...(f.shipType ? { shipType: f.shipType } : {}),
         ...(f.unitType ? { unitType: f.unitType } : {}),
         ...(f.structureType ? { structureType: f.structureType } : {}),
+        ...(f.spaceStructureType ? { spaceStructureType: f.spaceStructureType } : {}),
         ...(f.tier !== undefined ? { tier: f.tier } : {}),
         maxHp: f.maxHp,
         hpBefore: f.hpBefore,

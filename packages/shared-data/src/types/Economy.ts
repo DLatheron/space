@@ -16,8 +16,16 @@ import {
     PLANET_LEVEL_MAX,
     type PlanetEntity,
     ShipType,
+    type SpaceStructureEntity,
+    SpaceStructureType,
     SupplyShipEntity
 } from "./PrimitiveTypes.js";
+import {
+    SpaceStructureBalance,
+    spaceStructureMaxTier,
+    spaceStructureName,
+    spaceStructureTier
+} from "./SpaceStructures.js";
 import {
     addResources,
     mapResources,
@@ -77,8 +85,12 @@ export function isStorageStructure(type: StructureType): type is StorageStructur
     return (StorageStructureType.options as readonly StructureType[]).includes(type);
 }
 
-/** Kind of location an installation can be built on; `asteroid` means a mineable large asteroid. */
-export const StructureSite = z.enum(["planet", "moon", "asteroid"]);
+/**
+ * Kind of location an installation can be built on; `asteroid` means a mineable large asteroid.
+ * `space` is a space structure's own site (see `LocationEconomy.structure`), which takes no
+ * installations.
+ */
+export const StructureSite = z.enum(["planet", "moon", "asteroid", "space"]);
 export type StructureSite = z.infer<typeof StructureSite>;
 
 /** Kinds of work each location can only run a limited number of at once (see `buildSlots`). */
@@ -162,7 +174,9 @@ export const ShipBalance = z.object({
     /** Absent for ship types without a hyperdrive. */
     hyperdrive: HyperdriveBalance.optional(),
     /** Absent for ship types that can't carry ships. */
-    hangar: HangarBalance.optional()
+    hangar: HangarBalance.optional(),
+    /** Can start space structure construction sites on empty hexes (see `client:builder:construct`). */
+    canConstruct: z.boolean()
 });
 export type ShipBalance = z.infer<typeof ShipBalance>;
 
@@ -207,6 +221,7 @@ export const EconomyBalance = z.object({
     supplyShips: SupplyShipBalance,
     repair: RepairBalance,
     defences: DefencesBalance,
+    spaceStructures: z.record(SpaceStructureType, SpaceStructureBalance),
     groundUnits: z.record(GroundUnitType, GroundUnitBalance),
     groundUnitTiers: z.object({
         attackBonus: PerTier(z.number().int()),
@@ -246,12 +261,20 @@ export const EnhancementTarget = z.discriminatedUnion("kind", [
         structureType: StructureType
     }),
     z.object({ kind: z.literal("ship"), shipId: EntityId, shipType: ShipType }),
-    z.object({ kind: z.literal("groundUnit"), unitId: EntityId, unitType: GroundUnitType })
+    z.object({ kind: z.literal("groundUnit"), unitId: EntityId, unitType: GroundUnitType }),
+    /** Ordered at the structure's own site; each tier needs its own tech (see `spaceStructureTier`). */
+    z.object({
+        kind: z.literal("spaceStructure"),
+        structureId: EntityId,
+        structureType: SpaceStructureType
+    })
 ]);
 export type EnhancementTarget = z.infer<typeof EnhancementTarget>;
 
 export const BuildItem = z.discriminatedUnion("kind", [
     z.object({ kind: z.literal("structure"), structureType: StructureType }),
+    /** Construction of the space structure at this site; only placed by a Builder. */
+    z.object({ kind: z.literal("spaceStructure"), structureType: SpaceStructureType }),
     z.object({ kind: z.literal("ship"), shipType: ShipType }),
     z.object({ kind: z.literal("groundUnit"), unitType: GroundUnitType }),
     /** Only at a location with a Science Academy; unlocks the tech side-wide. */
@@ -300,9 +323,17 @@ export const ShieldState = z.object({
 });
 export type ShieldState = z.infer<typeof ShieldState>;
 
+/** Mirrors the space structure entity for its economy entry. */
+export const SpaceStructureSiteState = z.object({
+    type: SpaceStructureType,
+    tier: EnhancementTier,
+    constructing: z.boolean()
+});
+export type SpaceStructureSiteState = z.infer<typeof SpaceStructureSiteState>;
+
 /** Private to the owning side; never part of the shared entity data. */
 export const LocationEconomy = z.object({
-    /** Planet, moon or mineable large asteroid entity id. */
+    /** Planet, moon, mineable large asteroid or space structure entity id. */
     locationId: EntityId,
     site: StructureSite,
     /** Planet level (drives base income and ship cap); 0 for moons and asteroids. */
@@ -321,7 +352,9 @@ export const LocationEconomy = z.object({
      */
     orders: z.array(BuildOrder),
     /** Present while a Shield Generator is built here. */
-    shield: ShieldState.optional()
+    shield: ShieldState.optional(),
+    /** Space structure sites (`site: "space"`): the structure this entry belongs to. */
+    structure: SpaceStructureSiteState.optional()
 });
 export type LocationEconomy = z.infer<typeof LocationEconomy>;
 
@@ -462,6 +495,9 @@ function tierMultiplier(tier: number, balance: EconomyBalance): number {
 
 export type LocationEntity = PlanetEntity | MoonEntity | LargeAsteroidEntity;
 
+/** Anything with its own economy entry: a location or a space structure. */
+export type BuildSiteEntity = LocationEntity | SpaceStructureEntity;
+
 /** Build site for a location entity; undefined for asteroids that aren't mineable. */
 export function siteForEntity(entity: LocationEntity): StructureSite | undefined {
     switch (entity.kind) {
@@ -506,12 +542,19 @@ export function structureCapBonus(
 
 /**
  * Most of each resource a location's stockpile holds: the base (home or default) cap plus
- * storage installations. Production beyond it is lost; supply ships wait for room.
+ * storage installations. Production beyond it is lost; supply ships wait for room. A space
+ * structure's site holds exactly what its orders still need.
  */
 export function stockpileCap(
-    location: Pick<LocationEconomy, "home" | "installations">,
+    location: Pick<LocationEconomy, "home" | "installations"> & {
+        site?: StructureSite;
+        orders?: readonly Pick<BuildOrder, "cost" | "applied">[];
+    },
     balance: EconomyBalance
 ): Resources {
+    if (location.site === "space") {
+        return sumResources((location.orders ?? []).map(remainingNeed));
+    }
     let cap = { ...(location.home ? balance.stockpileCaps.home : balance.stockpileCaps.default) };
     for (const inst of location.installations) {
         cap = addResources(cap, structureCapBonus(inst.type, inst.tier, balance));
@@ -553,6 +596,8 @@ export function enhancementTargetId(target: EnhancementTarget): EntityId {
             return target.shipId;
         case "groundUnit":
             return target.unitId;
+        case "spaceStructure":
+            return target.structureId;
     }
 }
 
@@ -572,6 +617,12 @@ function enhancementTargetDef(
             return shipDef(target.shipType, balance);
         case "groundUnit":
             return groundUnitDef(target.unitType, balance);
+        case "spaceStructure":
+            return {
+                ...balance.spaceStructures[target.structureType],
+                name: spaceStructureName(target.structureType),
+                maxTier: spaceStructureMaxTier(target.structureType, balance)
+            };
     }
 }
 
@@ -589,7 +640,13 @@ export function buildItemCost(item: BuildItem, balance: EconomyBalance): Resourc
             return balance.groundUnits[item.unitType].cost;
         case "research":
             return TECHS[item.techId].cost;
+        case "spaceStructure":
+            return balance.spaceStructures[item.structureType].cost;
         case "enhancement": {
+            if (item.target.kind === "spaceStructure") {
+                const tier = spaceStructureTier(item.target.structureType, item.tier, balance);
+                return { ...(tier?.cost ?? zeroResources()), population: 0 };
+            }
             const base = enhancementTargetDef(item.target, balance).cost;
             const factors = balance.enhancementCostFactor;
             const factor = item.tier === 2 ? factors["2"] : item.tier === 3 ? factors["3"] : 1;
@@ -608,7 +665,15 @@ export function buildItemTurns(item: BuildItem, balance: EconomyBalance): number
             return balance.groundUnits[item.unitType].buildTurns;
         case "research":
             return TECHS[item.techId].buildTurns;
+        case "spaceStructure":
+            return balance.spaceStructures[item.structureType].buildTurns;
         case "enhancement":
+            if (item.target.kind === "spaceStructure") {
+                return (
+                    spaceStructureTier(item.target.structureType, item.tier, balance)?.buildTurns ??
+                    1
+                );
+            }
             return enhancementTargetDef(item.target, balance).buildTurns;
     }
 }
@@ -621,6 +686,8 @@ function enhancementTargetName(target: EnhancementTarget): string {
             return SHIP_TYPE_INFO[target.shipType].name;
         case "groundUnit":
             return GROUND_UNIT_TYPE_INFO[target.unitType].name;
+        case "spaceStructure":
+            return spaceStructureName(target.structureType);
     }
 }
 
@@ -628,6 +695,8 @@ export function buildItemName(item: BuildItem): string {
     switch (item.kind) {
         case "structure":
             return structureName(item.structureType);
+        case "spaceStructure":
+            return spaceStructureName(item.structureType);
         case "ship":
             return SHIP_TYPE_INFO[item.shipType].name;
         case "groundUnit":
@@ -676,6 +745,7 @@ export function createBuildOrder(
 export function buildCategory(item: BuildItem): BuildCategory | undefined {
     switch (item.kind) {
         case "structure":
+        case "spaceStructure":
             return "installations";
         case "ship":
             return "ships";
@@ -684,7 +754,9 @@ export function buildCategory(item: BuildItem): BuildCategory | undefined {
         case "research":
             return "research";
         case "enhancement":
-            return item.target.kind === "installation" ? "installations" : undefined;
+            return item.target.kind === "installation" || item.target.kind === "spaceStructure"
+                ? "installations"
+                : undefined;
     }
 }
 
@@ -696,6 +768,7 @@ export function queueCategory(item: BuildItem): BuildCategory {
     if (item.kind === "enhancement") {
         switch (item.target.kind) {
             case "installation":
+            case "spaceStructure":
                 return "installations";
             case "ship":
                 return "ships";
@@ -731,11 +804,24 @@ export function moveOrderInQueue<T extends Pick<BuildOrder, "id" | "item">>(
     return result;
 }
 
-/** Orders a location may run at once per category: the base plus built installations' bonuses. */
-export function buildSlots(
-    location: Pick<LocationEconomy, "installations">,
-    balance: EconomyBalance
-): BuildSlots {
+type SlotSource = Pick<LocationEconomy, "installations"> & {
+    structure?: LocationEconomy["structure"];
+};
+
+/**
+ * Orders a location may run at once per category: the base plus built installations' bonuses.
+ * A space structure site runs its construction or upgrade, plus a completed dock's ship slots.
+ */
+export function buildSlots(location: SlotSource, balance: EconomyBalance): BuildSlots {
+    if (location.structure) {
+        const { type, constructing } = location.structure;
+        return {
+            ships: constructing ? 0 : balance.spaceStructures[type].shipSlots,
+            installations: 1,
+            groundUnits: 0,
+            research: 0
+        };
+    }
     const slots = { ...balance.buildSlots.base };
     for (const inst of location.installations) {
         const bonus = balance.buildSlots.structures[inst.type];
@@ -765,7 +851,7 @@ type PartitionableOrder = Pick<BuildOrder, "id" | "item" | "priority" | "cost" |
  * (list order is queue order; see `moveOrderInQueue`). Uncategorised orders are always active.
  */
 export function partitionOrders<T extends PartitionableOrder>(
-    location: Pick<LocationEconomy, "installations"> & { orders: readonly T[] },
+    location: SlotSource & { orders: readonly T[] },
     balance: EconomyBalance
 ): OrderPartition<T> {
     const slots = buildSlots(location, balance);
@@ -854,7 +940,7 @@ export function fundOrders<T extends FundableOrder>(
  */
 export function fundLocationOrders<T extends PartitionableOrder & FundableOrder>(
     stockpile: Resources,
-    location: Pick<LocationEconomy, "installations"> & { orders: readonly T[] },
+    location: SlotSource & { orders: readonly T[] },
     balance: EconomyBalance,
     standing: readonly FundableOrder[] = []
 ): FundingResult<T> {
@@ -864,7 +950,7 @@ export function fundLocationOrders<T extends PartitionableOrder & FundableOrder>
     let pending = standing;
     for (;;) {
         const fresh = partitionOrders(
-            { installations: location.installations, orders },
+            { installations: location.installations, structure: location.structure, orders },
             balance
         ).active.filter((o) => !(o.id in drawn));
         if (fresh.length === 0 && pending.length === 0) break;
@@ -1113,11 +1199,79 @@ export function canBuild(
     return result;
 }
 
+/**
+ * Whether a Space Dock can build `shipType`: anything a Shipyard plus Advanced Shipyard
+ * builds, except colony ships and transports.
+ */
+export function spaceDockBuilds(shipType: ShipType, balance: EconomyBalance): boolean {
+    const def = balance.ships[shipType];
+    return (
+        def.requires.every((s) => s === "shipyard" || s === "advanced_shipyard") &&
+        !def.canColonise &&
+        def.unitCapacity === 0
+    );
+}
+
+function canBuildAtSpaceSite(
+    ctx: BuildContext,
+    location: LocationEconomy,
+    structure: NonNullable<LocationEconomy["structure"]>,
+    item: BuildItem
+): CanBuildResult {
+    const balance = ctx.balance;
+    const missingTech = (tech: TechId | null | undefined): CanBuildResult | undefined =>
+        tech && !ctx.techs.includes(tech)
+            ? { ok: false, reason: `Requires ${TECHS[tech].name}` }
+            : undefined;
+    const name = spaceStructureName(structure.type);
+    switch (item.kind) {
+        case "spaceStructure":
+            return { ok: false, reason: "Construction sites are placed by a Builder" };
+        case "ship": {
+            if (structure.constructing) return { ok: false, reason: `The ${name} isn't finished` };
+            if (balance.spaceStructures[structure.type].shipSlots <= 0) {
+                return { ok: false, reason: `A ${name} can't build ships` };
+            }
+            if (!spaceDockBuilds(item.shipType, balance)) {
+                return { ok: false, reason: "Can't be built at a Space Dock" };
+            }
+            const blocked = missingTech(balance.ships[item.shipType].requiresTech);
+            if (blocked) return blocked;
+            if (ctx.shipCount >= ctx.shipCap) return { ok: false, reason: "Ship cap reached" };
+            return { ok: true };
+        }
+        case "enhancement": {
+            const target = item.target;
+            if (target.kind !== "spaceStructure" || target.structureId !== location.locationId) {
+                return { ok: false, reason: "Target not at this location" };
+            }
+            if (structure.constructing) return { ok: false, reason: `The ${name} isn't finished` };
+            if (structure.tier >= spaceStructureMaxTier(structure.type, balance)) {
+                return { ok: false, reason: "Already at maximum tier" };
+            }
+            if (item.tier !== structure.tier + 1) {
+                return { ok: false, reason: `Next upgrade is tier ${structure.tier + 1}` };
+            }
+            const blocked = missingTech(
+                spaceStructureTier(structure.type, item.tier, balance)?.requiresTech
+            );
+            if (blocked) return blocked;
+            if (location.orders.some((o) => o.item.kind === "enhancement")) {
+                return { ok: false, reason: "Already being upgraded" };
+            }
+            return { ok: true };
+        }
+        default:
+            return { ok: false, reason: `Not available at a ${name}` };
+    }
+}
+
 function canBuildItem(
     ctx: BuildContext,
     location: LocationEconomy,
     item: BuildItem
 ): CanBuildResult {
+    if (location.structure) return canBuildAtSpaceSite(ctx, location, location.structure, item);
     const balance = ctx.balance;
     const built = new Set(location.installations.map((i) => i.type));
     const missingStructure = (requires: StructureType[]): CanBuildResult | undefined => {
@@ -1165,6 +1319,8 @@ function canBuildItem(
             const def = balance.groundUnits[item.unitType];
             return missingStructure(def.requires) ?? missingTech(def.requiresTech) ?? { ok: true };
         }
+        case "spaceStructure":
+            return { ok: false, reason: "Space structures are built by a Builder in open space" };
         case "research": {
             const academy = location.installations.some(
                 (i) => STRUCTURE_INFO[i.type].enablesResearch
@@ -1186,6 +1342,9 @@ function canBuildItem(
         }
         case "enhancement": {
             const target = item.target;
+            if (target.kind === "spaceStructure") {
+                return { ok: false, reason: "Target not at this location" };
+            }
             const targetId = enhancementTargetId(target);
             const current =
                 target.kind === "installation"

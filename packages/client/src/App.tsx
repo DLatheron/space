@@ -102,6 +102,12 @@ export function App() {
                     `ship jumped — ${payload.shipId} ${payload.from.q},${payload.from.r} → ${payload.to.q},${payload.to.r} (${payload.outcome})${payload.displacedTo ? `, displaced to ${payload.displacedTo.q},${payload.displacedTo.r}` : ""}${payload.destroyedIds.length ? `, destroyed ${payload.destroyedIds.join(", ")}` : ""}`
                 );
             }),
+            messageManager.registerHandler("server:ship:stargated", (_ctx, payload) => {
+                world.applyShipStargated(payload);
+                appendLog(
+                    `ship stargated — ${payload.shipId} ${payload.from.q},${payload.from.r} → ${payload.to.q},${payload.to.r} (${payload.fromGateId} → ${payload.toGateId})`
+                );
+            }),
             messageManager.registerHandler("server:combat", (_ctx, payload) => {
                 world.applyCombat(payload);
                 appendLog(
@@ -268,6 +274,17 @@ export function App() {
             unloadShips: (carrierId, shipIds) => {
                 sendMessage({ type: "client:ship:unload", payload: { carrierId, shipIds } });
                 appendLog(`unload ships — ${shipIds.join(", ")} from ${carrierId}`);
+            },
+            construct: (shipId, structureType) => {
+                sendMessage({
+                    type: "client:builder:construct",
+                    payload: { shipId, structureType }
+                });
+                appendLog(`construct — ${structureType} with ${shipId}`);
+            },
+            enterStargate: (shipId, gateId) => {
+                sendMessage({ type: "client:ship:stargate", payload: { shipId, gateId } });
+                appendLog(`stargate — ${shipId} → ${gateId}`);
             }
         }),
         [sendMessage, appendLog]
@@ -297,6 +314,9 @@ export function App() {
                     break;
                 case "hyperjump":
                     actions.hyperjump(action.shipId, action.target);
+                    break;
+                case "stargate":
+                    actions.enterStargate(action.shipId, action.gateId);
                     break;
                 case "rejected":
                     world.showNotice(action.reason);

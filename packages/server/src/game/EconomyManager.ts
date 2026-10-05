@@ -26,6 +26,7 @@ import {
     shipStats,
     siteForEntity,
     slotsForEntity,
+    spaceStructureStats,
     stockpileCap,
     structureDef,
     subtractResources,
@@ -36,6 +37,7 @@ import {
     type BuildItem,
     type BuildOrder,
     type BuildPriority,
+    type BuildSiteEntity,
     type EconomyBalance,
     type EconomyState,
     type EnhancementTarget,
@@ -50,6 +52,7 @@ import {
     type ShieldState,
     type ShipType,
     type SideId,
+    type SpaceStructureSiteState,
     type TechId
 } from "@space/shared-data";
 import { defaultEconomyBalance } from "../config/config.schema.js";
@@ -112,6 +115,8 @@ export type ReleasedPopulation = {
 type LocationRecord = {
     /** A side's starting planet (home stockpile caps), whoever owns it now. */
     home: boolean;
+    /** A space structure's site: its stockpile only holds what its orders need. */
+    space?: boolean;
     stockpile: Resources;
     installations: Installation[];
     orders: BuildOrder[];
@@ -191,6 +196,13 @@ export class EconomyManager {
         return isLocationEntity(entity) ? entity : undefined;
     }
 
+    /** Location or space structure entity (anything with an economy entry). */
+    siteEntity(siteId: EntityId): BuildSiteEntity | undefined {
+        const entity = this._entities.get(siteId);
+        if (isLocationEntity(entity)) return entity;
+        return entity?.kind === "space_structure" ? entity : undefined;
+    }
+
     ownedLocations(sideId: SideId): LocationEntity[] {
         const result: LocationEntity[] = [];
         for (const entity of this._entities.all()) {
@@ -199,11 +211,67 @@ export class EconomyManager {
         return result;
     }
 
-    /** Detached snapshot of an owned location's economy. */
+    /** Owned locations, then the side's space structures. */
+    ownedSites(sideId: SideId): BuildSiteEntity[] {
+        return [
+            ...this.ownedLocations(sideId),
+            ...this._entities.ofKind("space_structure").filter((s) => s.sideId === sideId)
+        ];
+    }
+
+    /** Detached snapshot of an owned location's or space structure's economy. */
     locationEconomy(locationId: EntityId): LocationEconomy | undefined {
-        const location = this.locationEntity(locationId);
-        if (!location?.sideId) return undefined;
-        return this._view(location);
+        const site = this.siteEntity(locationId);
+        if (!site?.sideId) return undefined;
+        return this._view(site);
+    }
+
+    /**
+     * Open the economy entry of a new construction site (an existing `space_structure`
+     * entity with `constructing` set) with its construction order.
+     */
+    startConstruction(site: EntityOf<"space_structure">): BuildOrder {
+        const record: LocationRecord = {
+            home: false,
+            space: true,
+            stockpile: zeroResources(),
+            installations: [],
+            orders: []
+        };
+        const order = createBuildOrder(
+            `order-${this._nextOrderSeq++}`,
+            { kind: "spaceStructure", structureType: site.structureType },
+            this._balance
+        );
+        record.orders.push(order);
+        this._locations.set(site.id, record);
+        if (this._instantBuild) {
+            this._fundFromAnywhere(site.sideId, site, order);
+        }
+        return { ...order };
+    }
+
+    /**
+     * Close a space structure's economy entry (destroyed or construction cancelled): its
+     * orders and stockpile are lost and supply ships heading there are redirected.
+     */
+    removeSite(siteId: EntityId): void {
+        if (!this._locations.has(siteId)) return;
+        this._cancelOrders(siteId, () => true);
+        this._locations.delete(siteId);
+    }
+
+    /** Whether one of `sideId`'s Builders is on `hex` (and not aboard a carrier). */
+    builderAt(hex: AxialCoord, sideId: SideId): boolean {
+        return this._entities
+            .entitiesAt(hex.q, hex.r)
+            .some(
+                (e) =>
+                    e.kind === "ship" &&
+                    e.sideId === sideId &&
+                    !e.carriedBy &&
+                    this._balance.ships[e.shipType].canConstruct
+            );
     }
 
     stockpile(locationId: EntityId): Resources {
@@ -240,12 +308,12 @@ export class EconomyManager {
      * fully funded, to complete.
      */
     activeOrders(locationId: EntityId): BuildOrder[] {
-        return partitionOrders(this._record(locationId), this._balance).active;
+        return partitionOrders(this._slotted(locationId), this._balance).active;
     }
 
-    /** Every owned location's stockpile added together. */
+    /** Every owned location's and space structure's stockpile added together. */
     totalStockpile(sideId: SideId): Resources {
-        return sumResources(this.ownedLocations(sideId).map((l) => this.stockpile(l.id)));
+        return sumResources(this.ownedSites(sideId).map((l) => this.stockpile(l.id)));
     }
 
     /** Built ships plus ships on order at any owned location. */
@@ -329,7 +397,7 @@ export class EconomyManager {
         );
         record.orders.push(order);
 
-        const waiting = partitionOrders(record, this._balance).waiting.some(
+        const waiting = partitionOrders(this._slotted(location.id), this._balance).waiting.some(
             (o) => o.id === order.id
         );
         if (!this._instantBuild || waiting) {
@@ -351,13 +419,22 @@ export class EconomyManager {
         };
     }
 
-    /** Remove an order; whatever it had drawn goes back into the local stockpile. */
+    /**
+     * Remove an order; whatever it had drawn goes back into the local stockpile. Cancelling a
+     * space structure's construction removes the construction site altogether.
+     */
     cancel(sideId: SideId | null, locationId: EntityId, orderId: OrderId): EconomyResult {
         const owned = this._owned(sideId, locationId);
         if (!owned.ok) return owned;
         const record = this._record(locationId);
-        if (!record.orders.some((o) => o.id === orderId)) {
+        const order = record.orders.find((o) => o.id === orderId);
+        if (!order) {
             return { ok: false, error: `No order ${orderId} at ${locationId}` };
+        }
+        if (order.item.kind === "spaceStructure") {
+            this.removeSite(locationId);
+            this._entities.remove(locationId);
+            return { ok: true };
         }
         this._cancelOrders(locationId, (o) => o.id === orderId);
         return { ok: true };
@@ -491,7 +568,7 @@ export class EconomyManager {
     completeReady(): EconomyAdvance {
         const result: EconomyAdvance = { completed: [], spawnedShips: [], spawnedUnits: [] };
         for (const sideId of this._sideIds) {
-            for (const location of this.ownedLocations(sideId)) {
+            for (const location of this.ownedSites(sideId)) {
                 const record = this._record(location.id);
                 for (const order of [...record.orders]) {
                     if (!isFullyFunded(order)) continue;
@@ -516,15 +593,24 @@ export class EconomyManager {
      * Step 5: active orders and any Shield Generator upkeep draw from their local stockpile by
      * priority (see `fundLocationOrders`). Orders that become fully funded are ready: they
      * complete at the next end of turn and free their build slot straight away. Shields then
-     * recharge by the share of upkeep supplied (see `shieldRecharge`).
+     * recharge by the share of upkeep supplied (see `shieldRecharge`). A construction site
+     * only draws while one of its side's Builders is on its hex.
      */
     fund(): void {
         for (const sideId of this._sideIds) {
-            for (const location of this.ownedLocations(sideId)) {
+            for (const location of this.ownedSites(sideId)) {
+                if (location.kind === "space_structure" && location.constructing) {
+                    if (!this.builderAt(location, sideId)) continue;
+                }
                 const record = this._record(location.id);
                 const shield = record.shield;
                 const upkeep = shield ? [shieldUpkeepOrder(shield, this._balance)] : [];
-                const funded = fundLocationOrders(record.stockpile, record, this._balance, upkeep);
+                const funded = fundLocationOrders(
+                    record.stockpile,
+                    this._slotted(location.id),
+                    this._balance,
+                    upkeep
+                );
                 record.stockpile = funded.stockpile;
                 const applied = new Map(funded.orders.map((o) => [o.id, o.applied]));
                 for (const order of record.orders) {
@@ -700,13 +786,14 @@ export class EconomyManager {
 
     private _checkEnhancementTarget(
         sideId: SideId,
-        location: LocationEntity,
+        location: BuildSiteEntity,
         item: BuildItem
     ): { ok: true; tier?: number } | { ok: false; error: string } {
         if (item.kind !== "enhancement") return { ok: true };
         const target = item.target;
         switch (target.kind) {
             case "installation":
+            case "spaceStructure":
                 return { ok: true };
             case "ship": {
                 const ship = this._entities.getOfKind(target.shipId, "ship");
@@ -723,7 +810,8 @@ export class EconomyManager {
                 if (!unit || unit.sideId !== sideId || unit.unitType !== target.unitType) {
                     return { ok: false, error: `Unknown unit ${target.unitId}` };
                 }
-                const garrisoned = (location.garrison ?? []).includes(unit.id);
+                const garrisoned =
+                    isLocationEntity(location) && (location.garrison ?? []).includes(unit.id);
                 return garrisoned ? { ok: true, tier: unit.tier } : { ok: true };
             }
         }
@@ -740,7 +828,7 @@ export class EconomyManager {
     }
 
     /** `instantBuild`: fund the order from its own stockpile, then the nearest others. */
-    private _fundFromAnywhere(sideId: SideId, location: LocationEntity, order: BuildOrder) {
+    private _fundFromAnywhere(sideId: SideId, location: BuildSiteEntity, order: BuildOrder) {
         const sources = this.ownedLocations(sideId).sort(
             (a, b) => axialDistance(a, location) - axialDistance(b, location)
         );
@@ -751,10 +839,15 @@ export class EconomyManager {
         }
     }
 
-    private _complete(sideId: SideId, location: LocationEntity, order: BuildOrder): Completion {
+    private _complete(sideId: SideId, location: BuildSiteEntity, order: BuildOrder): Completion {
         const item = order.item;
         const record = this._record(location.id);
         switch (item.kind) {
+            case "spaceStructure":
+                if (location.kind !== "space_structure") return { done: true };
+                delete location.constructing;
+                delete location.hp;
+                return { done: true };
             case "structure":
                 record.installations.push({
                     id: this._newInstallationId(),
@@ -773,6 +866,7 @@ export class EconomyManager {
                 return { done: true, ship };
             }
             case "groundUnit": {
+                if (!isLocationEntity(location)) return { done: true };
                 const unit = this._units.create(sideId, item.unitType, location.id, location.id);
                 return { done: true, unit };
             }
@@ -816,6 +910,16 @@ export class EconomyManager {
                 if (unit) unit.tier = tier;
                 return;
             }
+            case "spaceStructure": {
+                const structure = this._entities.getOfKind(target.structureId, "space_structure");
+                if (!structure) return;
+                const type = structure.structureType;
+                const before = spaceStructureStats(type, structure.tier ?? 1, this._balance).hp;
+                const after = spaceStructureStats(type, tier, this._balance).hp;
+                structure.tier = tier;
+                if (structure.hp !== undefined) structure.hp += after - before;
+                return;
+            }
         }
     }
 
@@ -826,7 +930,7 @@ export class EconomyManager {
     private _cancelEnhancementsFor(
         kind: EnhancementTarget["kind"],
         targetId: EntityId,
-        where: (location: LocationEntity) => boolean = () => true
+        where: (location: BuildSiteEntity) => boolean = () => true
     ): boolean {
         let cancelled = false;
         for (const [locationId, record] of this._locations) {
@@ -835,7 +939,7 @@ export class EconomyManager {
                 o.item.target.kind === kind &&
                 enhancementTargetId(o.item.target) === targetId;
             if (!record.orders.some(matches)) continue;
-            const location = this.locationEntity(locationId);
+            const location = this.siteEntity(locationId);
             if (location && !where(location)) continue;
             this._cancelOrders(locationId, matches);
             cancelled = true;
@@ -888,10 +992,11 @@ export class EconomyManager {
     }
 
     private _spawnShip(
-        location: LocationEntity,
+        location: BuildSiteEntity,
         sideId: SideId,
         shipType: ShipType
     ): EntityOf<"ship"> {
+        const systemId = isLocationEntity(location) ? location.systemId : undefined;
         const info = SHIP_TYPE_INFO[shipType];
         const stats = shipStats(shipType, 1, this._balance);
         let id: EntityId;
@@ -907,7 +1012,9 @@ export class EconomyManager {
             .ofKind("sun")
             .find(
                 (s) =>
-                    s.systemId === location.systemId && (s.q !== location.q || s.r !== location.r)
+                    !!systemId &&
+                    s.systemId === systemId &&
+                    (s.q !== location.q || s.r !== location.r)
             );
 
         return this._entities.add<EntityOf<"ship">>({
@@ -930,11 +1037,11 @@ export class EconomyManager {
     private _owned(
         sideId: SideId | null,
         locationId: EntityId
-    ): { ok: true; location: LocationEntity } | { ok: false; error: string } {
+    ): { ok: true; location: BuildSiteEntity } | { ok: false; error: string } {
         if (!sideId || !this._sideIds.includes(sideId)) {
             return { ok: false, error: "You are not assigned to a side" };
         }
-        const location = this.locationEntity(locationId);
+        const location = this.siteEntity(locationId);
         if (!location) return { ok: false, error: `Unknown location ${locationId}` };
         if (location.sideId !== sideId) {
             return { ok: false, error: `Location ${locationId} is not yours` };
@@ -952,16 +1059,39 @@ export class EconomyManager {
     }
 
     private _cap(record: LocationRecord): Resources {
-        return stockpileCap(record, this._balance);
+        return stockpileCap(record.space ? { ...record, site: "space" } : record, this._balance);
     }
 
-    private _view(location: LocationEntity): LocationEconomy {
+    /** The structure a space site's entry belongs to, for build slots (see `buildSlots`). */
+    private _siteState(locationId: EntityId): SpaceStructureSiteState | undefined {
+        const site = this._entities.getOfKind(locationId, "space_structure");
+        if (!site) return undefined;
+        return {
+            type: site.structureType,
+            tier: site.tier ?? 1,
+            constructing: !!site.constructing
+        };
+    }
+
+    /** A location's record with its space structure state, for partitioning and funding. */
+    private _slotted(locationId: EntityId): LocationRecord & {
+        structure?: SpaceStructureSiteState;
+    } {
+        const record = this._record(locationId);
+        const structure = this._siteState(locationId);
+        return structure ? { ...record, structure } : record;
+    }
+
+    private _view(location: BuildSiteEntity): LocationEconomy {
         const record = this._record(location.id);
+        const structure = this._siteState(location.id);
+        const space = location.kind === "space_structure";
         return {
             locationId: location.id,
-            site: siteForEntity(location) ?? "asteroid",
+            site: space ? "space" : (siteForEntity(location) ?? "asteroid"),
             level: location.kind === "planet" ? location.level : 0,
-            slots: slotsForEntity(location),
+            slots: space ? 0 : slotsForEntity(location),
+            ...(structure ? { structure } : {}),
             ...(record.home ? { home: true } : {}),
             stockpile: { ...record.stockpile },
             installations: record.installations.map((i) => ({ ...i })),
@@ -977,6 +1107,6 @@ export class EconomyManager {
     }
 
     private _economies(sideId: SideId): LocationEconomy[] {
-        return this.ownedLocations(sideId).map((location) => this._view(location));
+        return this.ownedSites(sideId).map((location) => this._view(location));
     }
 }

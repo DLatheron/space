@@ -11,10 +11,13 @@ import {
 } from "@space/shared-data";
 import type { EntityManager } from "./EntityManager.js";
 import { findTileByAxial, forEachTile, tileKey } from "./map/SpaceMap.js";
-import { entityToSummary, type Entity } from "./map/types.js";
+import { entityToSummary, type Entity, type EntityOf } from "./map/types.js";
 
 /** Supply ships see only their own and neighbouring hexes. */
 export const DEFAULT_SUPPLY_VISION_RANGE = 1;
+
+/** Space structures under construction (and any without a configured range) see their neighbours. */
+export const DEFAULT_SITE_VISION_RANGE = 1;
 
 export type VisibilityDiff = {
     /** Hexes that became visible. */
@@ -91,12 +94,17 @@ export class Side {
     recomputeVisibility(
         entities: EntityManager,
         visionRange: number,
-        supplyVisionRange = DEFAULT_SUPPLY_VISION_RANGE
+        supplyVisionRange = DEFAULT_SUPPLY_VISION_RANGE,
+        structureVision: (structure: EntityOf<"space_structure">) => number = () =>
+            DEFAULT_SITE_VISION_RANGE
     ): VisibilityDiff {
         const { map } = entities;
         const nextVisible = new Set<HexKey>();
         const ownShips = entities.ofKind("ship").filter((ship) => ship.sideId === this.id);
         const ownSupply = entities.ofKind("supply_ship").filter((s) => s.sideId === this.id);
+        const ownStructures = entities
+            .ofKind("space_structure")
+            .filter((s) => s.sideId === this.id);
 
         if (this.fullVisibility) {
             forEachTile(map, (tile) => nextVisible.add(tileKey(tile)));
@@ -111,7 +119,8 @@ export class Side {
                     s,
                     visionRange
                 ]),
-                ...ownSupply.map((s): [AxialCoord, number] => [s, supplyVisionRange])
+                ...ownSupply.map((s): [AxialCoord, number] => [s, supplyVisionRange]),
+                ...ownStructures.map((s): [AxialCoord, number] => [s, structureVision(s)])
             ];
             for (const [source, range] of sources) {
                 for (const hex of axialRange(source, range)) {
@@ -238,15 +247,20 @@ export class Side {
     }
 
     /**
-     * Whether this side believes `hex` holds enemy ships (supply ships don't count): live
-     * contents when visible, remembered contents when explored, and none when unexplored.
+     * Whether this side believes `hex` holds enemy ships or armed space structures (supply
+     * ships don't count): live contents when visible, remembered contents when explored, and
+     * none when unexplored.
      */
     knowsEnemyAt(entities: EntityManager, hex: AxialCoord): boolean {
         const key = axialKey(hex.q, hex.r);
         const known = this._visible.has(key)
             ? entities.entitiesAt(hex.q, hex.r)
             : (this._memory.get(key) ?? []);
-        return known.some((e) => e.kind === "ship" && e.sideId !== this.id);
+        return known.some((e) => {
+            if (e.kind === "ship") return e.sideId !== this.id;
+            if (e.kind !== "space_structure" || e.sideId === this.id) return false;
+            return e.structureType === "space_station" || e.structureType === "missile_battery";
+        });
     }
 
     /** Whether every hex in `hexes` is currently visible to this side. */
@@ -295,6 +309,10 @@ export class Side {
             delete summary.hyperdriveCooldown;
             delete summary.carriedShipIds;
             delete summary.lastCombatTurn;
+            return summary;
+        }
+        if (summary.kind === "space_structure") {
+            if (summary.sideId !== this.id) delete summary.lastCombatTurn;
             return summary;
         }
         if (summary.kind !== "supply_ship" || summary.sideId === this.id) return summary;

@@ -100,6 +100,20 @@ export const ServerToClientMessage = z.discriminatedUnion("type", [
         })
     }),
     z.object({
+        /**
+         * A ship travelled between friendly Stargates; sent before the tiles update to the
+         * owner and sides that could see either gate.
+         */
+        type: z.literal("server:ship:stargated"),
+        payload: z.object({
+            shipId: EntityId,
+            from: AxialCoord,
+            to: AxialCoord,
+            fromGateId: EntityId,
+            toGateId: EntityId
+        })
+    }),
+    z.object({
         type: z.literal("server:tiles:update"),
         payload: z.object({
             tiles: z.array(TileView),

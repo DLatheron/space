@@ -14,6 +14,8 @@ import {
     type SupplyShipTechBonus,
     type Resources,
     type ShipBalance,
+    type SpaceStructureBalance,
+    type SpaceStructureTierBalance,
     type StorageStructureBalance,
     type StructureBalance
 } from "@space/shared-data";
@@ -216,11 +218,62 @@ function ship(defaults: ShipBalance) {
             repairsInSpace: z.boolean().default(defaults.repairsInSpace),
             hyperdrive: hyperdrive(defaults.hyperdrive),
             /** Ships it can carry; `null` removes a default hangar. */
-            hangar: hangar(defaults.hangar)
+            hangar: hangar(defaults.hangar),
+            /** Starts space structure construction sites on empty open-space hexes. */
+            canConstruct: z.boolean().default(defaults.canConstruct)
         })
         .strict()
         .prefault({});
 }
+
+function spaceStructureTier(defaults: SpaceStructureTierBalance) {
+    return z
+        .object({
+            cost: resources(defaults.cost),
+            buildTurns: z.int().positive().default(defaults.buildTurns),
+            requiresTech: requiresTech(defaults.requiresTech)
+        })
+        .strict();
+}
+
+function spaceStructure(defaults: SpaceStructureBalance) {
+    const tiers = z
+        .array(spaceStructureTier(defaults.tiers[0] ?? GENERIC_SPACE_STRUCTURE_TIER))
+        .max(2)
+        .default(() => defaults.tiers.map((t) => ({ ...t, cost: { ...t.cost } })));
+    return z
+        .object({
+            cost: resources(defaults.cost),
+            buildTurns: z.int().positive().default(defaults.buildTurns),
+            requiresTech: requiresTech(defaults.requiresTech),
+            /** Full hp at tier 1. */
+            hp: z.int().positive().default(defaults.hp),
+            /** 0 for unarmed structures. */
+            attack: z.int().min(0).default(defaults.attack),
+            defence: z.int().min(0).default(defaults.defence),
+            /** Fires at every enemy ship within this many hexes each end of turn; 0 never fires. */
+            fireRadius: z.int().min(0).default(defaults.fireRadius),
+            /** Vision range at tiers 1, 2 and 3. */
+            visionRange: perTier(z.int().min(0), defaults.visionRange),
+            /** Repair fraction added for own ships on its hex. */
+            repairBonus: z.number().min(0).max(1).default(defaults.repairBonus),
+            /** Strike craft (which otherwise only repair docked) repair on its hex. */
+            docksShips: z.boolean().default(defaults.docksShips),
+            /** Ships built at once; 0 for none. */
+            shipSlots: z.int().min(0).default(defaults.shipSlots),
+            /** Upgrades to tier 2 and 3; replaced as a whole. */
+            tiers
+        })
+        .strict()
+        .prefault({});
+}
+
+/** Used for upgrade entries given in config without a default to fall back on. */
+const GENERIC_SPACE_STRUCTURE_TIER: SpaceStructureTierBalance = {
+    cost: { money: 200, materials: 200, population: 0, science: 100 },
+    buildTurns: 4,
+    requiresTech: null
+};
 
 function groundUnit(defaults: GroundUnitBalance) {
     return z
@@ -260,8 +313,19 @@ const SHIP_DEFAULTS = {
     canColonise: false,
     canBombard: false,
     attackMultipliers: {},
-    repairsInSpace: true
+    repairsInSpace: true,
+    canConstruct: false
 } satisfies Partial<ShipBalance>;
+
+const SPACE_STRUCTURE_DEFAULTS = {
+    attack: 0,
+    fireRadius: 0,
+    visionRange: [2, 2, 2],
+    repairBonus: 0,
+    docksShips: false,
+    shipSlots: 0,
+    tiers: []
+} satisfies Partial<SpaceStructureBalance>;
 
 /** Fighters and bombers only repair docked in a hangar or at an owned shipyard. */
 const STRIKE_CRAFT_DEFAULTS = {
@@ -537,6 +601,19 @@ export const EconomyBalanceConfig = z
                         cooldownTurns: 5,
                         accuracy: { onTarget: 40, oneOff: 45, twoOff: 15 }
                     }
+                }),
+                builder: ship({
+                    ...SHIP_DEFAULTS,
+                    class: "support",
+                    cost: { money: 150, materials: 200, population: 10, science: 0 },
+                    buildTurns: 3,
+                    maxMovementPoints: 4,
+                    hp: 8,
+                    attack: 0,
+                    defence: 2,
+                    requiresTech: "space_construction",
+                    maxTier: 3,
+                    canConstruct: true
                 })
             })
             .strict()
@@ -655,6 +732,90 @@ export const EconomyBalanceConfig = z
                     })
                     .strict()
                     .prefault({})
+            })
+            .strict()
+            .prefault({}),
+        /**
+         * Structures a Builder constructs in open space. Hp, attack and defence are at tier 1;
+         * upgrades (`tiers`, each needing its tech) scale them by `structureTierOutput`.
+         */
+        spaceStructures: z
+            .object({
+                sensor_array: spaceStructure({
+                    ...SPACE_STRUCTURE_DEFAULTS,
+                    cost: { money: 150, materials: 150, population: 0, science: 50 },
+                    buildTurns: 3,
+                    requiresTech: "space_construction",
+                    hp: 15,
+                    defence: 2,
+                    visionRange: [10, 13, 16],
+                    tiers: [
+                        {
+                            cost: { money: 100, materials: 100, population: 0, science: 100 },
+                            buildTurns: 3,
+                            requiresTech: "sensor_arrays_2"
+                        },
+                        {
+                            cost: { money: 200, materials: 150, population: 0, science: 200 },
+                            buildTurns: 4,
+                            requiresTech: "sensor_arrays_3"
+                        }
+                    ]
+                }),
+                space_station: spaceStructure({
+                    ...SPACE_STRUCTURE_DEFAULTS,
+                    cost: { money: 400, materials: 500, population: 20, science: 0 },
+                    buildTurns: 5,
+                    requiresTech: "space_stations_1",
+                    hp: 50,
+                    attack: 8,
+                    defence: 8,
+                    fireRadius: 1,
+                    visionRange: [5, 6, 7],
+                    repairBonus: 0.1,
+                    tiers: [
+                        {
+                            cost: { money: 250, materials: 300, population: 0, science: 50 },
+                            buildTurns: 4,
+                            requiresTech: "space_stations_2"
+                        },
+                        {
+                            cost: { money: 400, materials: 500, population: 0, science: 100 },
+                            buildTurns: 5,
+                            requiresTech: "space_stations_3"
+                        }
+                    ]
+                }),
+                missile_battery: spaceStructure({
+                    ...SPACE_STRUCTURE_DEFAULTS,
+                    cost: { money: 200, materials: 250, population: 5, science: 0 },
+                    buildTurns: 3,
+                    requiresTech: "missile_batteries",
+                    hp: 20,
+                    attack: 5,
+                    defence: 3,
+                    fireRadius: 2,
+                    visionRange: [3, 3, 3]
+                }),
+                space_dock: spaceStructure({
+                    ...SPACE_STRUCTURE_DEFAULTS,
+                    cost: { money: 300, materials: 400, population: 20, science: 0 },
+                    buildTurns: 4,
+                    requiresTech: "space_construction",
+                    hp: 30,
+                    defence: 4,
+                    repairBonus: 0.25,
+                    docksShips: true,
+                    shipSlots: 1
+                }),
+                stargate: spaceStructure({
+                    ...SPACE_STRUCTURE_DEFAULTS,
+                    cost: { money: 500, materials: 600, population: 0, science: 150 },
+                    buildTurns: 6,
+                    requiresTech: "stargates",
+                    hp: 30,
+                    defence: 4
+                })
             })
             .strict()
             .prefault({}),

@@ -43,7 +43,7 @@ describe("research tree layout", () => {
         const y = (t: TechId) => layout.nodes.get(t)!.y;
         expect(y("supply_speed_2")).toBe(y("supply_speed_1"));
         expect(y("enhancement_tier_3")).toBe(y("enhancement_tier_2"));
-        expect(y("hyperdrive_calibration_2")).toBe(y("hyperdrive_calibration_1"));
+        expect(y("space_stations_3")).toBe(y("space_stations_2"));
     });
 
     it("lists one edge per prerequisite", () => {

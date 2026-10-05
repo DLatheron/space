@@ -1,7 +1,8 @@
-import type { ShipType } from "@space/shared-data";
+import type { ShipType, SpaceStructureType } from "@space/shared-data";
 
 /** Top-down pictures in `packages/server/public/on-map`, nose pointing up. */
 const SHIP_SPRITE_PATHS: Partial<Record<ShipType, string>> = {
+    builder: "/public/on-map/builder.png",
     scout: "/public/on-map/scout.png",
     frigate: "/public/on-map/frigate.png",
     star_destroyer: "/public/on-map/star-destroyer.png",
@@ -9,6 +10,15 @@ const SHIP_SPRITE_PATHS: Partial<Record<ShipType, string>> = {
     fighter_squadron: "/public/on-map/tie-fighter.png",
     advanced_fighter_squadron: "/public/on-map/tie-defender.png",
     bomber_squadron: "/public/on-map/tie-bomber.png"
+};
+
+/** Top-down pictures in `packages/server/public/space-structures`, drawn unrotated. */
+const STRUCTURE_SPRITE_PATHS: Record<SpaceStructureType, string> = {
+    sensor_array: "/public/space-structures/sensor-array.png",
+    space_station: "/public/space-structures/space-station.png",
+    missile_battery: "/public/space-structures/missile-battery.png",
+    space_dock: "/public/space-structures/space-dock.png",
+    stargate: "/public/space-structures/stargate.png"
 };
 
 /** Below this on-screen hex size ships keep their triangle so they stay legible. */
@@ -23,7 +33,8 @@ export type ShipSprite = {
     aspect: number;
 };
 
-const sprites = new Map<ShipType, ShipSprite | "loading" | "failed">();
+/** Keyed by image path. */
+const sprites = new Map<string, ShipSprite | "loading" | "failed">();
 
 /**
  * Share of a row's or column's length that must be opaque for it to count as part of the
@@ -72,25 +83,35 @@ function prepare(img: HTMLImageElement): ShipSprite {
 }
 
 /**
- * The map sprite for `shipType`, or undefined while it loads, when it failed, when there is
- * none, or outside a browser. The first call starts loading it.
+ * The sprite at `path`, or undefined while it loads, when it failed, when there is none, or
+ * outside a browser. The first call starts loading it.
  */
-export function shipSprite(shipType: ShipType): ShipSprite | undefined {
-    const cached = sprites.get(shipType);
+function spriteAt(path: string | undefined): ShipSprite | undefined {
+    if (!path) return undefined;
+    const cached = sprites.get(path);
     if (cached) return typeof cached === "string" ? undefined : cached;
-    const path = SHIP_SPRITE_PATHS[shipType];
-    if (!path || typeof Image === "undefined" || typeof document === "undefined") return undefined;
-    sprites.set(shipType, "loading");
+    if (typeof Image === "undefined" || typeof document === "undefined") return undefined;
+    sprites.set(path, "loading");
     const img = new Image();
     img.decoding = "async";
     img.onload = () => {
         try {
-            sprites.set(shipType, prepare(img));
+            sprites.set(path, prepare(img));
         } catch {
-            sprites.set(shipType, "failed");
+            sprites.set(path, "failed");
         }
     };
-    img.onerror = () => sprites.set(shipType, "failed");
+    img.onerror = () => sprites.set(path, "failed");
     img.src = path;
     return undefined;
+}
+
+/** The map sprite for `shipType` (see `spriteAt`). */
+export function shipSprite(shipType: ShipType): ShipSprite | undefined {
+    return spriteAt(SHIP_SPRITE_PATHS[shipType]);
+}
+
+/** The map sprite for a space structure (see `spriteAt`). */
+export function structureSprite(type: SpaceStructureType): ShipSprite | undefined {
+    return spriteAt(STRUCTURE_SPRITE_PATHS[type]);
 }

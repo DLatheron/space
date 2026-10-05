@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { BuildItem, BuildPriority, QueueDirection } from "./Economy.js";
-import { AxialCoord, EntityId, OrderId } from "./PrimitiveTypes.js";
+import { AxialCoord, EntityId, OrderId, SpaceStructureType } from "./PrimitiveTypes.js";
 
 export const ClientToServerMessage = z.discriminatedUnion("type", [
     z.object({
@@ -33,6 +33,22 @@ export const ClientToServerMessage = z.discriminatedUnion("type", [
         payload: z.object({ shipId: EntityId })
     }),
     z.object({
+        /**
+         * Start a space structure construction site on the Builder's empty open-space hex. Its
+         * order is funded by supply deliveries and only progresses while a Builder is there.
+         */
+        type: z.literal("client:builder:construct"),
+        payload: z.object({ shipId: EntityId, structureType: SpaceStructureType })
+    }),
+    z.object({
+        /**
+         * Travel instantly from the friendly Stargate on the ship's hex to another friendly
+         * Stargate; uses all the ship's remaining movement. Carried ships go along.
+         */
+        type: z.literal("client:ship:stargate"),
+        payload: z.object({ shipId: EntityId, gateId: EntityId })
+    }),
+    z.object({
         type: z.literal("client:turn:end"),
         payload: z.object({})
     }),
@@ -51,8 +67,9 @@ export const ClientToServerMessage = z.discriminatedUnion("type", [
     }),
     z.object({
         /**
-         * Place an order at an owned planet, moon or mineable asteroid. Nothing is paid up
-         * front; it is funded over the following turns.
+         * Place an order at an owned planet, moon or mineable asteroid, or at an own space
+         * structure (ships at a Space Dock, tier upgrades). Nothing is paid up front; it is
+         * funded over the following turns.
          */
         type: z.literal("client:location:build"),
         payload: z.object({ locationId: EntityId, item: BuildItem, priority: BuildPriority })

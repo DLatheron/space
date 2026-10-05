@@ -295,3 +295,9 @@
         overflow: visible;
     }
 }
+
+.planet-page__grid--space {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    grid-template-areas: "orbit";
+}

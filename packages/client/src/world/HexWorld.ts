@@ -16,8 +16,11 @@ import {
 import {
     canBombardShip,
     canCarryShip,
+    canEnterStargate,
     canRepairIn,
+    friendlyGates,
     hangarFor,
+    hexDistance,
     hexHasObstacle,
     hyperdriveFor,
     hyperjumpAccuracy,
@@ -34,6 +37,7 @@ import {
     shipRepairPerTurn,
     shipStats,
     siteForEntity,
+    spaceStructureStats,
     stockpileCap,
     sumResources,
     supplyShipStats,
@@ -59,14 +63,28 @@ import {
     type ServerToClientMessage,
     type ShipMoveOrder,
     type SideId,
+    type SpaceStructureEntity,
+    type SpaceStructureType,
     type TechId,
     type TileView,
     type TurnState
 } from "@space/shared-data";
 import { BEAM_MS, CombatEffects } from "./CombatEffects.js";
-import { Explosions, JUMP_ARRIVE_MS, JUMP_DEPART_MS, JumpFlashes } from "./Explosions.js";
+import {
+    Explosions,
+    JUMP_ARRIVE_MS,
+    JUMP_DEPART_MS,
+    JumpFlashes,
+    STARGATE_DEPART_MS,
+    StargateEffects
+} from "./Explosions.js";
 import { ShipMotion, SUPPLY_SHIP_MOTION, type MotionSpeeds, type ShipPose } from "./ShipMotion.js";
-import { SHIP_SPRITE_MIN_HEX_SIZE, shipSprite, type ShipSprite } from "./ShipSprites.js";
+import {
+    SHIP_SPRITE_MIN_HEX_SIZE,
+    shipSprite,
+    structureSprite,
+    type ShipSprite
+} from "./ShipSprites.js";
 
 export type Camera = {
     x: number;
@@ -94,7 +112,14 @@ type DeferredShip = { entity: MobileEntity; pose: ShipPose; fullColour: boolean 
 type DyingShip = { entity: MobileEntity; motion: ShipMotion; colour?: string };
 
 /** Ship collapsing into hyperspace at its origin; its entity has already left the map. */
-type DepartingShip = { entity: MobileEntity; pose: ShipPose; departAt: number; arriveAt: number };
+type DepartingShip = {
+    entity: MobileEntity;
+    pose: ShipPose;
+    departAt: number;
+    arriveAt: number;
+    /** Movement still playing before departure (drawn along it until `departAt`). */
+    approach?: ShipMotion;
+};
 
 /** Gap between consecutive jumps in one end of turn, so they read in resolution order. */
 const JUMP_STAGGER_MS = 450;
@@ -115,17 +140,42 @@ const MAX_COMBAT_REPORTS = 30;
 export type CombatReport = { id: number; turn: number | null; result: CombatResult };
 
 export type ShipJumped = Extract<ServerToClientMessage, { type: "server:ship:jumped" }>["payload"];
+export type ShipStargated = Extract<
+    ServerToClientMessage,
+    { type: "server:ship:stargated" }
+>["payload"];
 
 export type ShipEntity = EntityOfKind<"ship">;
 export type SupplyShipEntity = EntityOfKind<"supply_ship">;
 export type PlanetEntity = EntityOfKind<"planet">;
-export type { LocationEntity };
+export type { LocationEntity, SpaceStructureEntity };
 
 /** Entities that move between hexes and animate doing so. */
 export type MobileEntity = ShipEntity | SupplyShipEntity;
 
+/** Entities with a hull that space combat can damage and the map shows an hp bar for. */
+export type HullEntity = MobileEntity | SpaceStructureEntity;
+
 function isMobile(entity: EntitySummary): entity is MobileEntity {
     return entity.kind === "ship" || entity.kind === "supply_ship";
+}
+
+function hasHull(entity: EntitySummary): entity is HullEntity {
+    return isMobile(entity) || entity.kind === "space_structure";
+}
+
+/** Range ring drawn around a space structure: its fire radius when armed, else sensor vision. */
+export function structureRange(
+    structure: SpaceStructureEntity,
+    balance: EconomyBalance | null
+): { kind: "fire" | "vision"; radius: number } | undefined {
+    if (!balance) return undefined;
+    const stats = spaceStructureStats(structure.structureType, structure.tier ?? 1, balance);
+    if (stats.fireRadius > 0) return { kind: "fire", radius: stats.fireRadius };
+    if (structure.structureType === "sensor_array" && stats.visionRange > 0) {
+        return { kind: "vision", radius: stats.visionRange };
+    }
+    return undefined;
 }
 
 /** Aboard a carrier: kept in our data but not drawn, picked or listed on the map. */
@@ -157,6 +207,21 @@ export function isBuildSite(entity: EntitySummary): entity is LocationEntity {
     return isLocationEntity(entity) && siteForEntity(entity) !== undefined;
 }
 
+/** A completed space structure that builds ships (a Space Dock) and so has a build page. */
+export function isShipyardStructure(
+    entity: EntitySummary,
+    balance: EconomyBalance | null
+): entity is SpaceStructureEntity {
+    if (entity.kind !== "space_structure" || entity.constructing) return false;
+    const slots = balance?.spaceStructures?.[entity.structureType]?.shipSlots;
+    return slots === undefined ? entity.structureType === "space_dock" : slots > 0;
+}
+
+/** Locations and space docks whose build page can be opened (by their owner). */
+export function hasBuildPage(entity: EntitySummary, balance: EconomyBalance | null): boolean {
+    return isBuildSite(entity) || isShipyardStructure(entity, balance);
+}
+
 export function isTransport(ship: ShipEntity, balance: EconomyBalance | null): boolean {
     return (balance?.ships[ship.shipType].unitCapacity ?? 0) > 0;
 }
@@ -177,6 +242,7 @@ export type HexClickAction =
     | { type: "open-location"; locationId: EntityId }
     | { type: "move"; shipId: EntityId; to: AxialCoord }
     | { type: "hyperjump"; shipId: EntityId; target: AxialCoord }
+    | { type: "stargate"; shipId: EntityId; gateId: EntityId }
     /** Nothing was sent; `reason` is shown to the player. */
     | { type: "rejected"; reason: string };
 
@@ -197,13 +263,14 @@ const ENTITY_FOCUS_PRIORITY: Record<EntitySummary["kind"], number> = {
     ship: 0,
     planet: 1,
     moon: 2,
-    supply_ship: 3,
-    sun: 4,
-    large_asteroid: 5,
-    asteroid_belt: 6,
-    wormhole: 7,
-    black_hole: 8,
-    hyperspace_tunnel: 9
+    space_structure: 3,
+    supply_ship: 4,
+    sun: 5,
+    large_asteroid: 6,
+    asteroid_belt: 7,
+    wormhole: 8,
+    black_hole: 9,
+    hyperspace_tunnel: 10
 };
 
 export function primaryEntity(entities: EntitySummary[]): EntitySummary | null {
@@ -267,6 +334,8 @@ export class HexWorld {
     hoveredHex: Axial | null = null;
     /** Selected ship whose next map click picks a hyperspace jump target. */
     hyperjumpTargetingId: EntityId | null = null;
+    /** Selected ship whose next command click picks the friendly Stargate to travel to. */
+    stargateTargetingId: EntityId | null = null;
     /** Short message over the map (rejected orders, server errors); `id` changes per message. */
     notice: { text: string; id: number } | null = null;
     /** Combats seen since the map init, newest first. */
@@ -287,6 +356,7 @@ export class HexWorld {
     private readonly _explosions = new Explosions();
     private _dying: DyingShip[] = [];
     private readonly _jumpFlashes = new JumpFlashes();
+    private readonly _stargateEffects = new StargateEffects();
     private _departing: DepartingShip[] = [];
     /** Ships that jumped in: hidden until their arrival time, then scaled in. */
     private readonly _arrivals = new Map<EntityId, number>();
@@ -344,12 +414,14 @@ export class HexWorld {
         this.inspectedEntityId = null;
         this.hoveredHex = null;
         this.hyperjumpTargetingId = null;
+        this.stargateTargetingId = null;
         this._tiles.clear();
         this._visible.clear();
         this._motions.clear();
         this._explosions.clear();
         this._dying = [];
         this._jumpFlashes.clear();
+        this._stargateEffects.clear();
         this._departing = [];
         this._arrivals.clear();
         this._combatEffects.clear();
@@ -596,6 +668,53 @@ export class HexWorld {
     }
 
     /**
+     * Play a Stargate transit: the ship falls into the departure gate's event horizon and
+     * scales in at the exit gate. Positions update now (carried ships too) so the tiles update
+     * that follows doesn't animate a normal move across the map.
+     */
+    applyShipStargated(payload: ShipStargated) {
+        const now = performance.now();
+        const ship =
+            this.findEntity(payload.shipId, "ship") ??
+            this.findEntity(payload.shipId, "supply_ship");
+        // A supply ship's hop follows its walk to the gate in the same end of turn.
+        const motion = ship ? this._motions.get(ship.id) : undefined;
+        const departAt = Math.max(now, motion?.endsAt ?? now);
+        const arriveAt = departAt + STARGATE_DEPART_MS;
+        this._stargateEffects.spawn({
+            from: axialToPixel(payload.from.q, payload.from.r, this.hexSize),
+            to: axialToPixel(payload.to.q, payload.to.r, this.hexSize),
+            departAt,
+            arriveAt,
+            scale: this.hexSize
+        });
+        if (ship) {
+            const pose =
+                motion?.poseAt(departAt) ?? ShipMotion.poseAtHex(ship, ship.facing, this.hexSize);
+            this._motions.delete(ship.id);
+            this._departing.push({ entity: ship, pose, departAt, arriveAt, approach: motion });
+            this._removeEntities(new Set([ship.id]));
+            const arrived: MobileEntity =
+                ship.kind === "ship"
+                    ? {
+                          ...ship,
+                          q: payload.to.q,
+                          r: payload.to.r,
+                          movementPoints: ship.sideId === this.sideId ? 0 : ship.movementPoints,
+                          moveOrder: advanceMoveOrder(ship.moveOrder, payload.to)
+                      }
+                    : { ...ship, q: payload.to.q, r: payload.to.r };
+            const dest = this._tileAt(payload.to);
+            dest.entities = [...dest.entities, arrived];
+            this._moveCarried(ship.id, payload.from, payload.to);
+            this._arrivals.set(ship.id, arriveAt);
+        }
+        if (this.stargateTargetingId === payload.shipId) this.stargateTargetingId = null;
+        this._validateSelection();
+        this._notify();
+    }
+
+    /**
      * Play an automatic combat and keep it for the combat log. Losses are removed now but
      * keep drawing until they explode, so the tiles update that follows can't snap them away.
      */
@@ -620,10 +739,10 @@ export class HexWorld {
      * Survivors hold still until the end, so a follow-up move into the hex plays afterwards.
      */
     private _applySpaceCombat(result: CombatResult, now: number) {
-        const fighters: { p: CombatParticipant; entity: MobileEntity }[] = [];
+        const fighters: { p: CombatParticipant; entity: HullEntity }[] = [];
         for (const p of result.participants) {
             const entity = this.findEntityById(p.id);
-            if (entity && isMobile(entity) && !isCarried(entity)) fighters.push({ p, entity });
+            if (entity && hasHull(entity) && !isCarried(entity)) fighters.push({ p, entity });
         }
 
         let startAt = now;
@@ -651,7 +770,7 @@ export class HexWorld {
             motion.holdUntil(startAt + COMBAT_MS);
         }
 
-        const poseOf = (entity: MobileEntity): Pixel =>
+        const poseOf = (entity: HullEntity): Pixel =>
             this._motions.get(entity.id)?.poseAt(hitAt) ??
             axialToPixel(entity.q, entity.r, this.hexSize);
         this._spawnBeams(fighters, poseOf, startAt + COMBAT_FIRE_MS);
@@ -683,16 +802,28 @@ export class HexWorld {
             if (!tile.entities.some((e) => byId.has(e.id))) continue;
             tile.entities = tile.entities.map((e) => {
                 const p = byId.get(e.id);
-                if (!p || !isMobile(e)) return e;
+                if (!p || !hasHull(e)) return e;
                 this._hpShown.set(e.id, { hp: p.hpBefore, until: hitAt });
                 return { ...e, hp: p.hpAfter };
             });
         }
 
-        const destroyed = new Set(result.destroyedIds);
+        const destroyed = new Set([
+            ...result.destroyedIds,
+            ...(result.destroyedStructureIds ?? [])
+        ]);
         for (const id of destroyed) {
             const found = this.findEntityById(id);
             if (found && isCarried(found)) continue;
+            if (found?.kind === "space_structure") {
+                this._explosions.spawn(
+                    axialToPixel(found.q, found.r, this.hexSize),
+                    sideColour(found.sideId, "#ffd166"),
+                    this.hexSize,
+                    explodeAt
+                );
+                continue;
+            }
             if (!found || !isMobile(found)) {
                 if (byId.has(id) && this._visible.has(hexKey(result.hex.q, result.hex.r))) {
                     const colour = sideColour(byId.get(id)?.sideId, "#ffd166");
@@ -719,8 +850,8 @@ export class HexWorld {
      * damage fire back. Beams at a target that evaded go wide.
      */
     private _spawnBeams(
-        fighters: { p: CombatParticipant; entity: MobileEntity }[],
-        poseOf: (entity: MobileEntity) => Pixel,
+        fighters: { p: CombatParticipant; entity: HullEntity }[],
+        poseOf: (entity: HullEntity) => Pixel,
         fireAt: number
     ) {
         const side = (role: CombatParticipant["role"]) =>
@@ -733,7 +864,9 @@ export class HexWorld {
             if (!targets.length) return;
             shooters
                 .filter(
-                    ({ p }) => p.kind === "ship" && (p.role === "attacker" || p.damageDealt > 0)
+                    ({ p }) =>
+                        (p.kind === "ship" || p.kind === "space_structure") &&
+                        (p.role === "attacker" || p.damageDealt > 0)
                 )
                 .forEach(({ entity }, i) => {
                     const { p, entity: hit } = targets[i % targets.length];
@@ -894,12 +1027,13 @@ export class HexWorld {
         return sumResources(this.economy?.locations.map((l) => stockpileCap(l, balance)) ?? []);
     }
 
-    /** How many of our locations are at or over their cap, per resource. */
+    /** How many of our locations (not space structure sites) are at or over their cap, per resource. */
     get fullLocations(): Record<ResourceKey, number> {
         const counts = { money: 0, materials: 0, population: 0, science: 0 };
         const balance = this.balance;
         if (!balance) return counts;
         for (const location of this.economy?.locations ?? []) {
+            if (location.site === "space") continue;
             const cap = stockpileCap(location, balance);
             for (const key of RESOURCE_KEYS) {
                 if (location.stockpile[key] >= cap[key]) counts[key]++;
@@ -987,14 +1121,16 @@ export class HexWorld {
         });
     }
 
-    /** Current and full hp of a ship or supply ship; missing hp means full. */
-    hpOf(entity: MobileEntity): { hp: number; max: number } | undefined {
+    /** Current and full hp of a ship, supply ship or space structure; missing hp means full. */
+    hpOf(entity: HullEntity): { hp: number; max: number } | undefined {
         const balance = this.balance;
         if (!balance) return undefined;
         const max =
             entity.kind === "ship"
                 ? shipStats(entity.shipType, entity.tier ?? 1, balance).hp
-                : this.supplyStatsOf(entity).hp;
+                : entity.kind === "space_structure"
+                  ? spaceStructureStats(entity.structureType, entity.tier ?? 1, balance).hp
+                  : this.supplyStatsOf(entity).hp;
         const hp = entity.hp ?? max;
         return { hp, max: Math.max(max, hp) };
     }
@@ -1022,8 +1158,16 @@ export class HexWorld {
                 isLocationEntity(e) &&
                 !!this.locationEconomy(e.id)?.installations.some((i) => yards.includes(i.type))
         );
+        const structures = this.ownStructuresAt(entity.q, entity.r).filter((s) => !s.constructing);
+        const structureBalance = (s: SpaceStructureEntity) =>
+            balance.spaceStructures?.[s.structureType];
         const context = {
             atOwnedShipyard,
+            atSpaceDock: structures.some((s) => !!structureBalance(s)?.docksShips),
+            structureBonus: structures.reduce(
+                (sum, s) => sum + (structureBalance(s)?.repairBonus ?? 0),
+                0
+            ),
             carried: entity.kind === "ship" && !!entity.carriedBy,
             needsDock: entity.kind === "ship" && !balance.ships[entity.shipType].repairsInSpace
         };
@@ -1044,6 +1188,69 @@ export class HexWorld {
         return this.balance
             ? supplyShipStats(this.balance, techs)
             : { hp: 0, defence: 0, evasion: 0, attack: 0 };
+    }
+
+    /** Space structure (or construction site) on `hex`; a hex holds at most one. */
+    structureAt(q: number, r: number): SpaceStructureEntity | undefined {
+        return this.entitiesAt(q, r).find(
+            (e): e is SpaceStructureEntity => e.kind === "space_structure"
+        );
+    }
+
+    /** Our space structures and construction sites on `hex`. */
+    ownStructuresAt(q: number, r: number): SpaceStructureEntity[] {
+        return this.entitiesAt(q, r).filter(
+            (e): e is SpaceStructureEntity =>
+                e.kind === "space_structure" && e.sideId === this.sideId
+        );
+    }
+
+    /** Whether one of our Builders (not aboard a carrier) is on `hex`. */
+    hasOwnBuilderAt(q: number, r: number): boolean {
+        const balance = this.balance;
+        return this.ownShipsAt(q, r).some((s) => !!balance?.ships[s.shipType]?.canConstruct);
+    }
+
+    /** Our completed Stargate on `ship`'s hex, if any. */
+    stargateUnder(ship: ShipEntity): SpaceStructureEntity | undefined {
+        if (!this.sideId) return undefined;
+        return friendlyGates(this.entitiesAt(ship.q, ship.r), this.sideId)[0];
+    }
+
+    /**
+     * Our other completed Stargates `ship` could travel to from the gate on its hex, nearest
+     * first; empty when it isn't on one.
+     */
+    stargateDestinations(ship: ShipEntity): SpaceStructureEntity[] {
+        const sideId = this.sideId;
+        const here = this.stargateUnder(ship);
+        if (!sideId || !here) return [];
+        const gates: SpaceStructureEntity[] = [];
+        for (const tile of this._tiles.values()) {
+            gates.push(...friendlyGates(tile.entities, sideId).filter((g) => g.id !== here.id));
+        }
+        return gates.sort((a, b) => hexDistance(ship, a) - hexDistance(ship, b));
+    }
+
+    /** Selected ship waiting for a Stargate destination click. */
+    get stargateTargeting(): ShipEntity | undefined {
+        const ship = this.selectedShip;
+        return ship && ship.id === this.stargateTargetingId ? ship : undefined;
+    }
+
+    /** Select `shipId` and make the next command click pick the Stargate it travels to. */
+    startStargateTargeting(shipId: EntityId) {
+        this.selectShip(shipId);
+        if (this.stargateTargetingId === shipId) return;
+        this.stargateTargetingId = shipId;
+        this.hyperjumpTargetingId = null;
+        this._notify();
+    }
+
+    cancelStargateTargeting() {
+        if (!this.stargateTargetingId) return;
+        this.stargateTargetingId = null;
+        this._notify();
     }
 
     /** Our ships on `hex` that can colonise. */
@@ -1177,6 +1384,7 @@ export class HexWorld {
         this.selectShip(shipId);
         if (this.hyperjumpTargetingId === shipId) return;
         this.hyperjumpTargetingId = shipId;
+        this.stargateTargetingId = null;
         this._notify();
     }
 
@@ -1203,6 +1411,7 @@ export class HexWorld {
             this.selectedShipId = null;
             this.inspectedEntityId = null;
             this.hyperjumpTargetingId = null;
+            this.stargateTargetingId = null;
             this._notify();
             return;
         }
@@ -1210,6 +1419,7 @@ export class HexWorld {
         this.selectedShipId = shipId;
         this.inspectedEntityId = null;
         this.hyperjumpTargetingId = null;
+        this.stargateTargetingId = null;
         this._notify();
     }
 
@@ -1224,6 +1434,7 @@ export class HexWorld {
         this.inspectedEntityId = entityId;
         this.selectedShipId = null;
         this.hyperjumpTargetingId = null;
+        this.stargateTargetingId = null;
         this._notify();
     }
 
@@ -1410,6 +1621,9 @@ export class HexWorld {
         if (this.hyperjumpTargetingId) {
             return this._targetingClick(hex);
         }
+        if (this.stargateTargetingId) {
+            return this._stargateClick(hex);
+        }
         const ship = this.selectedShip;
         if (!ship || !hex || (hex.q === ship.q && hex.r === ship.r)) {
             return { type: "none" };
@@ -1461,13 +1675,44 @@ export class HexWorld {
         return { type: "hyperjump", shipId: ship.id, target: { q: hex.q, r: hex.r } };
     }
 
+    /** While picking a Stargate destination, a command click on another of our gates sends it. */
+    private _stargateClick(hex: Axial | null): HexClickAction {
+        const ship = this.stargateTargeting;
+        if (!ship) {
+            this.cancelStargateTargeting();
+            return { type: "none" };
+        }
+        if (!hex) return { type: "none" };
+        const check = canEnterStargate(ship, this.stargateUnder(ship));
+        if (!check.ok) return { type: "rejected", reason: check.reason };
+        const gate = this.stargateDestinations(ship).find((g) => g.q === hex.q && g.r === hex.r);
+        if (!gate) {
+            return {
+                type: "rejected",
+                reason:
+                    hex.q === ship.q && hex.r === ship.r
+                        ? "Pick a Stargate other than the one the ship is on"
+                        : "Pick one of your completed Stargates"
+            };
+        }
+        this.stargateTargetingId = null;
+        this._notify();
+        return { type: "stargate", shipId: ship.id, gateId: gate.id };
+    }
+
     /**
-     * Entities on a hex in click-cycle order: our ships, then locations, then the rest.
-     * Ships aboard carriers are left out.
+     * Entities on a hex in click-cycle order: our ships, then locations, then space structures,
+     * then the rest. Ships aboard carriers are left out.
      */
     clickCycle(entities: EntitySummary[]): EntitySummary[] {
         const rank = (e: EntitySummary) =>
-            e.kind === "ship" && e.sideId === this.sideId ? 0 : isBuildSite(e) ? 1 : 2;
+            e.kind === "ship" && e.sideId === this.sideId
+                ? 0
+                : isBuildSite(e)
+                  ? 1
+                  : e.kind === "space_structure"
+                    ? 2
+                    : 3;
         return entities
             .filter((e) => !isCarried(e))
             .sort(
@@ -1478,8 +1723,8 @@ export class HexWorld {
     }
 
     /**
-     * Select our ships, inspect anything else. Our own locations open their page only
-     * when `openLocation` is set, so cycling onto one doesn't cover the map.
+     * Select our ships, inspect anything else. Our own locations and space docks open their
+     * page only when `openLocation` is set, so cycling onto one doesn't cover the map.
      */
     private _pick(entity: EntitySummary, openLocation: boolean): HexClickAction {
         if (entity.kind === "ship" && entity.sideId === this.sideId) {
@@ -1487,7 +1732,12 @@ export class HexWorld {
             return { type: "select", shipId: entity.id };
         }
         this.inspectEntity(entity.id);
-        if (openLocation && isBuildSite(entity) && entity.sideId === this.sideId) {
+        if (
+            openLocation &&
+            hasBuildPage(entity, this.balance) &&
+            "sideId" in entity &&
+            entity.sideId === this.sideId
+        ) {
             return { type: "open-location", locationId: entity.id };
         }
         return { type: "inspect", entityId: entity.id };
@@ -1498,6 +1748,7 @@ export class HexWorld {
         this.selectedShipId = null;
         this.inspectedEntityId = null;
         this.hyperjumpTargetingId = null;
+        this.stargateTargetingId = null;
         this._notify();
         return { type: "deselect" };
     }
@@ -1584,6 +1835,9 @@ export class HexWorld {
         }
         if (this.hyperjumpTargetingId && this.hyperjumpTargetingId !== this.selectedShipId) {
             this.hyperjumpTargetingId = null;
+        }
+        if (this.stargateTargetingId && this.stargateTargetingId !== this.selectedShipId) {
+            this.stargateTargetingId = null;
         }
         if (this.inspectedEntityId) {
             const entity = this.findEntityById(this.inspectedEntityId);
@@ -1690,6 +1944,7 @@ export class HexWorld {
         this._drawDeparting(context, canvas, now, size);
         const toScreen = (p: Pixel) => this.worldToScreen(p, canvas);
         this._jumpFlashes.render(context, now, toScreen, this.camera.zoom);
+        this._stargateEffects.render(context, now, toScreen, this.camera.zoom);
         this._explosions.render(context, now, toScreen, this.camera.zoom);
         this._combatEffects.render(context, now, toScreen, this.camera.zoom);
 
@@ -1736,8 +1991,8 @@ export class HexWorld {
         if (carried) this._drawHangarBadge(ctx, center, size, carried, entity.sideId);
     }
 
-    /** Thin hull bar under a damaged ship, or under the selected / inspected one. */
-    private _drawHpBar(ctx: DrawCtx, center: Pixel, size: number, entity: MobileEntity) {
+    /** Thin hull bar under a damaged ship or structure, or under the selected / inspected one. */
+    private _drawHpBar(ctx: DrawCtx, center: Pixel, size: number, entity: HullEntity) {
         if (size < 14) return;
         const hp = this.hpOf(entity);
         if (!hp) return;
@@ -1821,8 +2076,10 @@ export class HexWorld {
 
     /** Jumping ships shrink away at their origin while the implosion plays. */
     private _drawDeparting(ctx: DrawCtx, canvas: HTMLCanvasElement, now: number, size: number) {
-        this._departing = this._departing.filter(({ entity, pose, departAt, arriveAt }) => {
+        this._departing = this._departing.filter((departing) => {
+            const { entity, departAt, arriveAt, approach } = departing;
             if (now >= arriveAt) return false;
+            const pose = approach && now < departAt ? approach.poseAt(now) : departing.pose;
             const t = Math.max(0, (now - departAt) / (arriveAt - departAt));
             const center = this.worldToScreen(pose, canvas);
             if (entity.kind === "ship" && t === 0) {
@@ -1889,6 +2146,9 @@ export class HexWorld {
         for (const entity of tile.entities) {
             if (!isMobile(entity)) {
                 drawEntityPlaceholder(ctx, center, size, entity, this.balance, fullColour);
+                if (entity.kind === "space_structure" && fullColour && !entity.constructing) {
+                    this._drawHpBar(ctx, { x: center.x, y: center.y + size * 0.12 }, size, entity);
+                }
                 continue;
             }
             if (isCarried(entity)) continue;
@@ -2085,6 +2345,19 @@ export class HexWorld {
         const size = this.hexSize * this.camera.zoom;
         const onShip = hex.q === ship.q && hex.r === ship.r;
         if (onShip) return;
+        if (this.stargateTargeting) {
+            const gate = this.stargateDestinations(ship).some(
+                (g) => g.q === hex.q && g.r === hex.r
+            );
+            ctx.save();
+            ctx.strokeStyle = gate ? "rgba(140, 200, 255, 0.95)" : "rgba(255, 107, 138, 0.6)";
+            ctx.lineWidth = Math.max(1, size * (gate ? 0.06 : 0.04));
+            ctx.setLineDash(gate ? [] : [size * 0.1, size * 0.08]);
+            this._hexPath(ctx, this._hexToScreen(hex, canvas), size * 0.85);
+            ctx.stroke();
+            ctx.restore();
+            return;
+        }
         const outOfRange = !!this.hyperjumpTargeting && !this.inJumpRange(ship, hex);
         if (!this.isExplored(hex) || outOfRange) {
             ctx.save();
@@ -2177,11 +2450,108 @@ export class HexWorld {
         ctx.restore();
     }
 
+    /**
+     * Dashed outline of every hex within `radius` of the structure: red for its fire radius,
+     * blue for sensor vision, faded by `strength` (0-1).
+     */
+    private _drawStructureRange(
+        ctx: DrawCtx,
+        canvas: HTMLCanvasElement,
+        structure: SpaceStructureEntity,
+        strength: number
+    ) {
+        const range = structureRange(structure, this.balance);
+        if (!range) return;
+        const size = this.hexSize * this.camera.zoom;
+        const colour = range.kind === "fire" ? "255, 120, 100" : "127, 200, 255";
+        const directions: Axial[] = [
+            { q: 1, r: 0 },
+            { q: 1, r: -1 },
+            { q: 0, r: -1 },
+            { q: -1, r: 0 },
+            { q: -1, r: 1 },
+            { q: 0, r: 1 }
+        ];
+        ctx.save();
+        if (range.kind === "fire") {
+            ctx.fillStyle = `rgba(${colour}, ${0.08 * strength})`;
+        }
+        ctx.strokeStyle = `rgba(${colour}, ${0.75 * strength})`;
+        ctx.lineWidth = Math.max(1, size * 0.04);
+        ctx.setLineDash([size * 0.18, size * 0.12]);
+        const edges = new Path2D();
+        for (let dq = -range.radius; dq <= range.radius; dq++) {
+            const minDr = Math.max(-range.radius, -dq - range.radius);
+            const maxDr = Math.min(range.radius, -dq + range.radius);
+            for (let dr = minDr; dr <= maxDr; dr++) {
+                const hex = { q: structure.q + dq, r: structure.r + dr };
+                const center = this._hexToScreen(hex, canvas);
+                if (range.kind === "fire") {
+                    this._hexPath(ctx, center, size);
+                    ctx.fill();
+                }
+                for (const d of directions) {
+                    const next = { q: hex.q + d.q, r: hex.r + d.r };
+                    if (hexDistance(structure, next) <= range.radius) continue;
+                    // The shared edge is perpendicular to the line between the two centres.
+                    const other = this._hexToScreen(next, canvas);
+                    const mx = (center.x + other.x) / 2;
+                    const my = (center.y + other.y) / 2;
+                    const len = Math.hypot(other.x - center.x, other.y - center.y) || 1;
+                    const px = (-(other.y - center.y) / len) * (size / 2);
+                    const py = ((other.x - center.x) / len) * (size / 2);
+                    edges.moveTo(mx - px, my - py);
+                    edges.lineTo(mx + px, my + py);
+                }
+            }
+        }
+        ctx.stroke(edges);
+        ctx.restore();
+    }
+
+    /** Pulsing rings on the Stargates a targeting ship can travel to. */
+    private _drawStargateTargets(ctx: DrawCtx, canvas: HTMLCanvasElement, ship: ShipEntity) {
+        const size = this.hexSize * this.camera.zoom;
+        const pulse = 0.5 + 0.5 * Math.sin(this._frameNow / 220);
+        ctx.save();
+        ctx.fillStyle = `rgba(90, 170, 255, ${0.12 + 0.1 * pulse})`;
+        ctx.strokeStyle = `rgba(140, 200, 255, ${0.55 + 0.4 * pulse})`;
+        ctx.lineWidth = Math.max(1.5, size * 0.05);
+        const from = this._shipScreenPos(ship, canvas);
+        for (const gate of this.stargateDestinations(ship)) {
+            const center = this._hexToScreen(gate, canvas);
+            this._hexPath(ctx, center, size * 0.92);
+            ctx.fill();
+            ctx.stroke();
+            ctx.save();
+            ctx.setLineDash([size * 0.1, size * 0.14]);
+            ctx.lineWidth = Math.max(1, size * 0.025);
+            ctx.globalAlpha = 0.5;
+            ctx.beginPath();
+            ctx.moveTo(from.x, from.y);
+            ctx.lineTo(center.x, center.y);
+            ctx.stroke();
+            ctx.restore();
+        }
+        ctx.restore();
+    }
+
     private _drawSelection(ctx: DrawCtx, canvas: HTMLCanvasElement) {
         this._drawSupplyRoute(ctx, canvas);
+        const inspected = this.inspectedEntityId
+            ? this.findEntity(this.inspectedEntityId, "space_structure")
+            : undefined;
+        if (inspected) this._drawStructureRange(ctx, canvas, inspected, 1);
+        const hovered = this.hoveredHex
+            ? this.structureAt(this.hoveredHex.q, this.hoveredHex.r)
+            : undefined;
+        if (hovered && hovered.id !== inspected?.id) {
+            this._drawStructureRange(ctx, canvas, hovered, 0.45);
+        }
         this._drawInspected(ctx, canvas);
         const ship = this.selectedShip;
-        if (ship && !this.hyperjumpTargeting) {
+        if (this.stargateTargeting) this._drawStargateTargets(ctx, canvas, this.stargateTargeting);
+        if (ship && !this.hyperjumpTargeting && !this.stargateTargeting) {
             const size = this.hexSize * this.camera.zoom;
             ctx.save();
             ctx.fillStyle = "rgba(92, 255, 176, 0.1)";
@@ -2435,6 +2805,29 @@ function drawEntityPlaceholder(
             );
             break;
         }
+        case "space_structure": {
+            const colour = sideColour(entity.sideId, "#d0d0d0");
+            const radius = hexSize * 0.42;
+            ctx.translate(center.x, center.y);
+            if (entity.constructing) {
+                ctx.globalAlpha = alpha * 0.6;
+                drawScaffold(ctx, radius, hexSize, colour);
+            }
+            const sprite =
+                zoomedHexSize >= SHIP_SPRITE_MIN_HEX_SIZE && structureSprite(entity.structureType);
+            if (sprite) {
+                const w = sprite.aspect >= 1 ? radius * 2 : radius * 2 * sprite.aspect;
+                const h = sprite.aspect >= 1 ? (radius * 2) / sprite.aspect : radius * 2;
+                ctx.shadowColor = colour;
+                ctx.shadowBlur = Math.max(3, hexSize * 0.12);
+                ctx.drawImage(sprite.image, -w / 2, -h / 2, w, h);
+                break;
+            }
+            drawStructureIcon(ctx, entity.structureType, radius, hexSize, colour, {
+                scaffold: !!entity.constructing
+            });
+            break;
+        }
         default: {
             const unknown: never = entity;
             void unknown;
@@ -2462,6 +2855,170 @@ function drawShipSprite(
     ctx.shadowColor = colour;
     ctx.shadowBlur = Math.max(3, hexSize * 0.12);
     ctx.drawImage(sprite.image, -w / 2, -h / 2, w, h);
+}
+
+/** Dashed square frame with cross braces behind a structure under construction; at origin. */
+function drawScaffold(ctx: DrawCtx, radius: number, hexSize: number, colour: string) {
+    const r = radius * 1.05;
+    ctx.save();
+    ctx.strokeStyle = colour;
+    ctx.lineWidth = Math.max(0.75, hexSize * 0.02);
+    ctx.setLineDash([Math.max(2, r * 0.18), Math.max(2, r * 0.12)]);
+    ctx.strokeRect(-r, -r, r * 2, r * 2);
+    ctx.beginPath();
+    ctx.moveTo(-r, -r);
+    ctx.lineTo(r, r);
+    ctx.moveTo(r, -r);
+    ctx.lineTo(-r, r);
+    ctx.stroke();
+    ctx.restore();
+}
+
+/**
+ * Vector picture of a space structure in the side colour, centred on the origin (context
+ * already translated). Construction sites draw dashed, unfilled outlines.
+ */
+function drawStructureIcon(
+    ctx: DrawCtx,
+    type: SpaceStructureType,
+    radius: number,
+    hexSize: number,
+    colour: string,
+    { scaffold }: { scaffold: boolean }
+) {
+    const lineWidth = Math.max(1, hexSize * 0.035);
+    ctx.strokeStyle = colour;
+    ctx.fillStyle = scaffold ? "rgba(0, 0, 0, 0)" : "rgba(8, 14, 28, 0.85)";
+    ctx.lineWidth = lineWidth;
+    ctx.lineCap = "round";
+    if (scaffold) ctx.setLineDash([Math.max(2, radius * 0.16), Math.max(2, radius * 0.12)]);
+    const fillStroke = () => {
+        ctx.fill();
+        ctx.stroke();
+    };
+    switch (type) {
+        case "sensor_array": {
+            // Dish on a mast, with signal arcs fanning out to the upper right.
+            ctx.beginPath();
+            ctx.moveTo(-radius * 0.15, radius * 0.75);
+            ctx.lineTo(-radius * 0.15, radius * 0.1);
+            ctx.moveTo(-radius * 0.55, radius * 0.75);
+            ctx.lineTo(radius * 0.25, radius * 0.75);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.ellipse(-radius * 0.15, 0, radius * 0.55, radius * 0.28, -Math.PI / 4, 0, Math.PI);
+            ctx.closePath();
+            fillStroke();
+            for (let i = 1; i <= 3; i++) {
+                ctx.globalAlpha *= 0.85;
+                ctx.beginPath();
+                ctx.arc(
+                    radius * 0.05,
+                    -radius * 0.2,
+                    radius * (0.3 + i * 0.22),
+                    -Math.PI * 0.45,
+                    -Math.PI * 0.05
+                );
+                ctx.stroke();
+            }
+            break;
+        }
+        case "space_station": {
+            // Ring with spokes to a central hub.
+            ctx.beginPath();
+            ctx.arc(0, 0, radius * 0.85, 0, Math.PI * 2);
+            fillStroke();
+            ctx.beginPath();
+            for (let i = 0; i < 4; i++) {
+                const a = Math.PI / 4 + (i * Math.PI) / 2;
+                ctx.moveTo(Math.cos(a) * radius * 0.28, Math.sin(a) * radius * 0.28);
+                ctx.lineTo(Math.cos(a) * radius * 0.85, Math.sin(a) * radius * 0.85);
+            }
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.arc(0, 0, radius * 0.28, 0, Math.PI * 2);
+            ctx.fillStyle = scaffold ? "rgba(0, 0, 0, 0)" : colour;
+            fillStroke();
+            break;
+        }
+        case "missile_battery": {
+            // Small hexagonal platform with launcher ticks on every face.
+            ctx.beginPath();
+            for (let i = 0; i < 6; i++) {
+                const a = Math.PI / 6 + (i * Math.PI) / 3;
+                const x = Math.cos(a) * radius * 0.55;
+                const y = Math.sin(a) * radius * 0.55;
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.closePath();
+            fillStroke();
+            ctx.beginPath();
+            for (let i = 0; i < 6; i++) {
+                const a = (i * Math.PI) / 3;
+                ctx.moveTo(Math.cos(a) * radius * 0.6, Math.sin(a) * radius * 0.6);
+                ctx.lineTo(Math.cos(a) * radius * 0.95, Math.sin(a) * radius * 0.95);
+            }
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.arc(0, 0, radius * 0.16, 0, Math.PI * 2);
+            ctx.fillStyle = scaffold ? "rgba(0, 0, 0, 0)" : colour;
+            fillStroke();
+            break;
+        }
+        case "space_dock": {
+            // Open frame of two facing brackets with a berth line between them.
+            const w = radius * 0.9;
+            const h = radius * 0.65;
+            const lip = radius * 0.35;
+            ctx.fillRect(-w, -h, w * 2, h * 2);
+            ctx.beginPath();
+            ctx.moveTo(-w + lip, -h);
+            ctx.lineTo(-w, -h);
+            ctx.lineTo(-w, h);
+            ctx.lineTo(-w + lip, h);
+            ctx.moveTo(w - lip, -h);
+            ctx.lineTo(w, -h);
+            ctx.lineTo(w, h);
+            ctx.lineTo(w - lip, h);
+            ctx.stroke();
+            ctx.save();
+            ctx.setLineDash([Math.max(1.5, radius * 0.12), Math.max(1.5, radius * 0.1)]);
+            ctx.lineWidth = lineWidth * 0.7;
+            ctx.beginPath();
+            ctx.moveTo(-w * 0.6, 0);
+            ctx.lineTo(w * 0.6, 0);
+            ctx.stroke();
+            ctx.restore();
+            break;
+        }
+        case "stargate": {
+            // Thick ring with chevrons around a blue event horizon.
+            if (!scaffold) {
+                const g = ctx.createRadialGradient(0, 0, 0, 0, 0, radius * 0.7);
+                g.addColorStop(0, "rgba(200, 230, 255, 0.55)");
+                g.addColorStop(1, "rgba(90, 170, 255, 0.15)");
+                ctx.fillStyle = g;
+                ctx.beginPath();
+                ctx.arc(0, 0, radius * 0.7, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            ctx.lineWidth = Math.max(1.5, radius * 0.2);
+            ctx.beginPath();
+            ctx.arc(0, 0, radius * 0.8, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.fillStyle = scaffold ? "rgba(0, 0, 0, 0)" : "#e8eefc";
+            for (let i = 0; i < 9; i++) {
+                const a = -Math.PI / 2 + (i * Math.PI * 2) / 9;
+                const x = Math.cos(a) * radius * 0.8;
+                const y = Math.sin(a) * radius * 0.8;
+                ctx.beginPath();
+                ctx.arc(x, y, Math.max(0.75, radius * 0.07), 0, Math.PI * 2);
+                ctx.fill();
+            }
+            break;
+        }
+    }
 }
 
 /** Boxy freighter: cab in the side colour towing two cargo pods; nose along `heading`. */

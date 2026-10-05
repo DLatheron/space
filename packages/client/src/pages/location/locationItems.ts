@@ -11,6 +11,9 @@ import {
     SHIP_TYPE_INFO,
     shipStats,
     ShipType,
+    SPACE_STRUCTURE_INFO,
+    spaceStructureName,
+    spaceStructureStats,
     structureCapBonus,
     structureDef,
     STRUCTURE_INFO,
@@ -28,7 +31,8 @@ import {
     type GroundUnit,
     type LocationEconomy,
     type Resources,
-    type ShipClass
+    type ShipClass,
+    type SpaceStructureType
 } from "@space/shared-data";
 import { formatNumber, RESOURCE_LABELS, RESOURCE_SHORT_LABELS } from "../../components/format.js";
 
@@ -72,6 +76,8 @@ export function itemKey(item: BuildItem): string {
     switch (item.kind) {
         case "structure":
             return `structure:${item.structureType}`;
+        case "spaceStructure":
+            return `spaceStructure:${item.structureType}`;
         case "ship":
             return `ship:${item.shipType}`;
         case "groundUnit":
@@ -143,10 +149,33 @@ export function itemDescription(item: BuildItem, balance: EconomyBalance): strin
             return groundUnitDef(item.unitType, balance).description;
         case "research":
             return TECHS[item.techId].description;
+        case "spaceStructure":
+            return SPACE_STRUCTURE_INFO[item.structureType].description;
         case "ship":
         case "enhancement":
             return undefined;
     }
+}
+
+/** Tier-scaled combat, vision and support stats of a space structure, as short chips. */
+export function spaceStructureSummary(
+    type: SpaceStructureType,
+    tier: number,
+    balance: EconomyBalance
+): string[] {
+    const def = balance.spaceStructures[type];
+    const stats = spaceStructureStats(type, tier, balance);
+    const chips = [`${formatNumber(stats.hp)} HP`];
+    if (stats.attack > 0) chips.push(`Attack ${stats.attack}`);
+    chips.push(`Defence ${stats.defence}`);
+    if (stats.fireRadius > 0) {
+        chips.push(`Fires ${stats.fireRadius} hex${stats.fireRadius === 1 ? "" : "es"}`);
+    }
+    chips.push(`Vision ${stats.visionRange}`);
+    if (def.repairBonus > 0) chips.push(`+${Math.round(def.repairBonus * 100)}% repair`);
+    if (def.shipSlots > 0)
+        chips.push(`Builds ${def.shipSlots} ship${def.shipSlots === 1 ? "" : "s"}`);
+    return chips;
 }
 
 /** Output, stats and footprint of a new build, as short chips. */
@@ -198,6 +227,8 @@ export function itemStats(item: BuildItem, balance: EconomyBalance): string[] {
             const def = groundUnitDef(item.unitType, balance);
             return [`Attack ${def.attack}`, `Defence ${def.defence}`, `${def.hp} HP`];
         }
+        case "spaceStructure":
+            return spaceStructureSummary(item.structureType, 1, balance);
         case "research":
         case "enhancement":
             return [];
@@ -265,6 +296,8 @@ export function targetTypeName(target: EnhancementTarget): string {
             return SHIP_TYPE_INFO[target.shipType].name;
         case "groundUnit":
             return GROUND_UNIT_TYPE_INFO[target.unitType].name;
+        case "spaceStructure":
+            return spaceStructureName(target.structureType);
     }
 }
 
@@ -314,6 +347,21 @@ export function tierStats(
             return [
                 { label: "Attack", value: stats.attack, text: `${stats.attack}` },
                 { label: "Defence", value: stats.defence, text: `${stats.defence}` }
+            ];
+        }
+        case "spaceStructure": {
+            const stats = spaceStructureStats(target.structureType, tier, balance);
+            return [
+                { label: "Hull", value: stats.hp, text: `${formatNumber(stats.hp)} HP` },
+                ...(stats.attack > 0
+                    ? [{ label: "Attack", value: stats.attack, text: `${stats.attack}` }]
+                    : []),
+                { label: "Defence", value: stats.defence, text: `${stats.defence}` },
+                {
+                    label: "Vision",
+                    value: stats.visionRange,
+                    text: `${stats.visionRange} hexes`
+                }
             ];
         }
     }

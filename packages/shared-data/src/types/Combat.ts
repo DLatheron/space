@@ -1,7 +1,14 @@
 import { z } from "zod";
 import type { EconomyBalance, StructureType } from "./Economy.js";
 import { GroundUnitType } from "./GroundUnitTypes.js";
-import { AxialCoord, EnhancementTier, EntityId, ShipType, SideId } from "./PrimitiveTypes.js";
+import {
+    AxialCoord,
+    EnhancementTier,
+    EntityId,
+    ShipType,
+    SideId,
+    SpaceStructureType
+} from "./PrimitiveTypes.js";
 import { Resources } from "./Resources.js";
 import type { TechId } from "./Tech.js";
 
@@ -136,13 +143,25 @@ export type RepairContext = {
     atOwnedShipyard?: boolean;
     /** Aboard a carrier. */
     carried?: boolean;
-    /** Repairs only aboard a carrier or at an owned shipyard (see `ShipBalance.repairsInSpace`). */
+    /** On the hex of an own completed space structure that docks ships (a Space Dock). */
+    atSpaceDock?: boolean;
+    /** Repair fraction added by own completed space structures on the hex (see `repairBonus`). */
+    structureBonus?: number;
+    /**
+     * Repairs only aboard a carrier, at an owned shipyard or at a Space Dock (see
+     * `ShipBalance.repairsInSpace`).
+     */
     needsDock?: boolean;
 };
 
 /** Whether a vessel repairing in `context` regains hp at all (see `RepairContext.needsDock`). */
 export function canRepairIn(context: RepairContext): boolean {
-    return !context.needsDock || !!context.carried || !!context.atOwnedShipyard;
+    return (
+        !context.needsDock ||
+        !!context.carried ||
+        !!context.atOwnedShipyard ||
+        !!context.atSpaceDock
+    );
 }
 
 /**
@@ -174,6 +193,7 @@ export function shipRepairPerTurn(
     for (const tech of techs) fraction += bonuses[tech] ?? 0;
     if (context.atOwnedShipyard) fraction += repair.atOwnedShipyardBonus;
     if (context.carried) fraction += repair.carriedBonus;
+    fraction += context.structureBonus ?? 0;
     const amount = Math.max(repair.minPerTurn, Math.round(maxHp * fraction));
     return Math.min(amount, maxHp - hp);
 }
@@ -327,9 +347,17 @@ export type CombatKind = z.infer<typeof CombatKind>;
  * `move`: a ship's manual move ran into enemies; `ambush`: a supply ship stepped towards
  * enemy warships it didn't know about and they attacked it; `hyperjump`: a ship landed among
  * enemies; `invasion`: ground units landed on a location; `bombardment`: ships in orbit fired
- * on a location's garrison and installations.
+ * on a location's garrison and installations; `ranged`: an armed space structure fired at
+ * enemy ships within range at end of turn.
  */
-export const CombatCause = z.enum(["move", "ambush", "hyperjump", "invasion", "bombardment"]);
+export const CombatCause = z.enum([
+    "move",
+    "ambush",
+    "hyperjump",
+    "invasion",
+    "bombardment",
+    "ranged"
+]);
 export type CombatCause = z.infer<typeof CombatCause>;
 
 export const CombatOutcome = z.enum(["attacker_won", "attacker_destroyed", "inconclusive"]);
@@ -337,16 +365,17 @@ export type CombatOutcome = z.infer<typeof CombatOutcome>;
 
 export const CombatParticipant = z.object({
     /**
-     * Entity id for ships and supply ships, unit id for ground units, installation id for
-     * defensive installations.
+     * Entity id for ships, supply ships and space structures, unit id for ground units,
+     * installation id for defensive installations.
      */
     id: EntityId,
-    kind: z.enum(["ship", "supply_ship", "ground_unit", "installation"]),
+    kind: z.enum(["ship", "supply_ship", "ground_unit", "installation", "space_structure"]),
     sideId: SideId,
     role: z.enum(["attacker", "defender"]),
     shipType: ShipType.optional(),
     unitType: GroundUnitType.optional(),
     structureType: DefenceStructureType.optional(),
+    spaceStructureType: SpaceStructureType.optional(),
     tier: EnhancementTier.optional(),
     /** 0 for Defensive Batteries, which can't be damaged. */
     maxHp: z.number().min(0),
@@ -396,6 +425,8 @@ export const CombatResult = z.object({
      * destroyed in space combat.
      */
     destroyedInstallationIds: z.array(EntityId).optional(),
+    /** Space structures destroyed in space combat. */
+    destroyedStructureIds: z.array(EntityId).optional(),
     /** Bombardment of a location with a Shield Generator: shield hp before and after. */
     shieldBefore: z.number().min(0).optional(),
     shieldAfter: z.number().min(0).optional(),
